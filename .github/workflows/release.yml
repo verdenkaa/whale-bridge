@@ -30,7 +30,7 @@ jobs:
         run: npm test
 
       - name: Build Windows installer and portable
-        run: npm run build:win
+        run: npm run build:win -- --publish never
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
