@@ -1,0 +1,63 @@
+{
+  "name": "ai-workspace",
+  "version": "0.1.0",
+  "description": "Free and open-source DeepSeek companion workspace for local project files",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.js",
+    "build:win": "electron-builder --win nsis portable --x64",
+    "build:win:installer": "electron-builder --win nsis --x64",
+    "build:win:portable": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "productName": "Whale Bridge",
+  "build": {
+    "appId": "com.whalebridge.app",
+    "productName": "Whale Bridge",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "**/*",
+      "!tests{,/**/*}",
+      "!*.zip",
+      "!release{,/**/*}",
+      "!README.md"
+    ],
+    "win": {
+      "icon": "assets/whale-bridge.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Whale-Bridge-${version}-Setup-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Whale Bridge"
+    },
+    "portable": {
+      "artifactName": "Whale-Bridge-${version}-Portable-${arch}.${ext}"
+    }
+  },
+  "license": "MIT"
+}
