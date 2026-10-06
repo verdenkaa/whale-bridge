@@ -87,6 +87,63 @@ test('editor-state: drift — файл изменился вне редакто�
   assert.equal(ES.isDrifted(ES.get(s, 'a.gd')), false, 'неизвестный диск не выдаём за drift');
 });
 
+test('editor-state: needsReload — чистый буфер при уехавшем диске можно перечитать', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  const f = ES.get(s, 'a.gd');
+
+  // диск не менялся — перечитывать нечего
+  assert.equal(ES.needsReload(f), false);
+  assert.equal(ES.describe(s, 'a.gd').needsReload, false);
+
+  // файл изменили вне редактора (например, откатили), буфер чист → перечитываем молча.
+  // Раньше здесь был тупик: редактор показывал старое, dirty=false, Ctrl+S отвечал
+  // «изменений нет», и новое содержимое не подтягивалось.
+  ES.setDiskHash(s, 'a.gd', B);
+  assert.equal(ES.isDrifted(f), true);
+  assert.equal(ES.isDirty(f), false);
+  assert.equal(ES.needsReload(f), true);
+  assert.equal(ES.describe(s, 'a.gd').needsReload, true);
+
+  // есть несохранённые правки → это конфликт, молча перечитывать нельзя
+  ES.setText(s, 'a.gd', 'мои правки\n');
+  assert.equal(ES.needsReload(f), false);
+  assert.equal(ES.describe(s, 'a.gd').saveDecision, 'conflict');
+
+  // после перечитывания буфер снова синхронен
+  ES.reload(s, 'a.gd', { content: 'с диска\n', hash: B });
+  assert.equal(ES.needsReload(f), false);
+  assert.equal(ES.isDrifted(f), false);
+  assert.equal(ES.isDirty(f), false);
+  assert.equal(ES.needsReload(null), false);
+});
+
+test('editor-state: missing — файл удалён или недоступен, это не «хэш неизвестен»', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  const f = ES.get(s, 'a.gd');
+  assert.equal(ES.isMissing(f), false);
+  assert.equal(ES.describe(s, 'a.gd').missing, false);
+
+  ES.setDiskHash(s, 'a.gd', null);
+  assert.equal(ES.isMissing(f), true);
+  assert.equal(ES.describe(s, 'a.gd').missing, true);
+  // исчезнувший файл не должен выглядеть как drift: сохранять всё равно некуда
+  assert.equal(ES.isDrifted(f), false);
+  assert.equal(ES.needsReload(f), false);
+
+  // отсутствие ключа в ответе file:hashes (например, файл другого проекта) — НЕ удаление
+  ES.setDiskHash(s, 'a.gd', A);
+  ES.setDiskHashes(s, { 'другой.gd': null });
+  assert.equal(ES.isMissing(ES.get(s, 'a.gd')), false);
+
+  // успешное перечитывание снимает missing
+  ES.setDiskHash(s, 'a.gd', null);
+  assert.equal(ES.isMissing(f), true);
+  ES.reload(s, 'a.gd', { content: 'v0\n', hash: A });
+  assert.equal(ES.isMissing(f), false);
+});
+
 test('editor-state: конфликт сохранения (§11) — уехали и буфер, и диск', () => {
   const s = ES.createState();
   ES.open(s, opened('a.gd', 'v0\n', A));

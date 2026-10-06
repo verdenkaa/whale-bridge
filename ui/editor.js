@@ -213,6 +213,10 @@
   async function savePath(p, force = false) {
     const f = ES.get(state, p);
     if (!f) return false;
+    if (ES.isMissing(f) && !force) {
+      toast('Файл удалён или недоступен на диске — сохранение невозможно.', 'err');
+      return false;
+    }
     const d = ES.describe(state, p);
     // §11: если файл изменился на диске — НЕ пишем, а спрашиваем
     if (!force && d.diskDrift) { showConflict(f, d, null); return false; }
@@ -237,8 +241,33 @@
   function saveActive() {
     if (!state.active) { toast('Нет открытого файла', 'err'); return; }
     const f = ES.active(state);
+    if (ES.isMissing(f)) {
+      toast('Файл удалён или недоступен на диске — сохранение невозможно. Закройте вкладку или восстановите файл.', 'err');
+      return;
+    }
     if (!ES.isDirty(f)) { toast('Изменений нет', 'ok'); return; }
     savePath(state.active, false);
+  }
+
+  /**
+   * Перечитывает файл БЕЗ вопроса: буфер чист, терять нечего. Курсор и прокрутку
+   * сохраняем — иначе файл «прыгал» бы при каждом внешнем изменении.
+   */
+  async function reloadSilently(p) {
+    const f = ES.get(state, p);
+    if (!f) return false;
+    const r = await call('file:read', { projectId: f.projectId, path: p });
+    if (!r || !r.ok) return false;
+    const isActive = state.active === p;
+    let vs = null;
+    if (isActive) { rememberViewState(p); vs = f.viewState; }
+    ES.reload(state, p, { content: r.content, hash: r.hash, eol: r.eol, hasBom: r.hasBom });
+    const m = models.get(p);
+    if (m && m.getValue() !== r.content) m.setValue(r.content);
+    if (isActive && editor && vs) {
+      try { editor.restoreViewState(vs); } catch { /* состояние вида не критично */ }
+    }
+    return true;
   }
 
   async function reloadFromDisk(p) {
@@ -246,10 +275,15 @@
     if (!f) return;
     const r = await call('file:read', { projectId: f.projectId, path: p });
     if (!r || !r.ok) { toast(r && r.error ? r.error : 'Не удалось перечитать файл', 'err'); return; }
+    if (state.active === p) rememberViewState(p);
+    const vs = ES.get(state, p).viewState;
     ES.reload(state, p, { content: r.content, hash: r.hash, eol: r.eol, hasBom: r.hasBom });
     const m = models.get(p);
     if (m) m.setValue(r.content);
-    if (state.active === p) await showInEditor(p);
+    if (state.active === p) {
+      await showInEditor(p);
+      if (vs) { try { editor.restoreViewState(vs); } catch { /* не критично */ } }
+    }
     renderAll();
     onDirtyChange();
     toast('Файл перечитан с диска. Ваши правки отменены.', 'ok');
@@ -344,13 +378,23 @@
     let mod = null;
     try {
       await ensureMonaco();
+      // Ширину измеряем сами и явно выбираем режим: полагаться на эвристику Monaco нельзя —
+      // панель редактора узкая, и «почти side-by-side» в ней нечитаем.
+      const avail = box.clientWidth || (els.overlay ? els.overlay.clientWidth : 0) || 0;
+      const sideBySide = avail >= 720;
       diff = monaco.editor.createDiffEditor(box, {
-        theme: 'vs-dark', readOnly: true, renderSideBySide: true, automaticLayout: true,
-        minimap: { enabled: false }, scrollBeyondLastLine: false,
+        theme: 'vs-dark', readOnly: true, renderSideBySide: sideBySide,
+        useInlineViewWhenSpaceIsLimited: true, automaticLayout: true,
+        minimap: { enabled: false }, scrollBeyondLastLine: false, diffWordWrap: 'on',
       });
       orig = monaco.editor.createModel(disk, f.language);
       mod = monaco.editor.createModel(f.text, f.language);
       diff.setModel({ original: orig, modified: mod });
+      // Раскладка считается до того, как браузер разместил оверлей, поэтому повторяем
+      // на следующем кадре и ещё раз с задержкой — иначе половина диффа остаётся за границей.
+      const relayout = () => { if (diff) { try { diff.layout(); } catch { /* уже закрыт */ } } };
+      requestAnimationFrame(relayout);
+      setTimeout(relayout, 80);
       // закрываем модели вместе с оверлеем, иначе они текут
       const prev = overlayClose;
       overlayClose = () => {
@@ -366,7 +410,7 @@
       box.replaceChildren(h('div', { class: 'ed-diff-fallback' },
         h('div', {}, h('b', {}, 'На диске:'), h('pre', { class: 'code' }, disk)),
         h('div', {}, h('b', {}, 'В буфере:'), h('pre', { class: 'code' }, f.text)),
-        h('div', { class: 'path' }, 'Monaco DiffEditor недоступен: ' + e.message)));
+        h('div', { class: 'path' }, 'Monaco DiffEditor недоступен, показан текст обеих версий: ' + e.message)));
     }
   }
 
@@ -528,7 +572,9 @@
     const f = ES.active(state);
     if (!f) { els.status.replaceChildren(h('span', { class: 'path' }, 'Файл не открыт')); return; }
     const d = ES.describe(state, f.path);
-    const badge = d.diskDrift
+    const badge = d.missing
+      ? h('span', { class: 'badge bad', title: 'Файл удалён или недоступен — сохранение невозможно' }, 'файл недоступен')
+      : d.diskDrift
       ? h('span', { class: 'badge bad', title: 'Файл изменён вне редактора — при сохранении будет предложено разрешить конфликт' }, 'изменён на диске')
       : d.dirty
         ? h('span', { class: 'badge warn' }, 'не сохранено')
@@ -552,7 +598,14 @@
 
   // ---------- внешние события ----------
 
-  /** files:changed / focus: что сейчас на диске. Только для файлов текущего проекта. */
+  /**
+   * files:changed / focus: что сейчас на диске. Только для файлов текущего проекта.
+   *
+   * Чистый буфер при внешнем изменении перечитывается сразу — иначе редактор показывает
+   * устаревшее содержимое, dirty остаётся false, и Ctrl+S отвечает «изменений нет»:
+   * файл оказывается заблокированным, хотя на диске он другой. Грязный буфер не трогаем —
+   * это уже конфликт (§11), его разрешает пользователь.
+   */
   async function refreshDisk() {
     const files = ES.list(state).filter((f) => f.projectId === projectId);
     if (!projectId || !files.length) return;
@@ -560,17 +613,37 @@
     if (!map) return;
     const beforeDrift = new Set(ES.driftedPaths(state));
     ES.setDiskHashes(state, map);
-    const afterDrift = new Set(ES.driftedPaths(state));
+
+    const reloaded = [];
+    const goneMissing = [];
+    const conflicts = [];
+    for (const f of ES.list(state)) {
+      if (f.projectId !== projectId) continue;
+      if (ES.isMissing(f)) {
+        if (!beforeDrift.has(f.path)) goneMissing.push(f.name);
+        continue;
+      }
+      if (ES.needsReload(f)) {
+        // eslint-disable-next-line no-await-in-loop — порядок важен, файлов обычно единицы
+        if (await reloadSilently(f.path)) reloaded.push(f.name);
+      } else if (ES.isDrifted(f) && ES.isDirty(f) && !beforeDrift.has(f.path)) {
+        conflicts.push(f.name);
+      }
+    }
+
     renderTabs();
     renderStatus();
     clearTimeout(marksTimer);
     marksTimer = setTimeout(renderTree, 120);
-    // предупреждаем один раз, когда файл открытого буфера уехал из-под нас
-    for (const p of afterDrift) {
-      if (!beforeDrift.has(p) && ES.isDirty(ES.get(state, p))) {
-        toast('Файл изменён вне редактора: при сохранении потребуется разрешить конфликт', 'err');
-        break;
-      }
+
+    if (reloaded.length) {
+      toast(reloaded.length === 1
+        ? `Файл обновлён с диска: ${reloaded[0]}`
+        : `Обновлено с диска: ${reloaded.length} файла(ов)`, 'ok');
+    }
+    if (goneMissing.length) toast(`Файл удалён или недоступен: ${goneMissing.join(', ')}`, 'err');
+    if (conflicts.length) {
+      toast(`Изменён вне редактора: ${conflicts.join(', ')}. При сохранении потребуется разрешить конфликт.`, 'err');
     }
     onDirtyChange();
   }

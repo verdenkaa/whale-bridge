@@ -59,6 +59,7 @@
       diskHash: file.hash != null ? file.hash : null,
       eol: file.eol || 'lf',
       hasBom: !!file.hasBom,
+      missing: false,
       language: file.language || 'plaintext',
       viewState: null,
       openedAt: Date.now(),
@@ -94,6 +95,7 @@
     f.text = f.savedText;
     f.savedHash = hash != null ? hash : null;
     f.diskHash = f.savedHash;
+    f.missing = hash == null;
     if (eol) f.eol = eol;
     if (hasBom != null) f.hasBom = !!hasBom;
     return f;
@@ -113,17 +115,24 @@
     return f ? f.diskHash : null;
   }
 
-  /** file:hashes: обновляем, что сейчас на диске. */
+  /**
+   * file:hashes: обновляем, что сейчас на диске.
+   * hash === null означает «файл удалён или не читается» — это отдельный факт (missing),
+   * а не «хэш неизвестен»: сохранять в несуществующий файл нельзя, и молчать об этом нельзя.
+   */
   function setDiskHash(state, path, hash) {
     const f = get(state, path);
     if (!f) return null;
     f.diskHash = hash == null ? null : hash;
+    f.missing = hash == null;
     return f;
   }
 
   function setDiskHashes(state, map) {
     if (!map || typeof map !== 'object') return state;
     for (const path of state.order) {
+      // Обновляем только то, что реально пришло в ответе: иначе отсутствие ключа
+      // (например, файл из другого проекта) выглядело бы как удаление файла.
       if (Object.prototype.hasOwnProperty.call(map, path)) setDiskHash(state, path, map[path]);
     }
     return state;
@@ -138,6 +147,14 @@
 
   const isDirty = (f) => !!f && f.text !== f.savedText;
   const isDrifted = (f) => !!f && f.savedHash != null && f.diskHash != null && f.diskHash !== f.savedHash;
+  const isMissing = (f) => !!f && f.missing === true;
+
+  /**
+   * Буфер чист, а диск уехал — содержимое можно безопасно перечитать.
+   * Именно этот случай раньше приводил в тупик: редактор показывал старое, dirty был false,
+   * поэтому Ctrl+S отвечал «изменений нет», а новое содержимое не подтягивалось.
+   */
+  const needsReload = (f) => isDrifted(f) && !isDirty(f);
 
   /** Полная классификация версий файла (§37) — делегируем src/versions.js, не дублируем правила. */
   function describe(state, path) {
@@ -153,6 +170,8 @@
       ...v,
       dirty: isDirty(f),
       diskDrift: isDrifted(f),
+      missing: isMissing(f),
+      needsReload: needsReload(f),
       path: f.path,
       name: f.name,
       language: f.language,
@@ -201,7 +220,7 @@
     createState, open, get, active, list,
     setText, setSaved, reload, forceSaveBase,
     setDiskHash, setDiskHashes, setViewState,
-    isDirty, isDrifted, describe,
+    isDirty, isDrifted, isMissing, needsReload, describe,
     close, activate, activateRelative,
     hasUnsaved, dirtyPaths, driftedPaths, baseName,
   };
