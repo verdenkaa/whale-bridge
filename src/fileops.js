@@ -66,6 +66,14 @@ function encodeLike(newText, cur) {
   return Buffer.from((cur && cur.hasBom ? '\uFEFF' : '') + t, 'utf8');
 }
 
+// Хэш текста в том виде, в каком он ляжет на диск.
+// Нужен для editorHash (Stage 0, src/versions.js): Monaco хранит текст с '\n', а файл на диске
+// может быть CRLF и/или с BOM. Без приведения к байтам диска каждый CRLF-файл выглядел бы
+// «грязным» сразу после открытия. cur — результат readTextFile того же файла (или null для нового).
+function hashTextLike(newText, cur) {
+  return sha256(encodeLike(newText, cur));
+}
+
 async function listDir(rootAbs, rel) {
   let abs = path.resolve(rootAbs);
   if (rel) {
@@ -359,4 +367,4 @@ async function getTree(rootAbs) {
 
 const invalidateIndex = () => { indexCache.clear(); treeCache.clear(); };
 
-module.exports = { readTextFile, readRawFile, listDir, suggestPaths, applyChange, restore, sha256, invalidateIndex, IGNORE_DIRS, getTree };
+module.exports = { readTextFile, readRawFile, listDir, suggestPaths, applyChange, restore, sha256, invalidateIndex, IGNORE_DIRS, getTree, encodeLike, hashTextLike };

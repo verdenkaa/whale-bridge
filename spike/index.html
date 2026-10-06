@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <!--
+    Минимально необходимая политика для Monaco (ТЗ §26: «не ослаблять CSP шире необходимого»).
+    Что здесь обязательно и почему:
+      style-src 'unsafe-inline' — Monaco сам создаёт <style>-элементы (createElement("style")),
+                                  nonce/hash он им не проставляет, поэтому без 'unsafe-inline' стили не применятся.
+                                  Важно: script-src при этом остаётся строгим, 'unsafe-inline' для скриптов НЕ добавляем.
+      font-src  data:             — шрифт codicon в min-сборке инлайнится в CSS как data:font/ttf;base64.
+      img-src   data: blob:       — в CSS Monaco есть data:image/png и data:image/svg+xml.
+      worker-src 'self' blob:     — 'self' для нашего classic-воркера, blob: для штатного пути Monaco.
+      connect-src 'self'         — на случай, если AMD-загрузчик пойдёт за nls-сообщениями.
+    Стенд дополнительно слушает securitypolicyviolation и докладывает, если чего-то не хватило.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monaco spike — Whale Bridge</title>
+  <link rel="stylesheet" href="spike.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <strong>Monaco spike</strong>
+      <span id="strategy" class="pill"></span>
+      <span id="status" class="pill">запуск…</span>
+    </header>
+
+    <!-- раскладка повторяет целевую IDE (ТЗ §5), чтобы заодно проверить Monaco внутри CSS Grid
+         и геометрию #chat-slot через ResizeObserver (ТЗ §4, §28) -->
+    <main class="workspace">
+      <div id="chat-slot"></div>
+      <div class="vsplit" id="vsplit-chat"></div>
+      <section class="files-panel">
+        <h2>ФАЙЛЫ</h2>
+        <div id="files" class="tree"></div>
+      </section>
+      <div class="vsplit" id="vsplit-files"></div>
+      <section class="editor-panel">
+        <div class="tabs" id="tabs"></div>
+        <div id="editor-host"></div>
+        <div id="diff-host" class="hidden"></div>
+      </section>
+      <div class="vsplit" id="vsplit-side"></div>
+      <aside class="side-panel">
+        <h2>ПРОВЕРКИ</h2>
+        <ol id="probes"></ol>
+      </aside>
+    </main>
+
+    <footer class="bottom-panel">
+      <h2>ЖУРНАЛ</h2>
+      <pre id="log"></pre>
+    </footer>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

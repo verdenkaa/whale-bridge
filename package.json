@@ -9,7 +9,11 @@
     "test": "node --test tests/*.test.js",
     "build:win": "electron-builder --win nsis portable --x64",
     "build:win:installer": "electron-builder --win nsis --x64",
-    "build:win:portable": "electron-builder --win portable --x64"
+    "build:win:portable": "electron-builder --win portable --x64",
+    "spike": "electron spike/main.js"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.57.0"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -28,7 +32,10 @@
       "!tests{,/**/*}",
       "!*.zip",
       "!release{,/**/*}",
-      "!README.md"
+      "!README.md",
+      "!spike{,/**/*}",
+      "!node_modules/monaco-editor/{dev,esm}{,/**/*}",
+      "!node_modules/monaco-editor/{CHANGELOG.md,monaco.d.ts}"
     ],
     "win": {
       "icon": "assets/whale-bridge.ico",

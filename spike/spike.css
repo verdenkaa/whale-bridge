@@ -1,0 +1,95 @@
+/* Раскладка целевой IDE (ТЗ §5): grid + отдельные draggable-разделители.
+   Здесь она нужна не ради красоты, а чтобы Monaco проверялся в реальных условиях:
+   ненулевой размер ячейки, resize, layout() после изменения геометрии. */
+:root {
+  --bg: #12161d;
+  --panel: #171c25;
+  --line: #252c38;
+  --text: #d6dce6;
+  --muted: #8b97a8;
+  --ok: #4ec98a;
+  --bad: #e06c75;
+  --accent: #4aa3ff;
+  --files-w: 220px;
+  --side-w: 380px;
+  --chat-w: 420px;
+  --bottom-h: 190px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 13px/1.45 system-ui, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.pill {
+  padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); font-size: 12px;
+}
+.pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.bad { color: var(--bad); border-color: var(--bad); }
+
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--chat-w) 5px var(--files-w) 5px minmax(0, 1fr) 5px var(--side-w);
+}
+
+/* Сюда main-процесс физически положит WebContentsView с DeepSeek.
+   Сам элемент пустой: его задача — задать геометрию, которую renderer отдаст в main (§4). */
+#chat-slot {
+  min-width: 0; min-height: 0; overflow: hidden;
+  background: #0d1117;
+  background-image: linear-gradient(45deg, #131922 25%, transparent 25%, transparent 75%, #131922 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+
+.files-panel, .editor-panel, .side-panel { min-width: 0; min-height: 0; overflow: hidden; }
+.files-panel, .side-panel { background: var(--panel); display: flex; flex-direction: column; }
+.files-panel h2, .side-panel h2, .bottom-panel h2 {
+  margin: 0; padding: 8px 12px; font-size: 11px; letter-spacing: .08em;
+  color: var(--muted); border-bottom: 1px solid var(--line); flex: none;
+}
+
+.vsplit { cursor: col-resize; background: var(--line); }
+.vsplit:hover { background: var(--accent); }
+
+.editor-panel { display: flex; flex-direction: column; background: var(--bg); }
+.tabs { display: flex; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--line); flex: none; }
+.tab {
+  padding: 4px 10px; border: 1px solid var(--line); border-bottom: none;
+  border-radius: 5px 5px 0 0; background: var(--panel); color: var(--muted);
+}
+.tab.on { color: var(--text); background: var(--bg); border-color: var(--accent); }
+
+#editor-host, #diff-host { flex: 1 1 auto; min-height: 0; }
+.hidden { display: none !important; }
+
+#probes { margin: 0; padding: 8px 12px 12px 28px; overflow: auto; }
+#probes li { margin-bottom: 5px; color: var(--muted); }
+#probes li.ok { color: var(--ok); }
+#probes li.bad { color: var(--bad); }
+#probes li .detail { display: block; color: var(--muted); font-size: 12px; }
+
+.bottom-panel { border-top: 1px solid var(--line); background: var(--panel); height: var(--bottom-h); display: flex; flex-direction: column; }
+#log {
+  margin: 0; padding: 8px 12px; overflow: auto; flex: 1 1 auto;
+  font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--muted); white-space: pre-wrap;
+}
+
+.tree { padding: 8px 12px; overflow: auto; }
+.tree div { padding: 1px 0; color: var(--muted); }
+.tree .file { color: var(--text); }

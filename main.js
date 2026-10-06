@@ -37,6 +37,14 @@ const send = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload ?? {});
 };
 
+// Stage 0 (ТЗ §37): фиксируем, какую версию файла видела модель. ingest() синхронный,
+// поэтому печать базы — отдельный шаг. Ошибка здесь не должна ронять обработку блоков:
+// незапечатанное предложение просто останется с aiBaseHash = null («версия неизвестна»).
+const sealAiBase = (chatId) => {
+  if (!chatId || !proposals) return;
+  proposals.sealAiBase(chatId).catch((e) => console.warn('[aiBase]', e.message));
+};
+
 function layout() {
   if (!win || !chatView) return;
   const [w, h] = win.getContentSize();
@@ -80,6 +88,7 @@ async function updateChatFromUrl() {
       if (project) {
         await store.bind(currentChatId, project.id);
         pendingProjectId = null;
+        sealAiBase(currentChatId);
         send('project:auto-bound', { chatId: currentChatId, project });
       }
     }
@@ -200,7 +209,10 @@ ipcMain.on('chat:blocks', (event, payload) => {
     if (typeof b.text !== 'string' || b.text.length > 2_000_000) continue;
     clean.push({ key: b.key, text: b.text, initial: b.initial === true });
   }
-  if (clean.length) proposals.ingest(chatId.toLowerCase(), clean);
+  if (clean.length) {
+    proposals.ingest(chatId.toLowerCase(), clean);
+    sealAiBase(chatId.toLowerCase());
+  }
 });
 
 function projectOr(id) {
@@ -238,6 +250,7 @@ function registerIpc() {
     if (typeof chatId !== 'string' || !CHAT_ID_RE.test(chatId)) throw new Error('Нет идентификатора чата');
     await store.bind(chatId.toLowerCase(), projectId ? String(projectId) : null);
     if (projectId && String(projectId) === pendingProjectId) pendingProjectId = null;
+    sealAiBase(chatId.toLowerCase());
     send('projects:changed');
     proposals.onChange();
   });
@@ -288,6 +301,7 @@ function registerIpc() {
       key: 'clip-' + Date.now() + '-' + i, text: t, initial: false,
     }));
     const changed = proposals.ingest(currentChatId, blocks);
+    if (changed) sealAiBase(currentChatId);
     return changed ? { ok: true } : { ok: false, error: 'Не найдено блоков с маркером # &путь или они уже добавлены' };
   });
 

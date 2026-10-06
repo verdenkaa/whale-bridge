@@ -6,6 +6,7 @@ const { parseBlock } = require('./parser');
 const { resolveInProject, normalizeRel } = require('./paths');
 const { diffLines, diffStats, toRows } = require('./diff');
 const fileops = require('./fileops');
+const { ABSENT, classifyVersions } = require('./versions');
 const { applyEdits } = require('./patch');
 
 const MAX_BACKUPS_PER_FILE = 2;
@@ -127,6 +128,8 @@ class ProposalManager {
             incomplete: parsed.incomplete,
             contentHash: hash,
             override: same ? ex.override : null,
+            // aiBaseHash намеренно не трогаем: блок дописывается по мере стриминга,
+            // а версия файла на диске, которую видела модель, от этого не меняется.
           });
           this.hashes.add(`${chatId}:${hash}`);
           changed = true;
@@ -155,6 +158,11 @@ class ProposalManager {
         contentHash: hash,
         status: decision?.status || 'pending', // pending | applied | rejected
         historical: !!b.initial,
+        // Stage 0 (ТЗ §37): версия файла, которую видела модель. Заполняется из sealAiBase()
+        // сразу после ingest — сам ingest синхронный и диск не читает.
+        // null = «ещё не запечатано», ABSENT = «файла не существовало».
+        aiBaseHash: null,
+        aiBaseSealedAt: null,
         override: null,
         dismissed: false,
         historyId: decision?.historyId || null,
@@ -167,6 +175,44 @@ class ProposalManager {
     }
     if (changed) this.onChange();
     return changed;
+  }
+
+  /**
+   * Stage 0 (ТЗ §37): печатает aiBaseHash — версию файла на диске в момент появления
+   * предложения. ingest() синхронный и диск не читает, поэтому печать вынесена в отдельный
+   * шаг; main.js вызывает его сразу после ingest и после привязки проекта.
+   *
+   * Исторические блоки (initial: true) не печатаются намеренно: они пришли из уже открытого
+   * чата, диск с тех пор мог измениться, и честный ответ здесь — «неизвестно», а не
+   * «модель видела текущую версию».
+   *
+   * @returns {Promise<number>} сколько предложений запечатано
+   */
+  async sealAiBase(chatId) {
+    let sealed = 0;
+    for (const p of this.map.values()) {
+      if (p.chatId !== chatId || p.status !== 'pending' || p.historical) continue;
+      if (p.aiBaseHash !== null) continue;
+      const h = await this._readAiBaseHash(p);
+      if (h === undefined) continue; // проект не привязан или путь не проходит проверку — повторим позже
+      p.aiBaseHash = h;
+      p.aiBaseSealedAt = Date.now();
+      sealed++;
+    }
+    return sealed;
+  }
+
+  // undefined — «определить не удалось, попробуем позже»; ABSENT — «файла не существует»
+  async _readAiBaseHash(p) {
+    const project = this.store.getProjectForChat(p.chatId);
+    if (!project) return undefined;
+    const target = p.override || p.marker;
+    const stripped = await stripRootPrefix(project.path, target.path);
+    const r = await resolveInProject(project.path, stripped || target.path);
+    if (!r.ok) return undefined;
+    if (!r.exists || !r.isFile) return ABSENT;
+    const cur = await fileops.readRawFile(r.abs);
+    return cur.error ? undefined : cur.hash;
   }
 
   get(id) { return this.map.get(id) || null; }
@@ -185,7 +231,18 @@ class ProposalManager {
     return { history: h, project, abs: r.abs, current: cur };
   }
 
+  // Обёртка над _evaluate: добавляет версию, которую видела модель, и её сравнение с диском.
+  // Полную классификацию (aiBase/disk/saved/editor) делает renderer — только он знает буфер.
   async evaluate(p) {
+    const ev = await this._evaluate(p);
+    if (ev && ev.baseHash !== undefined && ev.aiBaseHash != null) {
+      ev.aiStale = ev.aiBaseHash !== ev.baseHash;
+      ev.versions = classifyVersions({ aiBase: ev.aiBaseHash, disk: ev.baseHash });
+    }
+    return ev;
+  }
+
+  async _evaluate(p) {
     const target = p.override || p.marker;
     const out = {
       id: p.id,
@@ -201,6 +258,7 @@ class ProposalManager {
       state: p.status,
       contentHash: p.contentHash,
       historyId: p.historyId,
+      aiBaseHash: p.aiBaseHash,
     };
     if (p.status !== 'pending') return out;
 
@@ -238,7 +296,7 @@ class ProposalManager {
       const cur = await fileops.readRawFile(r.abs);
       if (cur.error) return { ...out, state: 'unreadable', error: cur.error };
       const decoded = await fileops.readTextFile(r.abs);
-      return { ...out, state: 'move', stats: { added: 0, removed: 0 }, baseHash: cur.hash, newText: decoded.error ? null : decoded.text, encodingWarning: decoded.error || null, expectedNewHash: 'absent', needsDirs: !dest.parentExists };
+      return { ...out, state: 'move', stats: { added: 0, removed: 0 }, baseHash: cur.hash, newText: decoded.error ? null : decoded.text, encodingWarning: decoded.error || null, expectedNewHash: ABSENT, needsDirs: !dest.parentExists };
     }
 
     if (target.op === 'update') {
@@ -275,7 +333,7 @@ class ProposalManager {
       return { ...out, state: 'patch-failed', error: 'SEARCH/REPLACE нельзя использовать для нового файла — нужен полный текст файла' };
     }
     const ops = diffLines('', p.content);
-    return { ...out, state: 'create', ops, stats: diffStats(ops), baseHash: 'absent', needsDirs: !r.parentExists, newText: p.content };
+    return { ...out, state: 'create', ops, stats: diffStats(ops), baseHash: ABSENT, needsDirs: !r.parentExists, newText: p.content };
   }
 
   async list(chatId, includeHistorical) {
@@ -388,11 +446,13 @@ class ProposalManager {
       relPath: ev.relPath, op: ev.op, newRelPath: ev.toRelPath || null,
     };
     if (!res.ok) {
-      if (res.code === 'io') await this.store.addHistory({ ...base, status: 'failed', error: res.error });
+      if (res.code === 'io') await this.store.addHistory({ ...base, status: 'failed', error: res.error, source: 'ai' });
       return res;
     }
     await this.store.addHistory({
       ...base, status: 'applied', beforeHash: res.beforeHash, afterHash: res.afterHash, error: null, proposalHash: p.contentHash,
+      source: 'ai', // ТЗ §10: запись инициирована предложением модели
+      aiBaseHash: p.aiBaseHash,
     });
     await this.store.pruneFile(project.id, ev.relPath, MAX_BACKUPS_PER_FILE).catch((e) => console.error('[prune]', e));
     p.status = 'applied';
