@@ -92,7 +92,7 @@ async function setup(t) {
   return { root, data, store, project, chat, pm: new ProposalManager({ store }) };
 }
 
-test('proposal: принятое и отклонённое предложение не возвращается после нового ProposalManager', async (t) => {
+test('proposal: решения «принято/отклонено» переживают новый ProposalManager', async (t) => {
   const { root, store, chat } = await setup(t);
   await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
   const pm1 = new ProposalManager({ store });
@@ -103,6 +103,9 @@ test('proposal: принятое и отклонённое предложени�
   const applied = (await pm1.list(chat, true)).find((x) => x.status === 'pending');
   const v = await pm1.view(applied.id);
   assert.equal((await pm1.apply(applied.id, { baseHash: v.baseHash, contentHash: v.contentHash })).ok, true);
+
+  // Перезапуск: те же блоки приходят заново. Обработанные не должны снова становиться pending —
+  // иначе Diff предложил бы применить (или отклонить) то, что пользователь уже закрыл.
   const pm2 = new ProposalManager({ store });
   pm2.ingest(chat, [
     { key: 'new-reject-node', text: '# &a.py\nx = 2\n' },
@@ -110,9 +113,16 @@ test('proposal: принятое и отклонённое предложени�
     { key: 'new-pending-node', text: '# &a.py\nx = 4\n' },
   ]);
   const list = await pm2.list(chat, true);
-  assert.equal(list.length, 1);
-  assert.equal(list[0].relPath, 'a.py');
-  assert.equal(list[0].status, 'pending');
+  const byStatus = (s) => list.filter((x) => x.status === s);
+  assert.equal(list.length, 3);
+  assert.equal(byStatus('rejected').length, 1); // отклонённое вернулось уже отклонённым
+  const restored = byStatus('applied');
+  assert.equal(restored.length, 1);
+  assert.ok(restored[0].relPath === 'a.py');
+  const fresh = byStatus('pending');
+  assert.equal(fresh.length, 1); // новым осталось только действительно новое предложение
+  const fv = await pm2.view(fresh[0].id);
+  assert.match(fv.newText, /x = 4/);
 });
 
 test('patch: полный цикл через предложение — Diff, запись с CRLF, откат', async (t) => {
@@ -262,7 +272,7 @@ test('промпт: sanitizeSections и пресеты в хранилище', a
   assert.equal(bad.length, 2);
   assert.equal(bad[0].type, 'text');
   assert.notEqual(bad[0].id, bad[1].id);
-  assert.equal(pg.sanitizeSections('мусор').length, 7);
+  assert.equal(pg.sanitizeSections('мусор').length, pg.defaultSections().length); // мусор → стандартный набор полей
 
   const { store } = await setup(t);
   await store.savePreset('Godot', pg.defaultSections());

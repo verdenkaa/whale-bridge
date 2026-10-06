@@ -6,13 +6,22 @@ const path = require('path');
 const pg = require('../src/promptgen');
 
 class TextNode { constructor(t) { this.nodeType = 3; this.textContent = t; } }
+// Как настоящий ParentNode.append(): аргументы разворачиваются (вложенные массивы тоже),
+// null/undefined молча игнорируются, всё остальное становится текстовым узлом.
+// Если этого не повторить, в children попадают undefined и массивы — и чтение textContent
+// падает с непонятным «Cannot read properties of undefined», хотя в браузере всё работает.
+const toNode = (x) => {
+  if (x && typeof x === 'object' && x.nodeType) return x;
+  if (typeof x === 'string' || typeof x === 'number') return new TextNode(String(x));
+  throw new TypeError(`append(): DOM принял бы только узел или строку, передано ${typeof x}: ${String(x)}`);
+};
 class El {
   constructor(tag) {
     this.nodeType = 1; this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {};
     this.style = { cssText: '', setProperty() {} }; this.className = ''; this.scrollTop = 0; this.value = '';
     this.classList = { add() {}, remove() {} };
   }
-  append(...k) { for (const x of k) this.children.push(typeof x === 'string' ? new TextNode(x) : x); }
+  append(...k) { for (const x of k.flat(Infinity)) { if (x == null) continue; this.children.push(toNode(x)); } }
   replaceChildren(...k) { this.children = []; this.append(...k); }
   setAttribute(k, v) { this.attrs[k] = v; }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
@@ -127,17 +136,23 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   await click(tabs[3]);
   await tick(80);
   const titles = findAll(roots.body, (e) => e.className === 'sec-title').map((e) => e.attrs.value);
-  assert.deepEqual(titles, ['ЗАДАЧА', 'КОНТЕКСТ ПРОЕКТА', 'ЧТО В КОНТЕКСТЕ', 'ОГРАНИЧЕНИЯ', 'ПРАВИЛА РАБОТЫ', 'РЕЖИМ РАБОТЫ', 'СРЕДА ВЫПОЛНЕНИЯ', 'СТРУКТУРА ПРОЕКТА']);
+  assert.deepEqual(titles, sections.map((s) => s.title)); // порядок и состав полей — как в наборе по умолчанию
+  assert.ok(titles.includes('СТРУКТУРА ПРОЕКТА') && titles.includes('ЗАДАЧА'));
   const areas = findAll(roots.body, (e) => e.tag === 'textarea');
-  assert.equal(areas.length, 7);
-  assert.match(text(areas[2]), /Файлы приложены в чат вложениями/);
-  assert.match(text(areas[4]), /SEARCH/);
+  assert.equal(areas.length, sections.filter((s) => s.type !== 'tree').length); // по одному полю на текстовую секцию
+  // ищем поле по названию секции, а не по индексу: порядок полей может меняться
+  const areaOf = (title) => {
+    const sec = findAll(roots.body, (e) => e.tag === 'section').find((s) => findAll(s, (n) => n.className === 'sec-title' && n.attrs.value === title).length);
+    return sec ? findAll(sec, (e) => e.tag === 'textarea')[0] : null;
+  };
+  assert.match(text(areaOf('ЧТО В КОНТЕКСТЕ')), /Файлы приложены в чат вложениями/);
+  assert.match(text(areaOf('ПРАВИЛА РАБОТЫ')), /SEARCH/);
 
   // ввод в поле «Задача» сохраняется в черновик
-  areas[0].listeners.input[0]({ target: { value: 'Сделать двойной прыжок', style: {}, scrollHeight: 10 } });
+  areaOf('ЗАДАЧА').listeners.input[0]({ target: { value: 'Сделать двойной прыжок', style: {}, scrollHeight: 10 } });
   await tick(520);
   const saved = log.filter(([ch]) => ch === 'prompt:save-draft').pop();
-  assert.equal(saved[1].sections[0].text, 'Сделать двойной прыжок');
+  assert.equal(saved[1].sections.find((s) => s.key === 'task').text, 'Сделать двойной прыжок');
 
   // дерево проекта: отключение папки
   const tree1 = document.querySelector('#prompt-tree');
@@ -151,10 +166,13 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   assert.match(text(document.querySelector('#prompt-tree-count')), /Скрыто элементов: 1/);
 
   // добавить поле, удалить поле, копирование
+  const secTitles = () => findAll(roots.body, (e) => e.className === 'sec-title');
+  const before = secTitles().length; // 8 полей по умолчанию
   await click(findAll(roots.body, (e) => e.tag === 'button' && text(e) === '＋ Добавить поле')[0]);
-  assert.equal(findAll(roots.body, (e) => e.className === 'sec-title').length, 8);
+  assert.equal(secTitles().length, before + 1);
+  assert.equal(secTitles()[secTitles().length - 1].attrs.value, 'НОВОЕ ПОЛЕ');
   await click(findAll(roots.body, (e) => e.tag === 'button' && e.attrs.title === 'Удалить поле')[0]);
-  assert.equal(findAll(roots.body, (e) => e.className === 'sec-title').length, 7);
+  assert.equal(secTitles().length, before);
   await click(findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Скопировать промпт')[0]);
   assert.ok(log.some(([ch]) => ch === 'prompt:copy'));
   await click(findAll(roots.body, (e) => e.tag === 'button' && text(e) === '⧗ Напомнить формат')[0]);
