@@ -11,6 +11,7 @@ const editorfs = require('./src/editorfs');
 const { resolveInProject } = require('./src/paths');
 const { extractFencedBlocks } = require('./src/parser');
 const pg = require('./src/promptgen');
+const { pathToFileURL } = require('url');
 
 const CHAT_URL = 'https://chat.deepseek.com';
 const PARTITION = 'persist:deepseek'; // сессия (cookies) сохраняется между запусками
@@ -18,6 +19,22 @@ const CHAT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const CHAT_URL_RE = /\/a\/chat\/s\/([0-9a-f-]{36})/i;
 // Куда разрешено открывать popup (авторизация). Остальное уходит во внешний браузер.
 const POPUP_HOSTS = /(^|\.)(deepseek\.com|google\.com|gstatic\.com|apple\.com|microsoftonline\.com|live\.com)$/i;
+// Путь к AMD-сборке Monaco. Определяется здесь, а не в renderer: в упакованном приложении
+// node_modules может лежать в app.asar.unpacked, и угадывать относительный путь из страницы
+// нельзя — а воркеры и шрифты Monaco грузятся по абсолютному URL.
+const MONACO_VS = (() => {
+  const candidates = [
+    path.join(__dirname, 'node_modules', 'monaco-editor', 'min', 'vs'),
+    path.join(__dirname, '..', 'app.asar.unpacked', 'node_modules', 'monaco-editor', 'min', 'vs'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.statSync(path.join(c, 'loader.js')).isFile()) return pathToFileURL(c).href;
+    } catch { /* пробуем следующий кандидат */ }
+  }
+  return null;
+})();
+
 const UNSAFE_OPEN_EXT = new Set([
   '.exe', '.bat', '.cmd', '.com', '.msi', '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.lnk', '.scr', '.sh', '.app', '.jar', '.reg',
 ]);
@@ -114,6 +131,8 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // в sandbox-преалоде нет ни fs, ни пути к приложению — передаём через argv
+      additionalArguments: MONACO_VS ? ['--monaco-vs=' + MONACO_VS] : [],
     },
   });
   win.webContents.on('will-navigate', (e) => e.preventDefault());

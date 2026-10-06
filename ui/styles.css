@@ -145,3 +145,69 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 
 .node.manual-changed { background: #fff8d8; border-left: 3px solid #d9a400; }
 .manual-warning { margin-left: 8px; color: #9a7300; font-weight: 600; }
+
+/* ---------- редактор (Stage A) ---------- */
+.hidden { display: none !important; }
+.btn.tiny { padding: 1px 7px; font-size: 11px; }
+/* «Сохранить поверх» (§11): заметная, но не основная — она уничтожает чужие правки */
+.btn.danger-subtle { border-color: var(--line); color: var(--dim); }
+.btn.danger-subtle:hover:not(:disabled) { border-color: var(--del); color: var(--del); background: var(--del-bg); }
+
+#editor-root { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(140px, 24%) minmax(0, 1fr); position: relative; }
+
+.ed-tree { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
+.ed-tree-head { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-bottom: 1px solid var(--line);
+  font-size: 10px; letter-spacing: .09em; color: var(--dim); }
+.ed-tree-head .grow, .ed-tree-head span:first-child { flex: 1; }
+.ed-tree-body { overflow: auto; padding: 4px 0 10px; scrollbar-width: thin; scrollbar-color: #3b3b3b transparent; }
+.ed-tree-empty, .ed-tree-err { padding: 10px 12px; color: var(--dim); font-size: 12px; }
+.ed-node { display: flex; align-items: center; gap: 5px; padding: 2px 8px 2px 4px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; font-size: 12.5px; border-left: 3px solid transparent; }
+.ed-node:hover { background: var(--raised); }
+.ed-node.on { background: var(--raised); border-left-color: var(--accent); }
+.ed-node.dirty .ed-name { color: var(--warn); }
+.ed-node.drift .ed-name { color: var(--del); }
+.ed-twisty { width: 12px; flex: none; color: var(--dim); font-size: 10px; }
+.ed-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ed-mark { flex: none; font-size: 11px; line-height: 1; }
+.ed-mark.warn { color: var(--warn); }
+
+.ed-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
+.ed-tabs { display: flex; gap: 1px; overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+.ed-tab { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; cursor: pointer;
+  border-right: 1px solid var(--line); color: var(--dim); font-size: 12.5px; white-space: nowrap; max-width: 220px; }
+.ed-tab:hover { background: var(--raised); }
+.ed-tab.on { background: #1e1e1e; color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
+.ed-tab.dirty > span:first-child { color: var(--warn); }
+.ed-tab span:first-child { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ed-tab-close { background: none; border: 0; color: var(--dim); cursor: pointer; padding: 0 3px; border-radius: 3px; font-size: 14px; line-height: 1; }
+.ed-tab-close:hover { background: #3a3a3a; color: var(--text); }
+
+.ed-host { flex: 1; min-height: 0; min-width: 0; }
+.ed-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); }
+.ed-status { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 10px;
+  border-top: 1px solid var(--line); background: var(--panel); font-size: 11.5px; color: var(--dim); }
+.ed-status .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Оверлеи — внутри области редактора: WebContentsView с DeepSeek CSS-слоями не перекрывается (§24) */
+.ed-overlay { position: absolute; inset: 0; z-index: 30; background: rgba(10, 10, 10, .62);
+  display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px; overflow: auto; }
+.ed-dialog { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+  width: min(520px, 100%); box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+.ed-dialog.wide { width: min(1100px, 100%); }
+.ed-dialog.quick { width: min(620px, 100%); padding: 10px; }
+.ed-dialog-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.ed-dialog-title .grow { flex: 1; }
+.ed-dialog-text { color: var(--dim); font-size: 12.5px; line-height: 1.6; margin-bottom: 14px; }
+.ed-dialog-text b { color: var(--del); }
+.ed-dialog-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ed-diff { height: min(60vh, 520px); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ed-diff-legend { display: flex; gap: 14px; color: var(--dim); font-size: 11.5px; margin-bottom: 8px; }
+.ed-diff-fallback { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; overflow: auto; }
+.ed-quick-input { width: 100%; padding: 7px 9px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--text); font: 13px var(--mono); }
+.ed-quick-list { margin-top: 8px; max-height: 50vh; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.ed-quick-item { text-align: left; background: none; border: 0; border-radius: 4px; padding: 5px 8px; cursor: pointer;
+  color: var(--text); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-quick-item:hover, .ed-quick-item:first-child { background: var(--raised); }
+.ed-quick-empty { padding: 10px; color: var(--dim); font-size: 12px; }

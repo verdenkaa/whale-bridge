@@ -3,22 +3,10 @@
   const api = window.api;
 
   // ---------- утилиты (только textContent, никакого innerHTML с чужими данными) ----------
-  function h(tag, attrs, ...kids) {
-    const el = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (v == null || v === false) continue;
-      if (k === 'class') el.className = v;
-      else if (k === 'style') el.style.cssText = v; // через CSSOM: inline-атрибуты запрещены CSP
-      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-      else if (v === true) el.setAttribute(k, '');
-      else el.setAttribute(k, v);
-    }
-    for (const kid of kids.flat()) {
-      if (kid == null || kid === false) continue;
-      el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
-    }
-    return el;
-  }
+  // h() один на весь renderer — см. ui/dom.js. Здесь только алиас, чтобы не переписывать
+  // сотни вызовов; семантика прежняя, плюс разворачиваются вложенные массивы любой глубины
+  // (так и работает настоящий ParentNode.append()).
+  const h = window.WhaleDom.h;
   const $ = (s) => document.querySelector(s);
   const base = (p) => p.split('/').pop();
   const fmtBytes = (n) => (n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ');
@@ -73,7 +61,11 @@
     const chatChanged = S.chatId !== st.chatId;
     Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, pendingProjectId: st.pendingProjectId, lastProjectId: st.lastProjectId });
     document.documentElement.style.setProperty('--chat-w', st.ratio * 100 + '%');
-    if (projectChanged) { S.tree = {}; S.expanded = new Set(); P.loaded = false; }
+    if (projectChanged) {
+      S.tree = {}; S.expanded = new Set(); P.loaded = false;
+      // Открытые файлы не закрываем: у каждого свой projectId, сохранение идёт в свой проект.
+      if (window.WhaleEditor) window.WhaleEditor.setProject(S.project);
+    }
     if (chatChanged) { S.view = null; S.allowIncomplete = false; }
     await loadProposals();
     if (projectChanged && S.tab === 'prompt' && !S.view) { // дерево и исключения принадлежат проекту
@@ -152,7 +144,7 @@
 
   function renderTabs() {
     const pending = S.proposals.filter((p) => p.status === 'pending' && !p.historical).length;
-    const tabs = [['proposals', 'Предложения'], ['files', 'Файлы'], ['history', 'История'], ['prompt', 'Промпт']];
+    const tabs = [['editor', 'Редактор'], ['proposals', 'Предложения'], ['files', 'Файлы'], ['history', 'История'], ['prompt', 'Промпт']];
     $('#tabs').replaceChildren(
       ...tabs.map(([id, label]) =>
         h('button', { class: 'tab' + (S.tab === id ? ' on' : ''), onclick: () => switchTab(id) },
@@ -877,9 +869,25 @@
     renderTabs();
   }
 
+  /**
+   * Редактор живёт в #editor-root ОТДЕЛЬНО от #body: перерисовка вкладок не должна
+   * уничтожать Monaco (ТЗ §7). Поэтому панели переключаем классом, а не пересоздаём.
+   * Если открыт просмотр (Diff предложения/истории), он важнее — показываем #body.
+   */
+  function applyTabVisibility() {
+    const useEditor = S.tab === 'editor' && !S.view;
+    const body = $('#body');
+    const root = $('#editor-root');
+    if (body) { if (useEditor) body.classList.add('hidden'); else body.classList.remove('hidden'); }
+    if (root) { if (useEditor) root.classList.remove('hidden'); else root.classList.add('hidden'); }
+    if (window.WhaleEditor) window.WhaleEditor.setVisible(useEditor);
+    return useEditor;
+  }
+
   function render() {
     renderHead();
     renderTabs();
+    if (applyTabVisibility()) return; // содержимое вкладки «Редактор» рисует ui/editor.js
     const body = $('#body');
     const scroll = body.scrollTop;
     body.replaceChildren();
@@ -927,6 +935,9 @@
   api.on('project:auto-bound', async ({ project }) => { toast(`Привязан ${project.name} · Изменить`, 'ok'); await loadState(); });
   api.on('files:changed', async () => {
     await refreshTree();
+    // Файл мог измениться под открытым буфером: обновляем diskHash, чтобы Ctrl+S
+    // вовремя показал конфликт (§11), а не перезаписал чужие правки.
+    if (window.WhaleEditor) await window.WhaleEditor.refreshDisk();
     if (P.loaded && S.project) { // дерево в генераторе промпта обновляем «на месте», не трогая поля ввода
       P.tree = await call('prompt:tree', { projectId: S.project.id });
       paintPromptTree();
@@ -947,6 +958,22 @@
     }
     await loadProposals();
   });
+
+  // Редактор монтируется один раз и живёт независимо от перерисовок (§7).
+  // Если разметки редактора нет (старый index.html или тестовый стенд) — просто не включаем его.
+  (function mountEditor() {
+    if (!window.WhaleEditor) return;
+    const edEls = {
+      tree: $('#ed-tree'), tabs: $('#ed-tabs'), host: $('#ed-host'),
+      empty: $('#ed-empty'), status: $('#ed-status'), overlay: $('#ed-overlay'),
+    };
+    for (const k of Object.keys(edEls)) if (!edEls[k]) return;
+    window.WhaleEditor.mount(edEls, {
+      toast,
+      // несохранённые правки видны и на вкладках вне редактора — обновляем счётчик/заголовки
+      onDirtyChange: () => { renderTabs(); },
+    });
+  })();
 
   loadState();
 })();

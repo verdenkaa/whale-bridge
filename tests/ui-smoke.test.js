@@ -19,7 +19,17 @@ class El {
   constructor(tag) {
     this.nodeType = 1; this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {};
     this.style = { cssText: '', setProperty() {} }; this.className = ''; this.scrollTop = 0; this.value = '';
-    this.classList = { add() {}, remove() {} };
+    const cls = new Set();
+    this.classList = {
+      add: (...c) => c.forEach((x) => cls.add(x)),
+      remove: (...c) => c.forEach((x) => cls.delete(x)),
+      contains: (x) => cls.has(x),
+      toggle: (x, force) => {
+        const on = force === undefined ? !cls.has(x) : !!force;
+        if (on) cls.add(x); else cls.delete(x);
+        return on;
+      },
+    };
   }
   append(...k) { for (const x of k.flat(Infinity)) { if (x == null) continue; this.children.push(toNode(x)); } }
   replaceChildren(...k) { this.children = []; this.append(...k); }
@@ -39,7 +49,8 @@ const PROJECT = { id: 'p1', name: 'Proj', path: '/x' };
 
 test('UI: вкладки, патч-предложения, бэкапы, генератор промптов', async () => {
   const roots = {};
-  for (const id of ['head', 'tabs', 'body', 'toast', 'splitter', 'panel']) { roots[id] = new El('div'); }
+  for (const id of ['head', 'tabs', 'body', 'toast', 'splitter', 'panel',
+    'editor-root', 'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
     createTextNode: (t) => new TextNode(t),
@@ -95,15 +106,50 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   global.confirm = () => true;
   global.requestAnimationFrame = (f) => setTimeout(f, 0);
 
+  // заглушка редактора: smoke-тест проверяет СВЯЗИ в app.js, а не внутренности editor.js
+  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0 };
+  global.window.WhaleEditor = {
+    mount: (els, hooks) => { ed.mount++; ed.els = els; ed.hooks = hooks; },
+    setProject: (p) => ed.setProject.push(p ? p.id : null),
+    setVisible: (v) => ed.setVisible.push(v),
+    refreshDisk: async () => { ed.refreshDisk++; },
+    hasUnsaved: () => false,
+    dirtyPaths: () => [],
+  };
+
   const errors = [];
   const origErr = console.error;
   console.error = (...a) => errors.push(a);
+  // ui/dom.js должен быть загружен до app.js — как в index.html
+  require(path.join(__dirname, '..', 'ui', 'dom.js'));
+  assert.ok(global.window.WhaleDom && typeof global.window.WhaleDom.h === 'function');
   require(path.join(__dirname, '..', 'ui', 'app.js'));
   await tick(60);
 
   const text = (el) => el.textContent;
   const tabs = findAll(roots.tabs, (e) => e.tag === 'button');
-  assert.deepEqual(tabs.map((t) => text(t).replace(/\d+$/, '')), ['Предложения', 'Файлы', 'История', 'Промпт']);
+  assert.deepEqual(tabs.map((t) => text(t).replace(/\d+$/, '')),
+    ['Редактор', 'Предложения', 'Файлы', 'История', 'Промпт']);
+  const TAB = { editor: 0, proposals: 1, files: 2, history: 3, prompt: 4 };
+
+  // редактор смонтирован один раз и со всеми нужными узлами (§7)
+  assert.equal(ed.mount, 1);
+  for (const k of ['tree', 'tabs', 'host', 'empty', 'status', 'overlay']) assert.ok(ed.els[k], `нет узла ${k}`);
+  // по умолчанию активна вкладка «Предложения»: редактор скрыт, #body показан
+  assert.equal(roots.body.classList.contains('hidden'), false);
+  assert.equal(roots['editor-root'].classList.contains('hidden'), true);
+  assert.equal(ed.setVisible[ed.setVisible.length - 1], false);
+
+  // переключение на «Редактор» скрывает #body и показывает #editor-root — панели
+  // переключаются классом, содержимое (включая Monaco) не пересоздаётся
+  await click(tabs[TAB.editor]);
+  assert.equal(roots['editor-root'].classList.contains('hidden'), false);
+  assert.equal(roots.body.classList.contains('hidden'), true);
+  assert.equal(ed.setVisible[ed.setVisible.length - 1], true);
+  await click(tabs[TAB.proposals]);
+  assert.equal(roots['editor-root'].classList.contains('hidden'), true);
+  assert.equal(roots.body.classList.contains('hidden'), false);
+  assert.equal(ed.setVisible[ed.setVisible.length - 1], false);
 
   // карточки, крестик, бейдж патча
   assert.equal(findAll(roots.body, (e) => e.className === 'dismiss').length, 3);
@@ -126,7 +172,7 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   assert.ok(log.some(([ch, a]) => ch === 'proposal:dismiss' && a.id === 'a'));
 
   // история + бэкапы
-  await click(tabs[2]);
+  await click(tabs[TAB.history]);
   assert.match(text(roots.body), /Хранятся 2 последние версии/);
   assert.match(text(roots.body), /копия удалена/);
   const diffBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Diff');
@@ -142,13 +188,13 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
 
   // вкладка «Файлы»: кнопка «↩ Откатить» не предлагается для записи об откате.
   // n.gd создан и откачен — единственная запись о нём неоткатима, поэтому кнопки быть не должно.
-  await click(tabs[1]);
+  await click(tabs[TAB.files]);
   await tick(90);
   const undoBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === '↩ Откатить');
   assert.equal(undoBtns.length, 1); // только a.gd
 
   // вкладка «Промпт»
-  await click(tabs[3]);
+  await click(tabs[TAB.prompt]);
   await tick(80);
   const titles = findAll(roots.body, (e) => e.className === 'sec-title').map((e) => e.attrs.value);
   assert.deepEqual(titles, sections.map((s) => s.title)); // порядок и состав полей — как в наборе по умолчанию
@@ -195,8 +241,11 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
 
   // «files:changed» не пересобирает форму (фокус в поле не теряется)
   const areaBefore = findAll(roots.body, (e) => e.tag === 'textarea')[0];
+  const refreshBefore = ed.refreshDisk;
   await handlers['files:changed']();
   await tick(40);
+  // файл мог измениться под открытым буфером — редактор перечитывает хэши диска (§11)
+  assert.ok(ed.refreshDisk > refreshBefore, 'files:changed дошёл до редактора');
   assert.equal(findAll(roots.body, (e) => e.tag === 'textarea')[0], areaBefore);
 
   console.error = origErr;

@@ -2,7 +2,17 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <!--
+    Политика проверена spike-стендом (spike/README.md): нарушений не было ни на file://,
+    ни на собственном scheme. Что здесь обязательно и почему:
+      style-src 'unsafe-inline' — Monaco сам создаёт <style>-элементы и nonce им не проставляет.
+                                   Единственное вынужденное ослабление; script-src остаётся строгим.
+      font-src  data:             — шрифт codicon в min-сборке Monaco инлайнится как data:font/ttf.
+      img-src   data: blob:       — в CSS Monaco есть data:image/png и data:image/svg+xml.
+      worker-src 'self' blob:     — 'self' для наших воркеров, blob: для штатного пути Monaco.
+      connect-src 'self'          — на случай обращения AMD-загрузчика за nls-сообщениями.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Whale Bridge</title>
   <link rel="stylesheet" href="styles.css">
@@ -15,9 +25,37 @@
       <header id="head"></header>
       <nav id="tabs"></nav>
       <main id="body"></main>
+
+      <!-- Редактор живёт ОТДЕЛЬНО от #body: перерисовка вкладок не должна уничтожать
+           Monaco (ТЗ §7). Переключается классом hidden, содержимое не пересоздаётся. -->
+      <main id="editor-root" class="hidden">
+        <div id="ed-tree" class="ed-tree"></div>
+        <div class="ed-main">
+          <div id="ed-tabs" class="ed-tabs"></div>
+          <div id="ed-host" class="ed-host hidden"></div>
+          <div id="ed-empty" class="ed-empty">
+            <div>Файл не открыт.</div>
+            <div class="path">Выберите файл в дереве слева или нажмите Ctrl+P.</div>
+          </div>
+          <div id="ed-status" class="ed-status"></div>
+        </div>
+        <!-- Модальные окна редактора — только внутри IDE-области: WebContentsView с
+             DeepSeek перекрывается CSS-слоями (ТЗ §24) -->
+        <div id="ed-overlay" class="ed-overlay hidden"></div>
+      </main>
+
       <div id="toast" role="status" aria-live="polite"></div>
     </aside>
   </div>
+
+  <!-- Порядок важен: каждый следующий модуль использует предыдущий.
+       src/versions.js общий для main и renderer — правила классификации версий одни. -->
+  <script src="../src/versions.js"></script>
+  <script src="dom.js"></script>
+  <script src="editor-state.js"></script>
+  <script src="languages/gdscript.js"></script>
+  <script src="monaco.js"></script>
+  <script src="editor.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

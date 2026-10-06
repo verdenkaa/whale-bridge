@@ -14,7 +14,16 @@ const INVOKE = new Set([
 ]);
 const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound']);
 
+// В sandbox-преалоде доступен только process.argv: так main передаёт то, что требует fs
+// (например, абсолютный путь к AMD-сборке Monaco в dev и в app.asar.unpacked).
+const argvValue = (name) => {
+  const prefix = `--${name}=`;
+  const hit = process.argv.find((a) => typeof a === 'string' && a.startsWith(prefix));
+  return hit ? hit.slice(prefix.length) : null;
+};
+
 contextBridge.exposeInMainWorld('api', {
+  monacoVs: argvValue('monaco-vs'),
   invoke(channel, arg) {
     if (!INVOKE.has(channel)) return Promise.reject(new Error('Unknown channel: ' + channel));
     return ipcRenderer.invoke(channel, arg);

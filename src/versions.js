@@ -27,7 +27,20 @@
 //   ABSENT        — файла не существует;
 //   null          — версия ещё не известна (не читали). null !== ABSENT: это разные факты.
 
-const { normalizeRel } = require('./paths');
+// Модуль нужен и в main-процессе, и в renderer (иначе правила классификации версий
+// пришлось бы дублировать, а расхождение дало бы «файл чист» при несохранённой правке).
+// Поэтому: обёртка, двойной экспорт и отсутствие жёсткой зависимости от require.
+(function (root, factory) {
+  const api = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) root.WhaleVersions = api;
+})(typeof window !== 'undefined' ? window : null, function () {
+'use strict';
+
+// normalizeRel нужен только для fileIdentity (проверка путей) — то есть только в main.
+// В renderer его нет, и это не должно мешать classifyVersions/checkExpectedHash.
+const paths = (typeof require === 'function') ? require('./paths') : null;
+const normalizeRel = paths ? paths.normalizeRel : null;
 
 const ABSENT = 'absent';
 
@@ -43,6 +56,7 @@ const KEY_SEP = '::';
 
 function fileIdentity({ projectId, relPath, diskHash = null } = {}) {
   if (typeof projectId !== 'string' || !projectId.trim()) return { ok: false, error: 'Не указан projectId' };
+  if (!normalizeRel) return { ok: false, error: 'Проверка путей доступна только в main-процессе' };
   const n = normalizeRel(relPath);
   if (!n.ok) return { ok: false, error: n.error };
   if (diskHash !== null && !isHash(diskHash)) return { ok: false, error: 'Некорректный diskHash' };
@@ -149,13 +163,18 @@ function checkExpectedHash(expectedHash, actualHash) {
   return { ok: true };
 }
 
-module.exports = {
+// Ключ файла без проверки пути — нужен renderer для идентификации открытых файлов
+const fileKey = (projectId, relPath) => projectId + KEY_SEP + relPath;
+
+return {
   ABSENT,
   KEY_SEP,
   fileIdentity,
+  fileKey,
   proposalIdentity,
   parseFileKey,
   classifyVersions,
   checkExpectedHash,
   shortHash: short,
 };
+});
