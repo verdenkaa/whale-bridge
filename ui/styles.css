@@ -144,7 +144,10 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 
 
 .node.manual-changed { background: #fff8d8; border-left: 3px solid #d9a400; }
-.manual-warning { margin-left: 8px; color: #9a7300; font-weight: 600; }
+/* Кнопка, а не span: открывает сравнение и подтверждение «модель проинформирована» */
+.manual-warning { margin-left: 8px; color: #9a7300; font-weight: 600; background: none; border: 0;
+  padding: 0 2px; cursor: pointer; font-size: inherit; border-radius: 3px; }
+.manual-warning:hover { background: rgba(217, 164, 0, .22); color: #6b5200; }
 
 /* ---------- редактор (Stage A) ---------- */
 .hidden { display: none !important; }

@@ -326,7 +326,15 @@ class ProposalManager {
       const cur = await fileops.readTextFile(r.abs);
       if (cur.error) return { ...out, state: 'unreadable', error: cur.error };
       const manual = await this._manualBase(project.id, r.rel);
-      if (manual) { out.manualChanged = true; out.manualHistoryId = manual.history.id; }
+      if (manual) {
+        // «Модель не знает об этом изменении». Если пользователь подтвердил, что передал ей
+        // текущую версию, предупреждение снимаем — иначе оно висело бы вечно и обесценилось.
+        const synced = this.store.getModelSynced(project.id, r.rel);
+        if (synced !== manual.current.hash) {
+          out.manualChanged = true;
+          out.manualHistoryId = manual.history.id;
+        }
+      }
       let newText = p.content;
       if (p.mode === 'patch') {
         if (p.patchIssues.length) return { ...out, state: 'patch-failed', error: p.patchIssues.join('; ') };
@@ -474,6 +482,11 @@ class ProposalManager {
       aiBaseHash: p.aiBaseHash,
     });
     await this.store.pruneFile(project.id, ev.relPath, MAX_BACKUPS_PER_FILE).catch((e) => console.error('[prune]', e));
+    // Содержимое получено от модели — значит, эта версия ей известна. Для move берём новый путь.
+    if (res.afterHash) {
+      await this.store.setModelSynced(project.id, ev.toRelPath || ev.relPath, res.afterHash)
+        .catch((e) => console.error('[modelSynced]', e));
+    }
     p.status = 'applied';
     p.historyId = opId;
     await this.store.setProposalDecision(p.chatId, p.contentHash, 'applied', opId);
@@ -520,6 +533,8 @@ class ProposalManager {
       // Точка отсчёта — запись об откате: копии у неё нет, построчное сравнение построить нечем.
       // Само изменение не теряется — proposal по-прежнему помечает файл как изменённый вручную.
       if (manual.hashOnly) continue;
+      // Модель уже проинформирована об этой версии — показывать нечего
+      if (this.store.getModelSynced(projectId, h.relPath) === manual.current.hash) continue;
       const current = await fileops.readTextFile(manual.abs);
       const after = await fs.readFile(path.join(this.store.backupDir, h.id + '.after'), 'utf8').catch(() => null);
       if (current.error || after == null) continue;
@@ -545,6 +560,7 @@ class ProposalManager {
     const baseText = after.replace(/^\uFEFF/, '');
     const ops = diffLines(baseText, current.text), rows = toRows(ops, 3);
     return { relPath, historyId: manual.history.id, afterHash: manual.history.afterHash, currentHash: manual.current.hash,
+      synced: this.store.getModelSynced(projectId, relPath) === manual.current.hash,
       stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS, currentText: current.text };
   }
 
@@ -647,6 +663,35 @@ class ProposalManager {
    * файлов в backups/, а цепочка «откат отката» только путает. Записей об откате хранится
    * не больше ROLLBACK_RECORD_LIMIT на файл.
    */
+  /**
+   * Пользователь подтвердил: модель проинформирована о текущей версии файла.
+   * Отметка снимется сама при следующем изменении — сравнивается хэш, а не флаг.
+   */
+  async ackModelSynced(projectId, relPath) {
+    const project = this.store.getProject(projectId);
+    if (!project) return { ok: false, error: 'Проект не найден' };
+    const r = await resolveInProject(project.path, relPath);
+    if (!r.ok) return { ok: false, error: r.error };
+    if (!r.exists || !r.isFile) return { ok: false, error: 'Файл не найден' };
+    // readTextFile, а не readRawFile: хэш тот же (по байтам), но файл в не-UTF-8 подтвердить
+    // нельзя — его содержимое всё равно не передать модели, и отметка вводила бы в заблуждение.
+    const cur = await fileops.readTextFile(r.abs);
+    if (cur.error) return { ok: false, error: cur.error };
+    await this.store.setModelSynced(projectId, r.rel, cur.hash);
+    this.onChange();
+    return { ok: true, relPath: r.rel, hash: cur.hash };
+  }
+
+  /** Какая версия файлов известна модели — для отметок в дереве и статусе редактора. */
+  modelSyncedHashes(projectId, rels) {
+    const all = this.store.modelSyncedMap(projectId);
+    const out = {};
+    for (const rel of (Array.isArray(rels) ? rels : []).slice(0, 200)) {
+      if (typeof rel === 'string' && rel) out[rel] = all[rel] || null;
+    }
+    return out;
+  }
+
   async historyRevert(id, force) {
     const h = this.store.getHistory(id);
     if (!h || h.status !== 'applied') return { ok: false, code: 'state', error: 'Эту операцию нельзя откатить' };

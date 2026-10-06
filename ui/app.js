@@ -154,6 +154,7 @@
     S.tab = id;
     S.view = null;
     if (id === 'history') await loadHistory();
+    if (id === 'files') S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
     render();
   }
 
@@ -402,7 +403,39 @@
   async function copyManualVersions() {
     if (!S.project) return;
     const r = await call('manual:copy', { projectId: S.project.id });
-    toast(r?.ok ? `Актуальные версии скопированы (${r.files} файлов).` : r?.error, r?.ok ? 'ok' : 'err');
+    // Копирование — ещё не отправка, поэтому отметку сами не ставим
+    toast(r?.ok
+      ? `Актуальные версии скопированы (${r.files} файлов). Вставьте их в чат и отметьте файлы как известные модели.`
+      : r?.error, r?.ok ? 'ok' : 'err');
+  }
+
+  /**
+   * «Модель проинформирована о текущей версии файла».
+   * Отметка хранится как хэш содержимого, поэтому следующее изменение файла снимет её само.
+   */
+  async function ackManual(relPath) {
+    if (!S.project) return;
+    const r = await call('manual:ack', { projectId: S.project.id, relPath });
+    if (!r) return;
+    if (!r.ok) { toast(r.error, 'err'); return; }
+    toast('Отмечено: модель знает текущую версию файла', 'ok');
+    await loadHistory();
+    if (S.view && S.view.kind === 'manual') await openManual(relPath);
+    else render();
+  }
+
+  async function ackAllManual() {
+    if (!S.project || !S.manual.length) return;
+    const n = S.manual.length;
+    if (!confirm(`Отметить ${n} файл(ов) как известные модели?\n\nОтметка снимется автоматически, если файл снова изменится.`)) return;
+    let ok = 0;
+    for (const m of S.manual) {
+      const r = await call('manual:ack', { projectId: S.project.id, relPath: m.relPath });
+      if (r && r.ok) ok++;
+    }
+    toast(`Отмечено файлов: ${ok} из ${n}`, ok === n ? 'ok' : 'err');
+    await loadHistory();
+    render();
   }
   async function openFile(projectId, rel) {
     const r = await call('file:open', { projectId, rel, mode: 'open' });
@@ -479,7 +512,14 @@
         },
         h('span', { class: 'twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
         h('span', {}, it.name),
-        manual.has(it.rel) && h('span', { class: 'manual-warning', title: 'Файл изменён вне Whale Bridge' }, '⚠ изменён'),
+        // Клик по отметке открывает сравнение и кнопку «модель проинформирована».
+        // stopPropagation обязателен: иначе вместе с этим сработает клик по строке дерева
+        // (показать файл в проводнике) и откроется окно проводника.
+        manual.has(it.rel) && h('button', {
+          class: 'manual-warning', type: 'button',
+          title: 'Файл изменён вне Whale Bridge — посмотреть отличия и отметить, что модель проинформирована',
+          onclick: (e) => { e.stopPropagation(); openManual(it.rel); },
+        }, '⚠ изменён'),
         marks.has(it.rel) && h('span', { class: 'dot', title: 'Есть предложение изменений' }),
         undo.has(it.rel) && undoButton(undo.get(it.rel))));
       if (it.isDir && open) treeNodes(it.rel, depth + 1, out, marks, undo, manual);
@@ -520,7 +560,14 @@
       h('div', { class: 'toolbar' },
         h('span', { class: 'path grow' }, S.project.path),
         h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить'),
-        manual.size > 0 && h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели')));
+        manual.size > 0 && h('button', {
+          class: 'btn', title: 'Скопировать содержимое файлов, изменённых вне Whale Bridge, чтобы передать его модели',
+          onclick: copyManualVersions,
+        }, 'Скопировать актуальные версии для модели'),
+        manual.size > 0 && h('button', {
+          class: 'btn', title: `Снять отметку «модель не знает» со всех ${manual.size} файл(ов)`,
+          onclick: ackAllManual,
+        }, '✓ Модель знает все')));
     if (S.tree[''] === undefined) {
       loadDir('').then(render);
       box.append(h('div', { class: 'empty' }, 'Загрузка…'));
@@ -585,9 +632,13 @@
         h('div', { class: 'view-title' }, 'Мои правки'),
         h('div', { class: 'path' }, d.relPath)),
       h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
+      d.synced
+        ? h('div', { class: 'notice' }, 'Модель проинформирована об этой версии файла. Если файл снова изменится, отметка снимется сама.')
+        : h('div', { class: 'notice warn' }, 'Модель в чате не знает об этом изменении: она может предлагать правки от устаревшей версии. Передайте ей актуальный файл и отметьте его.'),
       diffTable(d.rows, d.truncated),
       h('div', { class: 'actions' },
         h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
+        !d.synced && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
         h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл')));
   }
 

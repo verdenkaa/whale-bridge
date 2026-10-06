@@ -348,6 +348,8 @@ function registerIpc() {
   handle('history:revert', ({ id, force }) => proposals.historyRevert(String(id), force === true));
   handle('manual:list', ({ projectId }) => proposals.listManualChanges(String(projectId)));
   handle('manual:view', ({ projectId, relPath }) => proposals.manualView(String(projectId), String(relPath)));
+  handle('manual:ack', ({ projectId, relPath }) => proposals.ackModelSynced(String(projectId), String(relPath)));
+  handle('manual:synced', ({ projectId, paths }) => proposals.modelSyncedHashes(String(projectId), paths));
   handle('manual:copy', async ({ projectId }) => {
     const r = await proposals.copyManualVersions(String(projectId));
     if (r.ok) clipboard.writeText(r.text);
