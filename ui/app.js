@@ -52,12 +52,12 @@
 
   // ---------- состояние ----------
   const S = {
-    projects: [], chatId: null, project: null, lastProjectId: null,
+    projects: [], chatId: null, project: null, pendingProjectId: null, lastProjectId: null,
     tab: 'proposals', proposals: [], showHistorical: false,
     view: null, // {kind:'proposal'|'history', data}
     tree: {}, expanded: new Set(), history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
-    context: { used: 0, max: 1_000_000 },
+    manual: [],
     prompt: {
       loaded: false, loading: false, sections: [], presets: [], excluded: new Set(), defaults: {}, tree: null,
       treeOpen: new Set(['']), preview: false, presetId: '', presetName: '',
@@ -71,9 +71,7 @@
     if (!st) return;
     const projectChanged = (S.project && S.project.id) !== (st.project && st.project.id);
     const chatChanged = S.chatId !== st.chatId;
-    if (chatChanged) S.context.used = 0;
-    Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, lastProjectId: st.lastProjectId });
-    S.context.max = 1_000_000;
+    Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, pendingProjectId: st.pendingProjectId, lastProjectId: st.lastProjectId });
     document.documentElement.style.setProperty('--chat-w', st.ratio * 100 + '%');
     if (projectChanged) { S.tree = {}; S.expanded = new Set(); P.loaded = false; }
     if (chatChanged) { S.view = null; S.allowIncomplete = false; }
@@ -109,17 +107,18 @@
           : 'Новый чат — идентификатор появится после первого сообщения'),
     );
 
-    const sel = h('select', { 'aria-label': 'Проект этого чата', disabled: !S.chatId, onchange: onBind },
+    const selectedProjectId = S.project?.id || S.pendingProjectId || '';
+    const sel = h('select', { 'aria-label': 'Проект этого чата', onchange: onBind },
       h('option', { value: '' }, '— проект не привязан —'),
-      S.projects.map((p) => h('option', { value: p.id, selected: S.project && S.project.id === p.id }, `${p.name}  (${p.path})`)));
+      S.projects.map((p) => h('option', { value: p.id, selected: selectedProjectId === p.id }, `${p.name}  (${p.path})`)));
     head.append(
       h('div', { class: 'proj-row' },
         sel,
         h('button', { class: 'btn', title: 'Добавить папку проекта', onclick: onAddProject }, 'Добавить папку'),
         S.project && h('button', { class: 'btn ghost danger', title: 'Убрать проект из списка (файлы не удаляются)', onclick: onRemoveProject }, 'Убрать')),
     );
-    head.append(renderContextMeter());
-
+    const pending = S.projects.find((p) => p.id === S.pendingProjectId);
+    if (!S.chatId && pending) head.append(h('div', { class: 'hint' }, `Выбран «${pending.name}». Он будет автоматически привязан после первого сообщения.`));
     const last = S.projects.find((p) => p.id === S.lastProjectId);
     if (S.chatId && !S.project && last) {
       head.append(
@@ -129,27 +128,13 @@
     }
   }
 
-  function fmtTokens(n) {
-    return Math.round(n).toLocaleString('ru-RU');
-  }
-
-  function renderContextMeter() {
-    const max = 1_000_000;
-    const used = Math.max(0, S.context.used);
-    const ratio = Math.min(1, used / max);
-    const hue = Math.round(120 * (1 - ratio));
-    return h('div', {
-      class: 'context-meter',
-      title: 'Приблизительный расход контекста DeepSeek',
-      'aria-label': `Контекст: ${fmtTokens(used)} из ${fmtTokens(max)} токенов`,
-    },
-      h('span', { class: 'context-track' },
-        h('span', { class: 'context-fill', style: `width:${Math.min(100, ratio * 100)}%;background:hsl(${hue} 68% 48%);` })),
-      h('span', { class: 'context-label' }, `Контекст: ${fmtTokens(used)} / ${fmtTokens(max)}`));
-  }
-
   async function bind(projectId) {
-    if (!S.chatId) return;
+    if (!S.chatId) {
+      await call('project:pending', { projectId: projectId || null });
+      S.pendingProjectId = projectId || null;
+      renderHead();
+      return;
+    }
     await call('project:bind', { chatId: S.chatId, projectId: projectId || null });
     await loadState();
   }
@@ -191,6 +176,7 @@
         h('span', { class: 'grow' }),
         S.proposals.length > 0 && h('button', { class: 'btn', title: 'Убрать все карточки из списка (файлы не меняются)', onclick: onDismissAll }, 'Очистить список'),
         h('button', { class: 'btn', title: 'Если код не подхватился автоматически: скопируйте ответ ИИ и нажмите', onclick: onClipboard }, 'Взять из буфера'),
+        h('button', { class: 'btn', onclick: async () => { const r = await call('proposals:report'); if (r?.ok) toast('Отчёт скопирован. Вставьте его в чат.', 'ok'); else if (r) toast(r.error, 'err'); } }, 'Скопировать отчёт для чата'),
         h('button', { class: 'btn', title: 'Составить промпт с правилами формата — вкладка «Промпт»', onclick: () => switchTab('prompt') }, 'Промпт для ИИ')));
 
     if (!S.chatId) {
@@ -226,6 +212,7 @@
         p.pathFixed && h('span', { class: 'badge', title: 'ИИ указал путь вместе с именем корневой папки — оно убрано' }, 'путь исправлен'),
         p.warnings > 0 && h('span', { class: 'badge warn' }, 'возможно неполный код'),
         p.encodingWarning && h('span', { class: 'badge warn', title: p.encodingWarning }, 'не UTF-8'),
+        p.manualChanged && h('span', { class: 'badge warn', title: 'Файл изменён на диске после последней операции Whale Bridge' }, 'изменён вручную'),
         p.status === 'pending' && versions > 1 && h('span', { class: 'badge warn' }, `версий этого файла: ${versions}`),
         p.historical && h('span', { class: 'badge' }, 'из истории чата')));
     return h('div', { class: 'card-wrap' }, card,
@@ -327,19 +314,28 @@
     if (d.mode === 'patch' && d.state === 'patch-open') {
       box.append(h('div', { class: 'notice warn' }, 'Блок SEARCH/REPLACE не закрыт (нет строки >>>>>>> REPLACE): ответ ещё пишется или оборван. Подождите или попросите ИИ повторить правку.'));
     }
+    if (d.manualChanged) box.append(h('div', { class: 'notice warn' }, 'Файл изменён на диске после последней операции Whale Bridge. Модель могла видеть старую версию. Можно передать ей актуальную версию или выполнить трёхстороннее слияние.'));
     if (d.mode === 'patch' && d.state === 'patch-failed') {
       box.append(h('div', { class: 'notice bad' },
-        h('div', {}, 'Правку нельзя применить: ' + d.error),
-        h('div', { class: 'path' }, 'Попросите ИИ повторить правку, приложив актуальную версию файла, или вернуть файл целиком. На диске ничего не изменено.')));
+        h('div', {}, 'Правка не применена: ' + d.error),
+        h('div', { class: 'path' }, 'Ничего на диске не изменено. Ниже показано, что ожидал SEARCH и какой фрагмент сейчас находится в файле.')));
     }
     if (d.patchResults && d.patchResults.length) {
+      const partials = d.patchResults.filter((r) => r.partial);
       const fuzzy = d.patchResults.some((r) => r.status === 'ok' && r.method !== 'exact' && r.method !== 'block');
       const whole = d.patchResults.some((r) => r.wholeFile);
-      box.append(h('div', { class: 'notice' + (d.state === 'patch-failed' ? ' bad' : fuzzy ? ' warn' : '') },
-        h('div', {}, `Частичная правка: блоков ${d.patchResults.length}`),
-        h('ul', {}, d.patchResults.map((r, i) => h('li', {}, patchLine(r, i)))),
-        fuzzy && h('div', {}, 'Часть блоков найдена приблизительно (допуск на пробелы и отступы или поиск по имени) — внимательно проверьте Diff.'),
-        whole && h('div', {}, 'В SEARCH почти весь файл — по сути это полная замена. Правка применится, но можно попросить ИИ присылать только изменяемую функцию (REPLACE_BLOCK) или короткие фрагменты.')));
+      box.append(
+        h('div', { class: 'notice' + (d.state === 'patch-failed' ? ' bad' : fuzzy ? ' warn' : '') },
+          h('div', {}, `Частичная правка: блоков ${d.patchResults.length}`),
+          h('ul', {}, d.patchResults.map((r, i) => h('li', {}, patchLine(r, i)))),
+          fuzzy && h('div', {}, 'Часть блоков найдена приблизительно (допуск на пробелы и отступы или поиск по имени) — внимательно проверьте Diff.'),
+          whole && h('div', {}, 'В SEARCH почти весь файл — по сути это полная замена. Правка применится, но можно попросить ИИ присылать только изменяемую функцию (REPLACE_BLOCK) или короткие фрагменты.')));
+      for (const r of partials) {
+        box.append(
+          h('div', { class: 'patch-partial' },
+            h('div', { class: 'path' }, `Частичное совпадение: найдено ${r.partial.matched} из ${r.partial.total} строк, начиная со строки ${r.partial.line}.`),
+            diffTable(r.partial.diff, false)));
+      }
     }
     if (d.state === 'no-project') box.append(h('div', { class: 'notice warn' }, 'Чат не привязан к проекту. Выберите проект вверху.'));
     if (d.state === 'invalid-path') box.append(h('div', { class: 'notice bad' }, `Путь заблокирован: ${d.error}`));
@@ -384,6 +380,7 @@
       actions.append(
         h('button', { class: 'btn primary', disabled: !canApply || (risky && !S.allowIncomplete), onclick: () => onApply(d) },
           d.op === 'delete' ? 'Удалить в корзину' : d.op === 'move' ? (d.needsDirs ? 'Создать папки и переместить' : 'Переместить файл') : d.needsDirs ? 'Создать папки и файл' : 'Принять изменения'),
+        d.manualChanged && d.op === 'update' && h('button', { class: 'btn', onclick: () => onMerge(d) }, 'Применить и слить мои правки'),
         h('button', { class: 'btn', title: 'Закрыть предложение и убрать из списка', onclick: () => onReject(d) }, 'Отклонить'));
     }
     if (d.status === 'applied' && d.historyId) {
@@ -403,6 +400,17 @@
     await call('proposal:retarget', { id, relPath, op });
     await openProposal(id);
   }
+  async function openManual(relPath) {
+    if (!S.project) return;
+    const d = await call('manual:view', { projectId: S.project.id, relPath });
+    if (!d) return toast('Ручные изменения не найдены', 'err');
+    S.view = { kind: 'manual', data: d }; render();
+  }
+  async function copyManualVersions() {
+    if (!S.project) return;
+    const r = await call('manual:copy', { projectId: S.project.id });
+    toast(r?.ok ? `Актуальные версии скопированы (${r.files} файлов).` : r?.error, r?.ok ? 'ok' : 'err');
+  }
   async function openFile(projectId, rel) {
     const r = await call('file:open', { projectId, rel, mode: 'open' });
     if (r && !r.ok) toast(r.error, 'err');
@@ -412,6 +420,14 @@
     S.view = null;
     await loadProposals();
   }
+  async function onMerge(d) {
+    const r = await call('proposal:merge', { id: d.id });
+    if (!r) return;
+    if (r.ok) { toast('Изменения слиты с ручными правками', 'ok'); S.view = null; await loadProposals(); return; }
+    if (r.code === 'merge-conflict') { S.view = { kind: 'merge', data: { ...d, mergedText: r.mergedText, conflicts: r.conflicts } }; render(); return; }
+    toast(r.error, 'err');
+  }
+
   async function onApply(d) {
     if (d.op === 'delete') {
       if (!confirm(`Отправить файл «${d.relPath}» в системную корзину?\n\nПеред удалением будет создан бэкап для отката.`)) return;
@@ -451,7 +467,7 @@
     S.tree[rel] = (await call('fs:list', { projectId: S.project.id, rel })) || { error: 'Ошибка' };
   }
 
-  function treeNodes(rel, depth, out, marks, undo) {
+  function treeNodes(rel, depth, out, marks, undo, manual = new Set()) {
     const dir = S.tree[rel];
     if (!dir) return;
     if (dir.error) { out.push(h('div', { class: 'path', style: `padding-left:${depth * 14}px` }, dir.error)); return; }
@@ -459,7 +475,7 @@
       const open = S.expanded.has(it.rel);
       out.push(
         h('div', {
-          class: 'node' + (marks.has(it.rel) ? ' has-proposal' : ''), style: `padding-left:${depth * 14 + 4}px`,
+          class: 'node' + (marks.has(it.rel) ? ' has-proposal' : '') + (manual.has(it.rel) ? ' manual-changed' : ''), style: `padding-left:${depth * 14 + 4}px`,
           title: it.isDir ? '' : 'Показать в проводнике',
           onclick: async () => {
             if (it.isDir) {
@@ -470,9 +486,10 @@
         },
         h('span', { class: 'twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
         h('span', {}, it.name),
+        manual.has(it.rel) && h('span', { class: 'manual-warning', title: 'Файл изменён вне Whale Bridge' }, '⚠ изменён'),
         marks.has(it.rel) && h('span', { class: 'dot', title: 'Есть предложение изменений' }),
         undo.has(it.rel) && undoButton(undo.get(it.rel))));
-      if (it.isDir && open) treeNodes(it.rel, depth + 1, out, marks, undo);
+      if (it.isDir && open) treeNodes(it.rel, depth + 1, out, marks, undo, manual);
     }
   }
 
@@ -503,19 +520,21 @@
   function renderFiles() {
     if (!S.project) return h('div', { class: 'empty' }, 'Выберите проект вверху, чтобы увидеть его файлы.');
     const marks = new Set(S.proposals.filter((p) => p.status === 'pending' && !p.historical && p.state !== 'missing').map((p) => p.relPath));
+    const manual = new Set(S.manual.map((x) => x.relPath));
     const undo = new Map(); // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
     for (const e of S.history) if (e.status === 'applied' && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
     const box = h('div', { class: 'stack' },
       h('div', { class: 'toolbar' },
         h('span', { class: 'path grow' }, S.project.path),
-        h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить')));
+        h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить'),
+        manual.size > 0 && h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели')));
     if (S.tree[''] === undefined) {
       loadDir('').then(render);
       box.append(h('div', { class: 'empty' }, 'Загрузка…'));
       return box;
     }
     const nodes = [];
-    treeNodes('', 0, nodes, marks, undo);
+    treeNodes('', 0, nodes, marks, undo, manual);
     box.append(h('div', { class: 'tree' }, nodes));
     return box;
   }
@@ -524,6 +543,7 @@
   async function loadHistory() {
     S.history = (await call('history:list', { projectId: S.project ? S.project.id : null })) || [];
     S.backup = (await call('backups:stats')) || S.backup;
+    S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
   }
 
   async function onClearBackups() {
@@ -561,6 +581,36 @@
               e.error && h('span', { class: 'badge bad', title: e.error }, e.error.slice(0, 60)))),
           e.status !== 'failed' && !e.pruned && h('button', { class: 'btn', onclick: () => openHistory(e.id) }, 'Diff'),
           e.status === 'applied' && !(e.pruned && e.op !== 'create') && h('button', { class: 'btn', onclick: () => onRevert(e.id) }, 'Восстановить'))));
+  }
+
+  function renderManualView(d) {
+    return h('div', {},
+      h('div', { class: 'view-head' },
+        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К файлам'),
+        h('div', { class: 'view-title' }, 'Мои правки'),
+        h('div', { class: 'path' }, d.relPath)),
+      h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
+      diffTable(d.rows, d.truncated),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
+        h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл')));
+  }
+
+  function renderMergeView(d) {
+    return h('div', {},
+      h('div', { class: 'view-head' },
+        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К предложению'),
+        h('div', { class: 'view-title' }, 'Конфликт merge'),
+        h('div', { class: 'path' }, d.relPath)),
+      h('div', { class: 'notice bad' }, `Автоматическое слияние не выполнено: конфликтов ${d.conflicts}. Ни одна версия на диске не изменена.`),
+      d.conflictRows?.length && h('div', { class: 'stack' },
+        h('div', { class: 'path' }, 'DIFF: текущий файл → предложение ИИ'),
+        diffTable(d.conflictRows, false)),
+      h('div', { class: 'path' }, 'Вариант с маркерами конфликтов:'),
+      h('pre', { class: 'code' }, d.mergedText),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
+        h('button', { class: 'btn', onclick: closeView }, 'Назад')));
   }
 
   function renderHistoryView(d) {
@@ -737,10 +787,11 @@
         P.presetId = e.target.value;
         const pr = P.presets.find((x) => x.id === P.presetId);
         if (pr) { P.presetName = pr.name; nameInput.value = pr.name; }
-        loadBtn.disabled = delBtn.disabled = !P.presetId;
+        loadBtn.disabled = !P.presetId;
+        delBtn.disabled = !P.presetId || !!pr?.builtin;
       },
     }, h('option', { value: '' }, '— сохранённые пресеты —'),
-    P.presets.map((p) => h('option', { value: p.id, selected: p.id === P.presetId }, p.name)));
+    P.presets.map((p) => h('option', { value: p.id, selected: p.id === P.presetId }, p.name + (p.builtin ? ' (встроенный)' : ''))));
 
     const loadBtn = h('button', { class: 'btn', disabled: !P.presetId, onclick: async () => {
       if (!confirm('Заменить текущие поля содержимым пресета?')) return;
@@ -784,7 +835,7 @@
     }
     const box = h('div', { class: 'stack' });
     box.append(
-      h('div', { class: 'path' }, 'Заполните поля, при необходимости добавьте свои, и скопируйте промпт. Пустые поля в него не попадают. Правила по умолчанию учат ИИ маркерам файлов # &путь и блокам SEARCH/REPLACE.'),
+      h('div', { class: 'path' }, 'Заполните поля, при необходимости добавьте свои, и скопируйте промпт. Для задач под онлайн-судью используйте встроенный пресет «Судья» с полем «СРЕДА ВЫПОЛНЕНИЯ».'),
       presetBar());
     P.sections.forEach((s, i) => box.append(sectionCard(s, i)));
 
@@ -831,6 +882,8 @@
     body.replaceChildren();
     if (S.view && S.view.kind === 'proposal') body.append(renderProposalView(S.view.data));
     else if (S.view && S.view.kind === 'history') body.append(renderHistoryView(S.view.data));
+    else if (S.view && S.view.kind === 'manual') body.append(renderManualView(S.view.data));
+    else if (S.view && S.view.kind === 'merge') body.append(renderMergeView(S.view.data));
     else if (S.tab === 'proposals') body.append(renderProposals());
     else if (S.tab === 'files') body.append(renderFiles());
     else if (S.tab === 'prompt') body.append(renderPrompt());
@@ -867,12 +920,8 @@
 
   // ---------- события от главного процесса ----------
   api.on('chat:changed', loadState);
-  api.on('chat:tokens', ({ chatId, tokens }) => {
-    if (chatId !== S.chatId) return;
-    S.context.used = Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
-    renderHead();
-  });
   api.on('projects:changed', loadState);
+  api.on('project:auto-bound', async ({ project }) => { toast(`Привязан ${project.name} · Изменить`, 'ok'); await loadState(); });
   api.on('files:changed', async () => {
     await refreshTree();
     if (P.loaded && S.project) { // дерево в генераторе промпта обновляем «на месте», не трогая поля ввода
@@ -880,6 +929,7 @@
       paintPromptTree();
       refreshPreview();
     }
+    S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
     const v = S.view;
     if (v && v.kind === 'proposal' && v.data.status === 'pending') { // открытый Diff пересчитываем по свежему файлу
       const d = await call('proposal:get', { id: v.data.id });

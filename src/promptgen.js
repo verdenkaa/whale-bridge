@@ -19,8 +19,12 @@ const FORMAT_REMINDER = `КРАТКАЯ ПАМЯТКА ПО ФОРМАТУ ИЗ�
 новый фрагмент
 >>>>>>> REPLACE
 6. SEARCH/REPLACE должен содержать только нужные изменения; SEARCH — точная копия текста и встречается ровно один раз.
-7. Если нужно удалить файл — только маркер «&DELETE:path».
-8. Если нужно переместить файл — только маркер «&MOVE:старый/путь -> новый/путь».
+7. Если нужно удалить файл — только маркер «# &DELETE:path» (знак комментария по языку файла).
+8. Если нужно переместить файл — только маркер «# &MOVE:старый/путь -> новый/путь» (знак комментария по языку файла).
+9. Для частичной замены функции/класса можно использовать REPLACE_BLOCK:
+<<<<<<< REPLACE_BLOCK
+изменяемый блок
+>>>>>>> REPLACE_BLOCK.
 9. Для DELETE/MOVE содержимое файла не присылай.
 10. Не добавляй маркеры, SEARCH/REPLACE и другой служебный формат внутрь обычного пояснительного кода, если его не нужно применять.
 
@@ -71,9 +75,10 @@ const DEFAULTS = {
   limits: { title: 'ОГРАНИЧЕНИЯ', text: '', type: 'text' },
   rules: { title: 'ПРАВИЛА РАБОТЫ', text: DEFAULT_RULES, type: 'text' },
   mode: { title: 'РЕЖИМ РАБОТЫ', text: '', type: 'text' },
+  environment: { title: 'СРЕДА ВЫПОЛНЕНИЯ', text: '', type: 'text' },
   tree: { title: 'СТРУКТУРА ПРОЕКТА', text: '', type: 'tree' },
 };
-const ORDER = ['task', 'project', 'context', 'limits', 'rules', 'mode', 'tree'];
+const ORDER = ['task', 'project', 'context', 'limits', 'rules', 'mode', 'environment', 'tree'];
 
 let seq = 0;
 const newId = () => 's' + Date.now().toString(36) + (seq++).toString(36) + Math.random().toString(36).slice(2, 6);
@@ -83,6 +88,21 @@ function defaultSections() {
 }
 function defaultTexts() {
   return Object.fromEntries(Object.entries(DEFAULTS).filter(([, v]) => v.type === 'text').map(([k, v]) => [k, v.text]));
+}
+
+function builtinPresets() {
+  return [{
+    id: 'builtin-judge',
+    name: 'Судья',
+    builtin: true,
+    sections: [
+      { id: 'judge-task', key: 'task', title: 'ЗАДАЧА', text: '', type: 'text' },
+      { id: 'judge-environment', key: 'environment', title: 'СРЕДА ВЫПОЛНЕНИЯ', text: 'Python: 3.__\nРазрешены библиотеки: укажите, что разрешает судья.\nЗапрещены библиотеки/возможности: укажите ограничения.\nФормат ввода/вывода: строго по условию задачи.', type: 'text' },
+      { id: 'judge-limits', key: 'limits', title: 'ОГРАНИЧЕНИЯ', text: 'Не менять формат ввода/вывода и имена требуемых функций. Не добавлять зависимости, которых нет в среде судьи.', type: 'text' },
+      { id: 'judge-rules', key: 'rules', title: 'ПРАВИЛА РАБОТЫ', text: DEFAULT_RULES, type: 'text' },
+      { id: 'judge-mode', key: 'mode', title: 'РЕЖИМ РАБОТЫ', text: 'Дай решение, которое можно сразу запустить в указанной среде. Не используй API или библиотеки вне разрешённого списка.', type: 'text' },
+    ],
+  }];
 }
 
 // Поле «Правила работы» с неизменённым старым текстом по умолчанию обновляем до актуального
@@ -172,5 +192,5 @@ function buildPrompt({ sections, project, tree, excluded }) {
 }
 
 module.exports = {
-  DEFAULT_RULES, DEFAULT_CONTEXT_NOTE, FORMAT_REMINDER, defaultSections, defaultTexts, sanitizeSections, upgradeLegacy, renderTreeText, buildPrompt,
+  DEFAULT_RULES, DEFAULT_CONTEXT_NOTE, FORMAT_REMINDER, defaultSections, defaultTexts, sanitizeSections, upgradeLegacy, renderTreeText, buildPrompt, builtinPresets,
 };

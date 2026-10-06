@@ -107,6 +107,14 @@ test('diff: CRLF и LF считаются одинаковыми', () => {
   assert.equal(diffStats(diffLines('a\r\nb\r\n', 'a\nb\n')).added, 0);
 });
 
+test('diff: удаление последней строки не превращает соседнюю одинаковую строку в -/+ пару', () => {
+  const old = 'one\ntwo\nprint("и ещё одна строка")\nprint("четвёртая строка")\n';
+  const next = 'one\ntwo\nprint("и ещё одна строка")\n';
+  const ops = diffLines(old, next);
+  assert.deepEqual(diffStats(ops), { added: 0, removed: 1 });
+  assert.deepEqual(ops.filter((x) => x.type !== 'eq'), [{ type: 'del', text: 'print("четвёртая строка")', oldNo: 4 }]);
+});
+
 // ---------- fileops / proposals ----------
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-proj-'));
@@ -320,8 +328,9 @@ test('prompt: краткая памятка содержит все формат
   assert.match(FORMAT_REMINDER, /&NEW:/);
   assert.match(FORMAT_REMINDER, /SEARCH/);
   assert.match(FORMAT_REMINDER, /REPLACE/);
-  assert.match(FORMAT_REMINDER, /&DELETE:/);
-  assert.match(FORMAT_REMINDER, /&MOVE:/);
+  assert.match(FORMAT_REMINDER, /# &DELETE:/);
+  assert.match(FORMAT_REMINDER, /# &MOVE:/);
+  assert.match(FORMAT_REMINDER, /REPLACE_BLOCK/);
   assert.match(FORMAT_REMINDER, /Diff/);
 });
 

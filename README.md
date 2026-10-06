@@ -3,62 +3,61 @@
 
   <h1>Whale Bridge</h1>
 
-  <p><strong>DeepSeek companion for working with local code projects.</strong></p>
+  <p><strong>Компаньон DeepSeek для работы с локальными проектами.</strong></p>
 
   <p>
-    A free and open-source Windows desktop application that puts the DeepSeek web interface
-    next to your local project and turns AI code responses into reviewable, safe file changes.
+    Бесплатное приложение с открытым исходным кодом для Windows, которое размещает веб-интерфейс DeepSeek
+    рядом с локальным проектом и превращает ответы ИИ с кодом в проверяемые и безопасные изменения файлов.
   </p>
 </div>
 
 ---
 
-## What is Whale Bridge?
+## Что такое Whale Bridge?
 
-Whale Bridge is an Electron desktop application for developers who use the **DeepSeek web interface** while working on a local project.
+Whale Bridge — это настольное приложение на Electron для разработчиков, которые используют **веб-интерфейс DeepSeek** при работе с локальным проектом.
 
-It combines two things in one window:
+Оно объединяет два инструмента в одном окне:
 
-- **DeepSeek on the left** — the normal web interface, including your existing account and chats.
-- **Whale Bridge on the right** — your local project tree, prompt builder, proposed changes, Diff, history and rollback tools.
+- **DeepSeek слева** — обычный веб-интерфейс, включая вашу учётную запись и чаты.
+- **Whale Bridge справа** — дерево локального проекта, конструктор промптов, предлагаемые изменения, Diff, историю и инструменты отката.
 
-The important idea is simple: **DeepSeek suggests code, but Whale Bridge does not blindly write it to disk.**
+Главная идея проста: **DeepSeek предлагает код, но Whale Bridge не записывает его на диск вслепую.**
 
-The application parses supported code blocks from the DeepSeek page, matches them to your local files, shows the resulting Diff, and only applies the change after you confirm it.
+Приложение разбирает поддерживаемые блоки кода на странице DeepSeek, сопоставляет их с локальными файлами, показывает получившийся Diff и применяет изменение только после вашего подтверждения.
 
-### What it does
+### Что умеет
 
-- Connects the DeepSeek web interface with a local project folder.
-- Builds a structured first prompt from the selected project files.
-- Copies selected files and their contents to the clipboard for quick context sharing.
-- Detects full-file changes and partial `SEARCH / REPLACE` or `REPLACE_BLOCK` edits.
-- Supports creating, updating, deleting and moving files through explicit proposals.
-- Shows a Diff before a change is written.
-- Checks the file on disk for conflicts using SHA-256 hashes.
-- Creates backups and keeps an operation history.
-- Supports rollback.
-- Protects against unsafe paths, symlink escapes and several common malformed AI responses.
-- Refuses to rewrite existing files when their encoding is not valid UTF-8 instead of silently corrupting them.
-- Tracks an approximate conversation context/token counter in the UI.
+- Связывает веб-интерфейс DeepSeek с локальной папкой проекта.
+- Собирает структурированный первый промпт из выбранных файлов проекта.
+- Копирует выбранные файлы и их содержимое в буфер обмена для быстрой передачи контекста.
+- Распознаёт изменения целых файлов и частичные правки `SEARCH / REPLACE` или `REPLACE_BLOCK`.
+- Поддерживает создание, изменение, удаление и перемещение файлов через явные предложения.
+- Показывает Diff до записи изменения.
+- Проверяет файл на диске на наличие конфликтов с помощью SHA-256.
+- Создаёт резервные копии и хранит историю операций.
+- Поддерживает откат изменений.
+- Защищает от небезопасных путей, выхода через символические ссылки и ряда распространённых некорректных ответов ИИ.
+- Отказывается перезаписывать существующие файлы с некорректной UTF-8-кодировкой, не допуская их незаметного повреждения.
 
-Whale Bridge **does not have its own AI model or backend**. It works with the DeepSeek web service already open in the application.
+Whale Bridge **не имеет собственной ИИ-модели или бэкенда**. Он работает с уже открытым в приложении веб-сервисом DeepSeek.
 
 ---
 
-## Quick start — Windows
+## Быстрый старт — Windows
 
-### Option 1: download a release
+### Вариант 1: скачать готовую сборку
 
-Download one of the Windows builds from the repository's **Releases** page:
+Скачайте одну из сборок для Windows со страницы **Releases** репозитория:
 
-- **Installer** — normal Windows installation with Start Menu / Desktop shortcuts.
-- **Portable** — a standalone executable that does not require installation.
+- **Installer** — обычная установка Windows с ярлыками в меню «Пуск» и на рабочем столе.
+- **Portable** — автономный исполняемый файл, не требующий установки.
 
-Launch Whale Bridge and sign in to DeepSeek in the left panel.
+Запустите Whale Bridge и войдите в DeepSeek в левой панели.
 
-### Option 2: run from source
+### Вариант 2: запуск из исходников
 
-Requirements:
+Требования:
 
 - Windows, Linux or macOS
 - Node.js 20+
@@ -71,9 +70,9 @@ npm install
 npm start
 ```
 
-For Windows, `start.bat` can install dependencies and start the application for you.
+В Windows файл `start.bat` может автоматически установить зависимости и запустить приложение.
 
-For Linux/macOS:
+Для Linux/macOS:
 
 ```bash
 ./start.sh
@@ -82,25 +81,25 @@ For Linux/macOS:
 
 ---
 
-## How to use it
+## Как пользоваться
 
-### 1. Open DeepSeek
+### 1. Откройте DeepSeek
 
-Start Whale Bridge and sign in to your DeepSeek account in the left-hand web view.
+Запустите Whale Bridge и войдите в свою учётную запись DeepSeek в левом веб-представлении.
 
-Whale Bridge does not create or manage your DeepSeek account. It simply displays the DeepSeek web interface inside the application.
+Whale Bridge не создаёт и не управляет вашей учётной записью DeepSeek. Он лишь отображает веб-интерфейс DeepSeek внутри приложения.
 
-### 2. Add your project
+### 2. Добавьте проект
 
-In the right panel, click **Добавить папку** and select the root folder of your project.
+В правой панели нажмите **Добавить папку** и выберите корневую папку проекта.
 
-The selected project is associated with the current DeepSeek chat. The association is remembered locally so you can return to the same chat later.
+Выбранный проект связывается с текущим чатом DeepSeek. Эта связь сохраняется локально, поэтому позже можно вернуться к тому же чату.
 
-### 3. Prepare the first prompt
+### 3. Подготовьте первый промпт
 
 Open the **Промпт** tab.
 
-The prompt builder can include:
+Конструктор промпта может включать:
 
 - the task;
 - project context;
@@ -110,17 +109,17 @@ The prompt builder can include:
 - working rules;
 - the desired working mode.
 
-Select the files you want DeepSeek to see and click **Скопировать промпт**. Paste the generated prompt into DeepSeek yourself.
+Выберите файлы, которые должен видеть DeepSeek, и нажмите **Скопировать промпт**. Вставьте сгенерированный промпт в DeepSeek самостоятельно.
 
-You can also use **Скопировать файлы** to put the selected files and their contents into the clipboard as one compact context block.
+Также можно использовать **Скопировать файлы**, чтобы поместить выбранные файлы и их содержимое в буфер обмена одним компактным блоком контекста.
 
-> Whale Bridge does **not** silently type into the DeepSeek message box or send messages on your behalf. You decide what gets pasted and sent.
+> Whale Bridge **не вводит текст скрытно** в поле сообщения DeepSeek и не отправляет сообщения от вашего имени. Вы сами решаете, что вставлять и отправлять.
 
-### 4. Ask DeepSeek to modify the project
+### 4. Попросите DeepSeek изменить проект
 
-Ask DeepSeek to change the selected files according to the rules in the generated prompt.
+Попросите DeepSeek изменить выбранные файлы в соответствии с правилами из сгенерированного промпта.
 
-Whale Bridge watches the rendered DeepSeek response. Supported code markers tell it which local file a code block belongs to.
+Whale Bridge отслеживает отображаемый ответ DeepSeek. Поддерживаемые маркеры кода указывают, какому локальному файлу принадлежит блок кода.
 
 For example:
 
@@ -134,36 +133,36 @@ or for a new file:
 # &NEW:src/example.js
 ```
 
-When the response is complete, the right panel creates a proposal.
+После завершения ответа правая панель создаёт предложение.
 
-### 5. Review the Diff
+### 5. Проверьте Diff
 
-Open the proposal and inspect the Diff.
+Откройте предложение и проверьте Diff.
 
-Nothing is written to the project just because DeepSeek generated code.
+Сам факт генерации кода DeepSeek ничего не записывает в проект.
 
-Click **Принять изменения** only when the result is correct.
+Нажимайте **Принять изменения** только после проверки результата.
 
-### 6. Undo changes
+### 6. Отмените изменения
 
-Every applied operation is recorded in history and protected with a backup where applicable.
+Каждая применённая операция записывается в историю и, где это возможно, защищается резервной копией.
 
-Use **↩ Откатить** next to a file or the **История** tab to inspect and roll back previous operations.
+Используйте **↩ Откатить** рядом с файлом или вкладку **История**, чтобы посмотреть предыдущие операции и откатить их.
 
 ---
 
-## Supported edit formats
+## Поддерживаемые форматы правок
 
-### Full file
+### Полный файл
 
-For a complete file, DeepSeek can return the file contents under its path marker:
+Для полного файла DeepSeek может вернуть содержимое под маркером его пути:
 
 ```text
 # &src/example.py
 print("Hello")
 ```
 
-For a new file:
+Для нового файла:
 
 ```text
 # &NEW:src/example.py
@@ -172,7 +171,7 @@ print("Hello")
 
 ### REPLACE_BLOCK
 
-Use this for replacing a whole function, method or class without sending the entire file:
+Используйте этот формат для замены целой функции, метода или класса без передачи всего файла:
 
 ```text
 # &src/example.py
@@ -182,11 +181,11 @@ def main():
 >>>>>>> REPLACE_BLOCK
 ```
 
-Whale Bridge finds the corresponding function/method/class in the current file and replaces that block.
+Whale Bridge находит соответствующую функцию/метод/класс в текущем файле и заменяет этот блок.
 
 ### SEARCH / REPLACE
 
-Use this for a small, precise edit:
+Используйте этот формат для небольшой точечной правки:
 
 ```text
 # &src/example.py
@@ -197,29 +196,29 @@ new code
 >>>>>>> REPLACE
 ```
 
-The searched text must match exactly one place in the file. Ambiguous or missing matches are rejected instead of guessing.
+Искомый текст должен точно соответствовать одному месту в файле. Неоднозначные или отсутствующие совпадения отклоняются — приложение не пытается угадывать.
 
-### Delete a file
-
-```text
-DELETE:src/old_file.py
-```
-
-### Move a file
+### Удаление файла
 
 ```text
-MOVE:src/old_file.py -> src/new_file.py
+# &DELETE:src/old_file.py
 ```
 
-Delete and move operations do not require the file contents to be rewritten.
+### Перемещение файла
+
+```text
+# &MOVE:src/old_file.py -> src/new_file.py
+```
+
+Для операций удаления и перемещения не требуется перезаписывать содержимое файла.
 
 ---
 
-## Safety model
+## Модель безопасности
 
-Whale Bridge is intentionally conservative when applying AI-generated changes.
+При применении изменений, сгенерированных ИИ, Whale Bridge намеренно действует консервативно.
 
-Before writing a file it checks, among other things:
+Перед записью файла он проверяет, среди прочего:
 
 - path traversal such as `..`;
 - absolute paths;
@@ -231,156 +230,145 @@ Before writing a file it checks, among other things:
 - ambiguous `SEARCH / REPLACE` matches;
 - invalid UTF-8 when an existing file would be rewritten.
 
-Writes use a backup + temporary-file + atomic-replacement flow where appropriate.
+Там, где это уместно, запись выполняется через резервную копию, временный файл и атомарную замену.
 
-The goal is not to make AI-generated code automatically correct. The goal is to make **AI-assisted file changes reviewable and reversible**.
-
----
-
-## Privacy and data flow
-
-Whale Bridge has **no Whale Bridge server, account system or AI backend**.
-
-The application works locally with the project folder and embeds the DeepSeek website. It does not need a Whale Bridge API key.
-
-However, using DeepSeek is still using a third-party online service. If you paste project files, code, prompts or other information into DeepSeek, that information is sent to DeepSeek according to the service and account terms that apply to you.
-
-Do not paste secrets, passwords, private keys, credentials or confidential data unless you are sure that doing so is appropriate.
-
-Whale Bridge itself does not bypass DeepSeek authentication, CAPTCHA, access controls or other website protections.
+Цель не в том, чтобы автоматически сделать код, сгенерированный ИИ, правильным. Цель — сделать **изменения файлов с помощью ИИ проверяемыми и обратимыми**.
 
 ---
 
-## Context / token counter
+## Конфиденциальность и передача данных
 
-The header contains an **approximate** context counter.
+У Whale Bridge **нет собственного сервера, системы учётных записей или ИИ-бэкенда**.
 
-It estimates text visible in the current DeepSeek conversation, including user messages and DeepSeek responses/reasoning. It is intended as a convenient indicator rather than an exact tokenizer.
+Приложение локально работает с папкой проекта и встраивает сайт DeepSeek. Для него не нужен API-ключ Whale Bridge.
 
-The current limit displayed by Whale Bridge is **1,000,000 tokens**. Reaching the displayed limit does not block the chat or prevent you from continuing; it is informational only.
+Однако использование DeepSeek всё равно означает использование стороннего онлайн-сервиса. Если вы вставляете в DeepSeek файлы проекта, код, промпты или другую информацию, эти данные отправляются в DeepSeek в соответствии с применимыми к вам условиями сервиса и учётной записи.
+
+Не вставляйте секреты, пароли, приватные ключи, учётные данные или конфиденциальную информацию, если вы не уверены, что это допустимо.
+
+Сам Whale Bridge не обходит аутентификацию DeepSeek, CAPTCHA, средства контроля доступа или другие механизмы защиты сайта.
 
 ---
 
-## Project structure
+## Структура проекта
 
 ```text
-main.js              Electron main process, window, DeepSeek WebContentsView and privileged IPC
-preload-chat.js      DOM observer inside the DeepSeek page; read-only extraction
-preload-ui.js        restricted IPC bridge for the Whale Bridge UI
+main.js              Главный процесс Electron, окно, DeepSeek WebContentsView и привилегированный IPC
+preload-chat.js      Наблюдатель DOM внутри страницы DeepSeek; извлечение данных только для чтения
+preload-ui.js        ограниченный IPC-мост для интерфейса Whale Bridge
 
 src/
-  parser.js          response markers and edit-format detection
-  patch.js           SEARCH / REPLACE parsing and application
-  promptgen.js       prompt builder and project tree
-  paths.js           project-path safety checks
-  diff.js            Diff generation
-  fileops.js         reading, writing, backups, rollback and file operations
-  store.js           local configuration and history
-  proposals.js       proposal lifecycle, validation and application
+  parser.js          маркеры ответа и определение формата правок
+  patch.js           разбор и применение SEARCH / REPLACE
+  promptgen.js       конструктор промпта и дерево проекта
+  paths.js           проверки безопасности путей проекта
+  diff.js            генерация Diff
+  fileops.js         чтение, запись, резервные копии, откат и операции с файлами
+  store.js           локальная конфигурация и история
+  proposals.js       жизненный цикл, проверка и применение предложений
 
 ui/
-  app.js             right-hand application UI
-  styles.css         Whale Bridge UI styling
-  index.html         UI shell
+  app.js             интерфейс приложения справа
+  styles.css         стили интерфейса Whale Bridge
+  index.html         оболочка интерфейса
 
-tests/               automated logic and UI smoke tests
-assets/              Whale Bridge application icons
+tests/               автоматические тесты логики и smoke-тесты интерфейса
+assets/              иконки приложения Whale Bridge
 ```
 
 ---
 
-## Building Windows releases
+## Сборка релизов для Windows
 
-Whale Bridge uses `electron-builder` for Windows packaging.
+Whale Bridge использует `electron-builder` для упаковки приложения под Windows.
 
-Build both the installer and portable executable:
+Собрать установщик и portable-версию:
 
 ```bash
 npm run build:win
 ```
 
-Or build them separately:
+Или собрать их отдельно:
 
 ```bash
 npm run build:win:installer
 npm run build:win:portable
 ```
 
-The resulting artifacts are written to `release/`.
+Готовые артефакты записываются в `release/`.
 
-The project also contains a `build.bat` helper for Windows builds.
+В проекте также есть вспомогательный `build.bat` для сборки под Windows.
 
-GitHub Actions can be used to build release artifacts from a version tag.
-
----
-
-## Open source and license
-
-**Whale Bridge is free and open-source software.**
-
-The source code of Whale Bridge is released under the **MIT License**. See [`LICENSE`](LICENSE) for the full license text.
-
-You are free to use, study, modify and redistribute the project in accordance with that license and the licenses of its third-party dependencies.
-
-The downloadable Whale Bridge Windows builds are provided free of charge. There is no paid Whale Bridge subscription, activation key or proprietary Whale Bridge server required to run the application.
-
-### Third-party software
-
-Whale Bridge is built with open-source software including Electron and electron-builder. Their respective licenses and notices remain applicable to those components.
-
-Whale Bridge is **not** a distribution of the DeepSeek software itself. It embeds and displays the DeepSeek web service in an Electron window.
+GitHub Actions можно использовать для сборки релизных артефактов из тега версии.
 
 ---
 
-## DeepSeek trademark and affiliation disclaimer
+## Открытый исходный код и лицензия
 
-**Whale Bridge is an independent, unofficial third-party project.**
+**Whale Bridge — бесплатное программное обеспечение с открытым исходным кодом.**
 
-Whale Bridge is **not developed by, sponsored by, endorsed by, affiliated with, or officially connected to DeepSeek, Hangzhou DeepSeek Artificial Intelligence Co., Ltd., or any of its subsidiaries or services.**
+Исходный код Whale Bridge распространяется по **лицензии MIT**. Полный текст лицензии находится в [`LICENSE`](LICENSE).
 
-“DeepSeek” is used in this README only to accurately describe the third-party web service with which Whale Bridge is designed to work. The DeepSeek name, logos, product names and other brand assets remain the property of their respective owners.
+Вы можете использовать, изучать, изменять и распространять проект в соответствии с этой лицензией и лицензиями его сторонних зависимостей.
 
-Whale Bridge does not claim ownership of the DeepSeek service, its website, its models, its trademarks or its proprietary content.
+Доступные для скачивания сборки Whale Bridge для Windows предоставляются бесплатно. Для работы приложения не требуется платная подписка Whale Bridge, ключ активации или собственный сервер Whale Bridge.
 
-Use of the DeepSeek service through Whale Bridge remains subject to the terms, policies and requirements applicable to that service. Users are responsible for complying with those terms and with applicable law.
+### Стороннее программное обеспечение
 
-**Whale Bridge is simply an independent desktop companion that provides a local workspace around the DeepSeek web interface.**
+Whale Bridge создан с использованием ПО с открытым исходным кодом, включая Electron и electron-builder. Их соответствующие лицензии и уведомления продолжают применяться к этим компонентам.
 
----
-
-## Disclaimer
-
-Whale Bridge is provided **“as is”**, without warranties of any kind, to the extent permitted by applicable law.
-
-AI-generated code can be incorrect, insecure, incomplete or incompatible with your project. Always review, test and validate changes before using them in production.
-
-Whale Bridge does not guarantee the availability, accuracy, reliability or continued compatibility of the DeepSeek web service. Changes to the DeepSeek website may require changes to Whale Bridge's DOM observer and integration layer.
-
-Nothing in this README is legal advice. If you need advice about licensing, trademarks, privacy, data protection or your particular use of DeepSeek, consult a qualified professional.
+Whale Bridge **не является** дистрибутивом самого программного обеспечения DeepSeek. Он встраивает и отображает веб-сервис DeepSeek в окне Electron.
 
 ---
 
-## If DeepSeek changes its web interface
+## Отказ от принадлежности к DeepSeek и использования товарного знака
 
-The DOM integration depends on the rendered DeepSeek page. If DeepSeek changes its markup, some extraction features may stop working until the selectors are updated.
+**Whale Bridge — независимый неофициальный сторонний проект.**
 
-For debugging, use **Вид → DevTools чата (F12)**.
+Whale Bridge **не разработан компанией DeepSeek, не спонсируется ею, не одобрен ею, не связан с ней и не имеет официальной связи с DeepSeek, Hangzhou DeepSeek Artificial Intelligence Co., Ltd., её дочерними компаниями или сервисами.**
 
-As a fallback, you can copy a DeepSeek response and use **Взять из буфера**.
+Название «DeepSeek» используется в этом README исключительно для точного описания стороннего веб-сервиса, с которым предназначен работать Whale Bridge. Название DeepSeek, логотипы, названия продуктов и другие элементы бренда остаются собственностью соответствующих правообладателей.
+
+Whale Bridge не заявляет о правах собственности на сервис DeepSeek, его сайт, модели, товарные знаки или защищённый контент.
+
+Использование сервиса DeepSeek через Whale Bridge по-прежнему регулируется условиями, правилами и требованиями, применимыми к этому сервису. Пользователи несут ответственность за соблюдение этих условий и применимого законодательства.
+
+**Whale Bridge — это всего лишь независимый настольный компаньон, предоставляющий локальное рабочее пространство вокруг веб-интерфейса DeepSeek.**
 
 ---
 
-## Known limitations
+## Отказ от ответственности
 
-- No syntax highlighting or line-by-line partial acceptance yet.
-- History is stored in JSON rather than SQLite.
-- Some social-login flows may not work inside an embedded browser window.
+Whale Bridge предоставляется **«как есть»**, без каких-либо гарантий в той мере, в какой это допускается применимым законодательством.
+
+Код, сгенерированный ИИ, может быть неправильным, небезопасным, неполным или несовместимым с вашим проектом. Всегда проверяйте и тестируйте изменения перед использованием в production.
+
+Whale Bridge не гарантирует доступность, точность, надёжность или постоянную совместимость с веб-сервисом DeepSeek. Изменения на сайте DeepSeek могут потребовать изменений в DOM-наблюдателе и слое интеграции Whale Bridge.
+
+Ничто в этом README не является юридической консультацией. Если вам требуется консультация по лицензированию, товарным знакам, конфиденциальности, защите данных или конкретному использованию DeepSeek, обратитесь к квалифицированному специалисту.
+
+---
+
+## Если DeepSeek изменит веб-интерфейс
+
+DOM-интеграция зависит от отображаемой страницы DeepSeek. Если DeepSeek изменит разметку, некоторые функции извлечения данных могут перестать работать, пока селекторы не будут обновлены.
+
+Для отладки используйте **Вид → DevTools чата (F12)**.
+
+В качестве запасного варианта можно скопировать ответ DeepSeek и использовать **Взять из буфера**.
+
+---
+
+## Известные ограничения
+
+- Пока нет подсветки синтаксиса и построчного принятия частичных изменений.
+- История хранится в JSON, а не в SQLite.
+- Некоторые сценарии входа через социальные сети могут не работать во встроенном окне браузера.
 - Whale Bridge does not bypass authentication, CAPTCHA or website security controls.
-- The context/token counter is an estimate, not DeepSeek's official tokenizer.
-- Compatibility depends on changes to the DeepSeek web interface.
+- Совместимость зависит от изменений веб-интерфейса DeepSeek.
 
 ---
 
-## License
+## Лицензия
 
 MIT — see [`LICENSE`](LICENSE).
