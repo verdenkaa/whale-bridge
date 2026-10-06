@@ -1,4 +1,5 @@
 'use strict';
+const { diffLines } = require('./diff');
 // Частичные правки в формате SEARCH/REPLACE. Чистые функции, без Electron и DOM.
 //
 //   <<<<<<< SEARCH
@@ -245,15 +246,38 @@ function applyBlock(arr, rawLines) {
   return { status: 'ok', method: found.method, line: from + 1, endLine: from + body.length };
 }
 
+function findPartialMatch(arr, s) {
+  const anchors = [];
+  for (let j = 0; j < s.length; j++) {
+    const target = s[j].trim();
+    if (!target) continue;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i].trim() === target) anchors.push({ searchIndex: j, fileIndex: i });
+      if (anchors.length >= 80) break;
+    }
+    if (anchors.length >= 80) break;
+  }
+  if (!anchors.length) return null;
+  let best = null;
+  for (const a of anchors) {
+    const start = a.fileIndex - a.searchIndex;
+    if (start < 0 || start >= arr.length) continue;
+    const actual = arr.slice(start, start + s.length);
+    let matched = 0;
+    for (let j = 0; j < s.length && start + j < arr.length; j++) {
+      if (arr[start + j].trim() === s[j].trim()) matched++;
+    }
+    if (!best || matched > best.matched) best = { start, matched, actual };
+  }
+  if (!best || best.matched === 0) return null;
+  return { line: best.start + 1, matched: best.matched, total: s.length, expected: s.slice(), actual: best.actual, diff: diffLines(s.join('\n'), best.actual.join('\n')) };
+}
+
 function hintFor(arr, s) {
-  const first = s.find((l) => l.trim() !== '');
-  if (first === undefined) return '';
-  const t = first.trim();
-  const at = [];
-  arr.forEach((l, i) => { if (l.trim() === t && at.length < 3) at.push(i + 1); });
-  return at.length
-    ? `первая строка блока есть в файле (строка ${at.join(', ')}), но дальше текст отличается`
-    : 'первая строка блока не найдена в файле';
+  const partial = findPartialMatch(arr, s);
+  return partial
+    ? { text: `частично найдено: совпало ${partial.matched} из ${partial.total} строк (строка ${partial.line})`, partial }
+    : { text: 'точного или частичного совпадения не найдено' };
 }
 
 /**
@@ -298,7 +322,8 @@ function applyEdits(oldText, edits) {
       results.push({ status: 'ambiguous', hits: m.hits, hint: `фрагмент найден несколько раз (строки ${m.hits.join(', ')}) — нужен более длинный контекст` });
     } else {
       failed = true;
-      results.push({ status: 'notfound', hint: hintFor(arr, s) });
+      const hint = hintFor(arr, s);
+      results.push({ status: 'notfound', hint: hint.text, partial: hint.partial || null });
     }
   });
 

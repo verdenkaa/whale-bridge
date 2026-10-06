@@ -39,7 +39,6 @@ The application parses supported code blocks from the DeepSeek page, matches the
 - Supports rollback.
 - Protects against unsafe paths, symlink escapes and several common malformed AI responses.
 - Refuses to rewrite existing files when their encoding is not valid UTF-8 instead of silently corrupting them.
-- Tracks an approximate conversation context/token counter in the UI.
 
 Whale Bridge **does not have its own AI model or backend**. It works with the DeepSeek web service already open in the application.
 
@@ -202,13 +201,13 @@ The searched text must match exactly one place in the file. Ambiguous or missing
 ### Delete a file
 
 ```text
-DELETE:src/old_file.py
+# &DELETE:src/old_file.py
 ```
 
 ### Move a file
 
 ```text
-MOVE:src/old_file.py -> src/new_file.py
+# &MOVE:src/old_file.py -> src/new_file.py
 ```
 
 Delete and move operations do not require the file contents to be rewritten.
@@ -248,16 +247,6 @@ However, using DeepSeek is still using a third-party online service. If you past
 Do not paste secrets, passwords, private keys, credentials or confidential data unless you are sure that doing so is appropriate.
 
 Whale Bridge itself does not bypass DeepSeek authentication, CAPTCHA, access controls or other website protections.
-
----
-
-## Context / token counter
-
-The header contains an **approximate** context counter.
-
-It estimates text visible in the current DeepSeek conversation, including user messages and DeepSeek responses/reasoning. It is intended as a convenient indicator rather than an exact tokenizer.
-
-The current limit displayed by Whale Bridge is **1,000,000 tokens**. Reaching the displayed limit does not block the chat or prevent you from continuing; it is informational only.
 
 ---
 
@@ -376,7 +365,6 @@ As a fallback, you can copy a DeepSeek response and use **Взять из буф
 - History is stored in JSON rather than SQLite.
 - Some social-login flows may not work inside an embedded browser window.
 - Whale Bridge does not bypass authentication, CAPTCHA or website security controls.
-- The context/token counter is an estimate, not DeepSeek's official tokenizer.
 - Compatibility depends on changes to the DeepSeek web interface.
 
 ---

@@ -9,11 +9,6 @@ const { ipcRenderer } = require('electron');
 
   // ЕДИНСТВЕННОЕ место, зависящее от вёрстки DeepSeek. Если вёрстка изменится — правим здесь.
   const BLOCK_SELECTOR = 'pre';
-  // Только видимый текст сообщений: HTML-теги, классы и прочая разметка не считаются.
-  // ds-markdown-paragraph покрывает обычный ответ и рассуждение DeepSeek,
-  // ds-collapsible-text — текст пользовательского сообщения, pre — кодовые блоки.
-  const TOKEN_SELECTOR = '.ds-markdown-paragraph, .ds-collapsible-text, pre';
-
   const SETTLE_MS = 1200; // блок «созрел», если текст не менялся столько времени
   const TICK_MS = 400;
   const BASELINE_MS = 2500; // всё, что появилось сразу после открытия чата, — «история»
@@ -23,9 +18,6 @@ const { ipcRenderer } = require('electron');
   let nextId = 1;
   let chatId = chatIdFromUrl();
   let baselineUntil = Date.now() + BASELINE_MS;
-  let tokenState = new WeakMap(); // element -> последнее число оценённых токенов
-  let tokenTotal = 0;
-  let lastSentTokens = -1;
 
   function chatIdFromUrl() {
     const m = location.pathname.match(/\/a\/chat\/s\/([0-9a-f-]{36})/i);
@@ -37,48 +29,13 @@ const { ipcRenderer } = require('electron');
     if (id === chatId) return;
     const createdNow = chatId === null && id !== null; // новый чат получил id — это не смена чата
     chatId = id;
-    tokenState = new WeakMap();
-    tokenTotal = 0;
-    lastSentTokens = -1;
     baselineUntil = Date.now() + BASELINE_MS;
-  }
-
-  // Грубая оценка токенов. Это намеренно не попытка повторить внутренний tokenizer DeepSeek:
-  // для интерфейсного индикатора достаточно стабильной приблизительной оценки.
-  function estimateTokens(text) {
-    if (!text) return 0;
-    return Math.ceil(text.length / 3.5);
-  }
-
-  function scanTokens() {
-    if (!chatId) return;
-    const seen = new Set();
-    document.querySelectorAll(TOKEN_SELECTOR).forEach((el) => {
-      if (seen.has(el)) return;
-      seen.add(el);
-      const text = el.textContent || '';
-      const next = estimateTokens(text);
-      const prev = tokenState.get(el);
-      if (prev === undefined) {
-        tokenState.set(el, next);
-        tokenTotal += next;
-      } else if (prev !== next) {
-        tokenState.set(el, next);
-        tokenTotal += next - prev;
-      }
-    });
-    tokenTotal = Math.max(0, tokenTotal);
-    if (tokenTotal !== lastSentTokens) {
-      lastSentTokens = tokenTotal;
-      ipcRenderer.send('chat:tokens', { chatId, tokens: tokenTotal });
-    }
   }
 
   // Возвращает число блоков, которые ещё «дозревают» (текст есть, но не отправлен)
   function scan() {
     trackUrl();
     if (!chatId) return 0;
-    scanTokens();
     const now = Date.now();
     const out = [];
     let pending = 0;

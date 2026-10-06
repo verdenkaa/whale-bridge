@@ -26,6 +26,7 @@ let chatView = null;
 let store = null;
 let proposals = null;
 let currentChatId = null;
+let pendingProjectId = null;
 let ratio = 0.5;
 let dragging = false;
 let watcher = null;
@@ -67,12 +68,24 @@ function syncWatcher() {
   }
 }
 
-function updateChatFromUrl() {
+async function updateChatFromUrl() {
   const url = chatView.webContents.getURL();
+  const previousChatId = currentChatId;
   const m = url.match(CHAT_URL_RE);
   currentChatId = m ? m[1].toLowerCase() : null;
+  if (currentChatId) {
+    const bound = store.getProjectForChat(currentChatId);
+    if (!bound && pendingProjectId) {
+      const project = store.getProject(pendingProjectId);
+      if (project) {
+        await store.bind(currentChatId, project.id);
+        pendingProjectId = null;
+        send('project:auto-bound', { chatId: currentChatId, project });
+      }
+    }
+  }
   syncWatcher();
-  send('chat:changed', { chatId: currentChatId, url });
+  send('chat:changed', { chatId: currentChatId, url, chatIdAppeared: previousChatId === null && currentChatId !== null });
 }
 
 function createWindow() {
@@ -190,20 +203,6 @@ ipcMain.on('chat:blocks', (event, payload) => {
   if (clean.length) proposals.ingest(chatId.toLowerCase(), clean);
 });
 
-// Приблизительный счётчик контекста: preload считает только текстовые узлы DeepSeek,
-// а не HTML-разметку. Ничего не блокирует при превышении лимита.
-ipcMain.on('chat:tokens', (event, payload) => {
-  if (!chatView || event.sender !== chatView.webContents) return;
-  try {
-    if (!/(^|\.)deepseek\.com$/.test(new URL(event.senderFrame.url).hostname)) return;
-  } catch { return; }
-  if (!payload || typeof payload !== 'object') return;
-  const { chatId, tokens } = payload;
-  if (typeof chatId !== 'string' || !CHAT_ID_RE.test(chatId)) return;
-  if (!Number.isFinite(tokens) || tokens < 0 || tokens > 100_000_000) return;
-  send('chat:tokens', { chatId: chatId.toLowerCase(), tokens: Math.round(tokens) });
-});
-
 function projectOr(id) {
   const p = store.getProject(id);
   if (!p) throw new Error('Проект не найден');
@@ -215,6 +214,7 @@ function registerIpc() {
     projects: store.config.projects,
     chatId: currentChatId,
     project: store.getProjectForChat(currentChatId),
+    pendingProjectId,
     lastProjectId: store.config.lastProjectId,
     ratio,
   }; });
@@ -237,8 +237,17 @@ function registerIpc() {
   handle('project:bind', async ({ chatId, projectId }) => {
     if (typeof chatId !== 'string' || !CHAT_ID_RE.test(chatId)) throw new Error('Нет идентификатора чата');
     await store.bind(chatId.toLowerCase(), projectId ? String(projectId) : null);
+    if (projectId && String(projectId) === pendingProjectId) pendingProjectId = null;
     send('projects:changed');
     proposals.onChange();
+  });
+  handle('project:pending', async ({ projectId }) => {
+    const id = projectId ? String(projectId) : null;
+    if (!id) { pendingProjectId = null; return null; }
+    const p = store.getProject(id);
+    if (!p) throw new Error('Проект не найден');
+    pendingProjectId = p.id;
+    return p;
   });
 
   handle('fs:list', ({ projectId, rel }) => fileops.listDir(projectOr(projectId).path, rel ? String(rel) : ''));
@@ -285,6 +294,20 @@ function registerIpc() {
   handle('history:list', ({ projectId }) => proposals.listHistory(projectId ? String(projectId) : null));
   handle('history:view', ({ id }) => proposals.historyView(String(id)));
   handle('history:revert', ({ id, force }) => proposals.historyRevert(String(id), force === true));
+  handle('manual:list', ({ projectId }) => proposals.listManualChanges(String(projectId)));
+  handle('manual:view', ({ projectId, relPath }) => proposals.manualView(String(projectId), String(relPath)));
+  handle('manual:copy', async ({ projectId }) => {
+    const r = await proposals.copyManualVersions(String(projectId));
+    if (r.ok) clipboard.writeText(r.text);
+    return r;
+  });
+  handle('proposals:report', async () => {
+    if (!currentChatId) return { ok: false, error: 'Сначала откройте чат' };
+    const r = await proposals.buildChatReport(currentChatId);
+    if (r.ok) clipboard.writeText(r.text);
+    return r;
+  });
+  handle('proposal:merge', ({ id }) => proposals.merge(String(id)));
 
   // ---- резервные копии ----
   handle('backups:stats', () => store.backupStats());
@@ -307,7 +330,7 @@ function registerIpc() {
   }
   handle('prompt:get', ({ projectId }) => ({
     sections: store.config.promptDraft ? pg.upgradeLegacy(pg.sanitizeSections(store.config.promptDraft)) : pg.defaultSections(),
-    presets: store.listPresets(),
+    presets: [...pg.builtinPresets().map(({ id, name, builtin }) => ({ id, name, builtin })), ...store.listPresets()],
     excluded: projectId ? store.getTreeOff(String(projectId)) : [],
     defaults: pg.defaultTexts(),
   }));
@@ -386,13 +409,15 @@ function registerIpc() {
     return store.listPresets();
   });
   handle('prompt:preset-load', async ({ id }) => {
-    const preset = store.getPreset(String(id));
+    const sid = String(id);
+    const preset = pg.builtinPresets().find((p) => p.id === sid) || store.getPreset(sid);
     if (!preset) throw new Error('Пресет не найден');
     const sections = pg.upgradeLegacy(pg.sanitizeSections(preset.sections));
     await store.setPromptDraft(sections);
     return sections;
   });
   handle('prompt:preset-delete', async ({ id }) => {
+    if (String(id).startsWith('builtin-')) throw new Error('Встроенный пресет удалить нельзя');
     await store.deletePreset(String(id));
     return store.listPresets();
   });
@@ -449,6 +474,8 @@ if (!app.requestSingleInstanceLock()) {
     buildMenu();
     createWindow();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+
+
   });
 
   app.on('window-all-closed', () => {

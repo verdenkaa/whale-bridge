@@ -127,9 +127,9 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   await click(tabs[3]);
   await tick(80);
   const titles = findAll(roots.body, (e) => e.className === 'sec-title').map((e) => e.attrs.value);
-  assert.deepEqual(titles, ['ЗАДАЧА', 'КОНТЕКСТ ПРОЕКТА', 'ЧТО В КОНТЕКСТЕ', 'ОГРАНИЧЕНИЯ', 'ПРАВИЛА РАБОТЫ', 'РЕЖИМ РАБОТЫ', 'СТРУКТУРА ПРОЕКТА']);
+  assert.deepEqual(titles, ['ЗАДАЧА', 'КОНТЕКСТ ПРОЕКТА', 'ЧТО В КОНТЕКСТЕ', 'ОГРАНИЧЕНИЯ', 'ПРАВИЛА РАБОТЫ', 'РЕЖИМ РАБОТЫ', 'СРЕДА ВЫПОЛНЕНИЯ', 'СТРУКТУРА ПРОЕКТА']);
   const areas = findAll(roots.body, (e) => e.tag === 'textarea');
-  assert.equal(areas.length, 6);
+  assert.equal(areas.length, 7);
   assert.match(text(areas[2]), /Файлы приложены в чат вложениями/);
   assert.match(text(areas[4]), /SEARCH/);
 

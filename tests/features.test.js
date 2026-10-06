@@ -72,6 +72,14 @@ test('patch: пустой SEARCH допустим только для пусто
   assert.equal(applyEdits('x\n', [{ search: [], replace: ['a'] }]).ok, false);
 });
 
+test('patch: частичный SEARCH показывает реальный diff, если строка просто отсутствует', () => {
+  const old = 'one\ntwo\nprint("и ещё одна строка")\nprint("четвёртая строка")\n';
+  const r = applyEdits(old, [{ search: ['one', 'two', 'print("и ещё одна строка")', 'print("пятая строка")'], replace: [] }]);
+  assert.equal(r.ok, false);
+  assert.equal(r.results[0].partial.matched, 3);
+  assert.deepEqual(r.results[0].partial.diff.filter((x) => x.type !== 'eq').map((x) => [x.type, x.text]), [['del', 'print("пятая строка")'], ['add', 'print("четвёртая строка")']]);
+});
+
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-p-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-d-'));
@@ -83,6 +91,29 @@ async function setup(t) {
   await store.bind(chat, project.id);
   return { root, data, store, project, chat, pm: new ProposalManager({ store }) };
 }
+
+test('proposal: принятое и отклонённое предложение не возвращается после нового ProposalManager', async (t) => {
+  const { root, store, chat } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
+  const pm1 = new ProposalManager({ store });
+  pm1.ingest(chat, [{ key: 'reject', text: '# &a.py\nx = 2\n' }]);
+  const rejected = (await pm1.list(chat, true))[0];
+  pm1.reject(rejected.id);
+  pm1.ingest(chat, [{ key: 'apply', text: '# &a.py\nx = 3\n' }]);
+  const applied = (await pm1.list(chat, true)).find((x) => x.status === 'pending');
+  const v = await pm1.view(applied.id);
+  assert.equal((await pm1.apply(applied.id, { baseHash: v.baseHash, contentHash: v.contentHash })).ok, true);
+  const pm2 = new ProposalManager({ store });
+  pm2.ingest(chat, [
+    { key: 'new-reject-node', text: '# &a.py\nx = 2\n' },
+    { key: 'new-applied-node', text: '# &a.py\nx = 3\n' },
+    { key: 'new-pending-node', text: '# &a.py\nx = 4\n' },
+  ]);
+  const list = await pm2.list(chat, true);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].relPath, 'a.py');
+  assert.equal(list[0].status, 'pending');
+});
 
 test('patch: полный цикл через предложение — Diff, запись с CRLF, откат', async (t) => {
   const { root, pm, chat } = await setup(t);
@@ -186,7 +217,7 @@ test('бэкапы: лимит считается отдельно по кажд
 // ---------- генератор промпта ----------
 test('промпт: поля по умолчанию, пропуск пустых, порядок и кастомные поля', () => {
   const secs = pg.defaultSections();
-  assert.deepEqual(secs.map((s) => s.title), ['ЗАДАЧА', 'КОНТЕКСТ ПРОЕКТА', 'ЧТО В КОНТЕКСТЕ', 'ОГРАНИЧЕНИЯ', 'ПРАВИЛА РАБОТЫ', 'РЕЖИМ РАБОТЫ', 'СТРУКТУРА ПРОЕКТА']);
+  assert.deepEqual(secs.map((s) => s.title), ['ЗАДАЧА', 'КОНТЕКСТ ПРОЕКТА', 'ЧТО В КОНТЕКСТЕ', 'ОГРАНИЧЕНИЯ', 'ПРАВИЛА РАБОТЫ', 'РЕЖИМ РАБОТЫ', 'СРЕДА ВЫПОЛНЕНИЯ', 'СТРУКТУРА ПРОЕКТА']);
   secs[0].text = 'Добавить двойной прыжок';
   secs.push({ id: 'x', key: null, title: 'МОЯ СЕКЦИЯ', text: 'abc', type: 'text' });
   const { text } = pg.buildPrompt({ sections: secs, project: null, tree: null, excluded: new Set() });
@@ -376,6 +407,7 @@ test('путь с именем корня НЕ трогается, если вн
 test('промпт: новые правила описывают REPLACE_BLOCK и запрещают весь файл в SEARCH; старые правила обновляются', () => {
   const r = pg.DEFAULT_RULES;
   assert.ok(r.includes('<<<<<<< REPLACE_BLOCK') && r.includes('>>>>>>> REPLACE_BLOCK'));
+  assert.ok(pg.FORMAT_REMINDER.includes('# &DELETE:') && pg.FORMAT_REMINDER.includes('# &MOVE:'));
   assert.ok(r.includes('if __name__ == "__main__":'));
   assert.ok(r.includes('НИКОГДА не клади в SEARCH весь файл'));
   assert.ok(r.includes('имя корневой папки в путь НЕ входит'));

@@ -2,16 +2,16 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const INVOKE = new Set([
-  'state:get', 'project:add', 'project:remove', 'project:bind',
+  'state:get', 'project:add', 'project:remove', 'project:bind', 'project:pending',
   'fs:list', 'file:open',
   'proposals:list', 'proposal:dismiss', 'proposals:dismissAll', 'proposal:get', 'proposal:retarget', 'proposal:apply', 'proposal:reject', 'proposal:fromClipboard',
   'history:list', 'history:view', 'history:revert',
   'backups:stats', 'backups:clear',
   'prompt:get', 'prompt:tree', 'prompt:save-draft', 'prompt:set-excluded', 'prompt:build', 'prompt:copy', 'prompt:copy-reminder', 'prompt:copy-files',
-  'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset',
+  'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset', 'proposals:report', 'manual:list', 'manual:view', 'manual:copy', 'proposal:merge',
   'layout:drag-start', 'layout:set', 'layout:drag-end',
 ]);
-const EVENTS = new Set(['chat:changed', 'chat:tokens', 'proposals:changed', 'projects:changed', 'files:changed']);
+const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound']);
 
 contextBridge.exposeInMainWorld('api', {
   invoke(channel, arg) {
