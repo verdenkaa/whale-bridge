@@ -164,7 +164,7 @@ test('rollback: откат перемещения возвращает файл 
   assert.equal(rb.newRelPath, 'archive/new.txt');
 });
 
-test('rollback: нет ложного «изменён вручную» после принудительного отката старой операции', async (t) => {
+test('rollback: после отката модель знает устаревшую версию — расхождение обнаруживается', async (t) => {
   const { root, store, pm, chat, project } = await setup(t);
   await fs.writeFile(path.join(root, 'a.py'), 'v0\n');
   const idA = await applyText({ pm, chat, key: 'a', text: '# &a.py\nv1\n' });
@@ -176,31 +176,34 @@ test('rollback: нет ложного «изменён вручную» посл
   assert.equal((await pm.historyRevert(idA, true)).ok, true);
   assert.equal(await fs.readFile(path.join(root, 'a.py'), 'utf8'), 'v0\n');
 
-  // Операция B осталась applied с afterHash от v2 — без записи об откате именно она
-  // попала бы в _manualBase как «последняя операция» и дала ложный manualChanged.
+  // На диске v0, а модель последней видела v2 — она её и предложила. Контекст разошёлся,
+  // и приложение обязано об этом сказать. Прежняя схема сравнивала диск с последней
+  // записью истории Whale Bridge и здесь молчала: откат сам себя «гасил».
   const b = store.getHistory(idB);
   assert.equal(b.status, 'applied');
   assert.equal(b.afterHash, H('v2\n'));
-  assert.notEqual(b.afterHash, H('v0\n'));
 
   pm.ingest(chat, [{ key: 'c', text: '# &a.py\nv3\n' }]);
   const pending = (await pm.list(chat, true)).find((x) => x.status === 'pending');
   const ev = await pm.view(pending.id);
-  // evaluate() выставляет manualChanged только когда оно истинно — иначе ключа нет
-  assert.ok(!ev.manualChanged, 'файл не менялся вручную — его откатили');
+  assert.equal(ev.manualChanged, true);
+  assert.equal(ev.contextDiverged, true);
+  assert.equal(ev.knownVersion.hash, H('v2\n'));
+  assert.equal(ev.knownVersion.source, 'applied');
 
-  // а вот реальное внешнее изменение после отката определяется честно
+  // подтверждение снимает отметку
+  assert.equal((await pm.ackContext(chat, project.id, 'a.py')).ok, true);
+  assert.ok(!(await pm.view(pending.id)).manualChanged);
+
+  // точка отсчёта для сравнения — запись об откате, копии у неё нет: объясняем это
+  // вместо пустого экрана, но само расхождение при этом не теряем
   await fs.writeFile(path.join(root, 'a.py'), 'vX\n');
-  const ev2 = await pm.view((await pm.list(chat, true)).find((x) => x.status === 'pending').id);
-  assert.equal(ev2.manualChanged, true);
-
-  // точка отсчёта — запись об откате, копии у неё нет: объясняем это вместо пустого экрана
-  const mv = await pm.manualView(project.id, 'a.py');
+  const mv = await pm.manualView(chat, project.id, 'a.py');
   assert.equal(mv.hashOnly, true);
+  assert.equal(mv.diverged, true);
   assert.match(mv.error, /откат/i);
-  // и не роняем список «мои правки»: построить сравнение нечем, файла в списке нет
-  const manual = await pm.listManualChanges(project.id);
-  assert.ok(!manual.some((x) => x.relPath === 'a.py'));
+  const { items } = await pm.listDivergences(chat, project.id);
+  assert.deepEqual(items.map((x) => x.relPath), ['a.py']);
 });
 
 test('rollback: откат не мешает обычному лимиту копий и не занимает его место', async (t) => {

@@ -45,7 +45,7 @@
     view: null, // {kind:'proposal'|'history', data}
     tree: {}, expanded: new Set(), history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
-    manual: [],
+    context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
     prompt: {
       loaded: false, loading: false, sections: [], presets: [], excluded: new Set(), defaults: {}, tree: null,
       treeOpen: new Set(['']), preview: false, presetId: '', presetName: '',
@@ -154,7 +154,7 @@
     S.tab = id;
     S.view = null;
     if (id === 'history') await loadHistory();
-    if (id === 'files') S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
+    if (id === 'files') await loadContext();
     render();
   }
 
@@ -400,12 +400,19 @@
     if (d.error) return toast(d.error, 'err'); // например: точка отсчёта — откат, копии для сравнения нет
     S.view = { kind: 'manual', data: d }; render();
   }
+  /** Что знает модель в текущем чате против того, что сейчас на диске. */
+  async function loadContext() {
+    S.context = S.project && S.chatId
+      ? ((await call('context:list', { projectId: S.project.id })) || { items: [], checked: 0, truncated: false })
+      : { items: [], checked: 0, truncated: false };
+  }
+
   async function copyManualVersions() {
     if (!S.project) return;
     const r = await call('manual:copy', { projectId: S.project.id });
-    // Копирование — ещё не отправка, поэтому отметку сами не ставим
+    // Копирование фиксирует версии в журнале: содержимое уходит в буфер именно для чата
     toast(r?.ok
-      ? `Актуальные версии скопированы (${r.files} файлов). Вставьте их в чат и отметьте файлы как известные модели.`
+      ? `Актуальные версии скопированы (${r.files} файлов) и отмечены как известные модели. Вставьте их в чат.`
       : r?.error, r?.ok ? 'ok' : 'err');
   }
 
@@ -415,26 +422,25 @@
    */
   async function ackManual(relPath) {
     if (!S.project) return;
-    const r = await call('manual:ack', { projectId: S.project.id, relPath });
+    const r = await call('context:ack', { projectId: S.project.id, relPath });
     if (!r) return;
     if (!r.ok) { toast(r.error, 'err'); return; }
     toast('Отмечено: модель знает текущую версию файла', 'ok');
-    await loadHistory();
+    await loadContext();
     if (S.view && S.view.kind === 'manual') await openManual(relPath);
     else render();
   }
 
   async function ackAllManual() {
-    if (!S.project || !S.manual.length) return;
-    const n = S.manual.length;
+    if (!S.project || !S.context.items.length) return;
+    const n = S.context.items.length;
     if (!confirm(`Отметить ${n} файл(ов) как известные модели?\n\nОтметка снимется автоматически, если файл снова изменится.`)) return;
-    let ok = 0;
-    for (const m of S.manual) {
-      const r = await call('manual:ack', { projectId: S.project.id, relPath: m.relPath });
-      if (r && r.ok) ok++;
-    }
-    toast(`Отмечено файлов: ${ok} из ${n}`, ok === n ? 'ok' : 'err');
-    await loadHistory();
+    const r = await call('context:ack-all', { projectId: S.project.id });
+    if (!r) return;
+    toast(r.ok
+      ? `Отмечено файлов: ${r.acked}`
+      : `Отмечено ${r.acked} из ${r.total}. Не удалось: ${r.failed.slice(0, 3).join('; ')}`, r.ok ? 'ok' : 'err');
+    await loadContext();
     render();
   }
   async function openFile(projectId, rel) {
@@ -517,7 +523,7 @@
         // (показать файл в проводнике) и откроется окно проводника.
         manual.has(it.rel) && h('button', {
           class: 'manual-warning', type: 'button',
-          title: 'Файл изменён вне Whale Bridge — посмотреть отличия и отметить, что модель проинформирована',
+          title: 'Модель не знает текущую версию файла — посмотреть отличия и отметить, что она проинформирована',
           onclick: (e) => { e.stopPropagation(); openManual(it.rel); },
         }, '⚠ изменён'),
         marks.has(it.rel) && h('span', { class: 'dot', title: 'Есть предложение изменений' }),
@@ -553,7 +559,7 @@
   function renderFiles() {
     if (!S.project) return h('div', { class: 'empty' }, 'Выберите проект вверху, чтобы увидеть его файлы.');
     const marks = new Set(S.proposals.filter((p) => p.status === 'pending' && !p.historical && p.state !== 'missing').map((p) => p.relPath));
-    const manual = new Set(S.manual.map((x) => x.relPath));
+    const manual = new Set(S.context.items.map((x) => x.relPath));
     const undo = new Map(); // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
     for (const e of S.history) if (e.status === 'applied' && e.revertible !== false && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
     const box = h('div', { class: 'stack' },
@@ -561,13 +567,18 @@
         h('span', { class: 'path grow' }, S.project.path),
         h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить'),
         manual.size > 0 && h('button', {
-          class: 'btn', title: 'Скопировать содержимое файлов, изменённых вне Whale Bridge, чтобы передать его модели',
+          class: 'btn',
+          title: 'Скопировать текущие версии файлов, о которых модель знает устаревшее, и отметить их как известные ей',
           onclick: copyManualVersions,
         }, 'Скопировать актуальные версии для модели'),
         manual.size > 0 && h('button', {
-          class: 'btn', title: `Снять отметку «модель не знает» со всех ${manual.size} файл(ов)`,
+          class: 'btn', title: `Отметить все ${manual.size} файл(ов) как известные модели`,
           onclick: ackAllManual,
-        }, '✓ Модель знает все')));
+        }, '✓ Модель знает все')),
+      manual.size > 0 && h('div', { class: 'notice warn' },
+        `Модель не знает текущую версию: ${manual.size} файл(ов). Она может предлагать правки от устаревшего кода.`),
+      S.context.truncated && h('div', { class: 'notice' },
+        `Проверено ${S.context.checked} файлов из журнала — остальные не поместились в лимит одного запроса.`));
     if (S.tree[''] === undefined) {
       loadDir('').then(render);
       box.append(h('div', { class: 'empty' }, 'Загрузка…'));
@@ -583,7 +594,7 @@
   async function loadHistory() {
     S.history = (await call('history:list', { projectId: S.project ? S.project.id : null })) || [];
     S.backup = (await call('backups:stats')) || S.backup;
-    S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
+    await loadContext();
   }
 
   async function onClearBackups() {
@@ -632,13 +643,16 @@
         h('div', { class: 'view-title' }, 'Мои правки'),
         h('div', { class: 'path' }, d.relPath)),
       h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
-      d.synced
-        ? h('div', { class: 'notice' }, 'Модель проинформирована об этой версии файла. Если файл снова изменится, отметка снимется сама.')
-        : h('div', { class: 'notice warn' }, 'Модель в чате не знает об этом изменении: она может предлагать правки от устаревшей версии. Передайте ей актуальный файл и отметьте его.'),
+      d.diverged
+        ? h('div', { class: 'notice warn' },
+          'Модель в чате не знает об этом изменении и может предлагать правки от устаревшей версии.',
+          d.knownVersion ? h('div', { class: 'path' }, `Последняя известная модели версия: ${fmtTime(d.knownVersion.ts)} · ${d.knownVersion.label}`) : null,
+          h('div', {}, 'Передайте ей актуальный файл и отметьте его — или подтвердите, что уже это сделали.'))
+        : h('div', { class: 'notice' }, 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
       diffTable(d.rows, d.truncated),
       h('div', { class: 'actions' },
         h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
-        !d.synced && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
+        d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
         h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл')));
   }
 
@@ -994,7 +1008,7 @@
       paintPromptTree();
       refreshPreview();
     }
-    S.manual = S.project ? ((await call('manual:list', { projectId: S.project.id })) || []) : [];
+    await loadContext();
     const v = S.view;
     if (v && v.kind === 'proposal' && v.data.status === 'pending') { // открытый Diff пересчитываем по свежему файлу
       const d = await call('proposal:get', { id: v.data.id });

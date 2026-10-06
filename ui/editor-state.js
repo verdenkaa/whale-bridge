@@ -23,6 +23,13 @@
   const V = (typeof require === 'function')
     ? require('../src/versions')
     : (root && root.WhaleVersions);
+  const C = (typeof require === 'function')
+    ? require('../src/context')
+    : (root && root.WhaleContext);
+  // Падаем сразу и внятно: молчаливый откат на «расхождений нет» означал бы, что контекст
+  // уезжает без предупреждения — ровно то, против чего этот модуль и написан.
+  if (!V) throw new Error('WhaleVersions не загружен: src/versions.js должен подключаться до ui/editor-state.js');
+  if (!C) throw new Error('WhaleContext не загружен: src/context.js должен подключаться до ui/editor-state.js');
 
   const baseName = (p) => String(p || '').split(/[\\/]/).pop() || '';
 
@@ -60,6 +67,10 @@
       eol: file.eol || 'lf',
       hasBom: !!file.hasBom,
       missing: false,
+      // Какую версию файла знает модель в текущем чате (приходит из context:known).
+      // null — модель файл не видела, сравнивать не с чем.
+      knownHash: file.knownHash != null ? file.knownHash : null,
+      knownSource: file.knownSource || null,
       language: file.language || 'plaintext',
       viewState: null,
       openedAt: Date.now(),
@@ -145,6 +156,29 @@
     return f;
   }
 
+  /** Фиксируем, какую версию знает модель. Правило расхождения — из src/context, не своё. */
+  function setKnown(state, path, hash, source) {
+    const f = get(state, path);
+    if (!f) return null;
+    f.knownHash = hash == null ? null : hash;
+    f.knownSource = source || null;
+    return f;
+  }
+
+  function setKnownMap(state, map, sources) {
+    if (!map || typeof map !== 'object') return state;
+    for (const path of state.order) {
+      // Только реально пришедшие ключи: отсутствие ключа не означает «модель ничего не знает»
+      if (Object.prototype.hasOwnProperty.call(map, path)) {
+        setKnown(state, path, map[path], sources && sources[path] ? sources[path] : null);
+      }
+    }
+    return state;
+  }
+
+  /** Модель знает устаревшую версию файла — главный признак уехавшего контекста. */
+  const modelDiverged = (f) => !!f && C.isDiverged(f.knownHash, f.diskHash);
+
   const isDirty = (f) => !!f && f.text !== f.savedText;
   const isDrifted = (f) => !!f && f.savedHash != null && f.diskHash != null && f.diskHash !== f.savedHash;
   const isMissing = (f) => !!f && f.missing === true;
@@ -172,6 +206,9 @@
       diskDrift: isDrifted(f),
       missing: isMissing(f),
       needsReload: needsReload(f),
+      modelDiverged: modelDiverged(f),
+      knownHash: f.knownHash,
+      knownSource: f.knownSource,
       path: f.path,
       name: f.name,
       language: f.language,
@@ -220,7 +257,8 @@
     createState, open, get, active, list,
     setText, setSaved, reload, forceSaveBase,
     setDiskHash, setDiskHashes, setViewState,
-    isDirty, isDrifted, isMissing, needsReload, describe,
+    setKnown, setKnownMap,
+    isDirty, isDrifted, isMissing, needsReload, modelDiverged, describe,
     close, activate, activateRelative,
     hasUnsaved, dirtyPaths, driftedPaths, baseName,
   };

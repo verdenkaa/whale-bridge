@@ -49,8 +49,11 @@
   </div>
 
   <!-- Порядок важен: каждый следующий модуль использует предыдущий.
-       src/versions.js общий для main и renderer — правила классификации версий одни. -->
+       src/versions.js и src/context.js общие для main и renderer: правила классификации
+       версий и правило расхождения контекста должны быть в одном экземпляре, иначе
+       main и интерфейс начнут расходиться в том, знает ли модель файл. -->
   <script src="../src/versions.js"></script>
+  <script src="../src/context.js"></script>
   <script src="dom.js"></script>
   <script src="editor-state.js"></script>
   <script src="languages/gdscript.js"></script>

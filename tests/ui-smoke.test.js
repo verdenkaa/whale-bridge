@@ -91,13 +91,23 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
     'prompt:tree': tree,
     'prompt:build': { text: 'ПРОМПТ', partial: false },
     'prompt:copy': { ok: true, length: 6, partial: false },
-    'manual:list': [{ relPath: 'a.gd', historyId: 'h9', stats: { added: 1, removed: 0 }, ts: Date.now() }],
+    'context:list': {
+      items: [{
+        relPath: 'a.gd', knownHash: 'a', knownSource: 'applied',
+        knownLabel: 'модель сама предложила это содержимое', knownTs: Date.now(),
+        historyId: 'h9', diskHash: 'c', missing: false,
+      }],
+      checked: 1, truncated: false,
+    },
+    'context:known': { 'a.gd': 'a' },
+    'context:ack': { ok: true, relPath: 'a.gd', hash: 'c' },
+    'context:ack-all': { ok: true, acked: 1, total: 1, failed: [] },
     'manual:view': {
-      relPath: 'a.gd', historyId: 'h9', synced: false, currentHash: 'c', afterHash: 'a',
+      relPath: 'a.gd', historyId: 'h9', diverged: true, currentHash: 'c', afterHash: 'a',
+      knownVersion: { hash: 'a', source: 'applied', ts: Date.now(), label: 'модель сама предложила это содержимое' },
       stats: { added: 1, removed: 1 }, truncated: false, currentText: 'b\n',
       rows: [{ type: 'del', oldNo: 1, text: 'a' }, { type: 'add', newNo: 1, text: 'b' }],
     },
-    'manual:ack': { ok: true, relPath: 'a.gd', hash: 'c' },
     'fs:list': { items: [{ name: 'a.gd', rel: 'a.gd', isDir: false }, { name: 'n.gd', rel: 'n.gd', isDir: false }] },
   };
   global.window = {
@@ -204,13 +214,14 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   const manualBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === '⚠ изменён');
   assert.equal(manualBtns.length, 1);
   assert.ok(findAll(roots.body, (e) => e.tag === 'button' && text(e) === '✓ Модель знает все').length === 1);
+  assert.match(text(roots.body), /Модель не знает текущую версию: 1 файл/);
 
   await click(manualBtns[0]);
   assert.ok(log.some(([ch, a]) => ch === 'manual:view' && a.relPath === 'a.gd'));
   assert.match(text(roots.body), /Мои правки/);
   assert.match(text(roots.body), /Модель в чате не знает об этом изменении/);
   await click(findAll(roots.body, (e) => e.tag === 'button' && text(e) === '✓ Модель проинформирована')[0]);
-  assert.ok(log.some(([ch, a]) => ch === 'manual:ack' && a.relPath === 'a.gd'));
+  assert.ok(log.some(([ch, a]) => ch === 'context:ack' && a.relPath === 'a.gd'));
 
   // после подтверждения возвращаемся на вкладку файлов
   await click(tabs[TAB.files]);

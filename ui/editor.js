@@ -157,6 +157,7 @@
       projectId: useProject, path: r.path, content: r.content, hash: r.hash,
       eol: r.eol, hasBom: r.hasBom, language: window.WhaleMonaco.languageForPath(r.path),
     });
+    await syncKnown([r.path]);
     try {
       await showInEditor(r.path);
     } catch (e) {
@@ -495,9 +496,8 @@
   }
 
   function marks(f) {
-    const dirty = ES.isDirty(f);
-    const drift = ES.isDrifted(f);
-    return { dirty, drift };
+    const d = ES.describe(state, f.path) || {};
+    return { dirty: ES.isDirty(f), drift: ES.isDrifted(f), diverged: !!d.modelDiverged };
   }
 
   function nodes(rel, depth, out) {
@@ -507,9 +507,9 @@
     for (const it of dir.items || []) {
       const open = tree.expanded.has(it.rel);
       const f = ES.get(state, it.rel);
-      const m = f ? marks(f) : { dirty: false, drift: false };
+      const m = f ? marks(f) : { dirty: false, drift: false, diverged: false };
       out.push(h('div', {
-        class: 'ed-node' + (state.active === it.rel ? ' on' : '') + (m.dirty ? ' dirty' : '') + (m.drift ? ' drift' : ''),
+        class: 'ed-node' + (state.active === it.rel ? ' on' : '') + (m.dirty ? ' dirty' : '') + (m.drift ? ' drift' : '') + (m.diverged ? ' diverged' : ''),
         style: `padding-left:${depth * 14 + 4}px`,
         title: it.isDir ? it.rel : (m.drift ? 'Файл изменён вне редактора' : it.rel),
         onclick: async () => {
@@ -525,7 +525,8 @@
       h('span', { class: 'ed-twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
       h('span', { class: 'ed-name' }, it.name),
       m.dirty && h('span', { class: 'ed-mark', title: 'Несохранённые изменения' }, '●'),
-      m.drift && h('span', { class: 'ed-mark warn', title: 'Файл изменён вне редактора' }, '⚠')));
+      m.drift && h('span', { class: 'ed-mark warn', title: 'Файл изменён вне редактора' }, '⚠'),
+      m.diverged && h('span', { class: 'ed-mark ctx', title: 'Модель в чате не знает текущую версию файла' }, '◆')));
       if (it.isDir && open) nodes(it.rel, depth + 1, out);
     }
   }
@@ -559,6 +560,7 @@
       },
       h('span', {}, f.name),
       d.diskDrift && h('span', { class: 'ed-mark warn', title: 'Файл изменён вне редактора' }, '⚠'),
+      d.modelDiverged && h('span', { class: 'ed-mark ctx', title: 'Модель в чате не знает текущую версию файла' }, '◆'),
       d.dirty && h('span', { class: 'ed-mark', title: 'Несохранённые изменения' }, '●'),
       h('button', {
         class: 'ed-tab-close', title: 'Закрыть вкладку (Ctrl+W)', 'aria-label': `Закрыть ${f.name}`,
@@ -586,6 +588,14 @@
       h('span', {}, f.eol === 'crlf' ? 'CRLF' : 'LF'),
       f.hasBom && h('span', {}, 'BOM'),
       badge,
+      d.modelDiverged && h('span', {
+        class: 'badge bad',
+        title: 'Модель в чате видела другую версию этого файла и может предлагать правки от устаревшего кода',
+      }, 'модель не знает'),
+      d.modelDiverged && h('button', {
+        class: 'btn tiny', onclick: ackCurrent,
+        title: 'Отметить, что модель проинформирована о текущей версии файла',
+      }, '✓ Модель знает'),
       h('button', { class: 'btn tiny', onclick: () => saveActive(), title: 'Сохранить (Ctrl+S)' }, 'Сохранить'));
   }
 
@@ -597,6 +607,26 @@
   }
 
   // ---------- внешние события ----------
+
+  /** Какую версию открытых файлов знает модель в текущем чате. */
+  async function syncKnown(paths) {
+    if (!projectId || !paths || !paths.length) return;
+    const map = await call('context:known', { projectId, paths });
+    if (!map) return;
+    ES.setKnownMap(state, map);
+  }
+
+  /** Пользователь подтвердил, что модель проинформирована о текущей версии файла. */
+  async function ackCurrent() {
+    const f = ES.active(state);
+    if (!f) return;
+    const r = await call('context:ack', { projectId: f.projectId, relPath: f.path });
+    if (!r) return;
+    if (!r.ok) { toast(r.error, 'err'); return; }
+    ES.setKnown(state, f.path, r.hash, 'ack');
+    renderAll();
+    toast('Отмечено: модель знает текущую версию файла', 'ok');
+  }
 
   /**
    * files:changed / focus: что сейчас на диске. Только для файлов текущего проекта.
@@ -613,6 +643,7 @@
     if (!map) return;
     const beforeDrift = new Set(ES.driftedPaths(state));
     ES.setDiskHashes(state, map);
+    await syncKnown(files.map((f) => f.path));
 
     const reloaded = [];
     const goneMissing = [];
@@ -745,7 +776,7 @@
 
   window.WhaleEditor = {
     mount, setProject, setVisible, openPath, activate, closePath, closeActive,
-    nextTab, saveActive, showQuickOpen, refreshDisk, handleKey,
+    nextTab, saveActive, showQuickOpen, refreshDisk, handleKey, ackCurrent,
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),
     isVisible: () => visible,

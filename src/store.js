@@ -9,10 +9,10 @@ const DEFAULTS = () => ({
   promptPresets: [], // [{id, name, sections}]
   promptTreeOff: {}, // projectId -> [относительные пути, исключённые из структуры]
   proposalDecisions: {}, // chatId -> {contentHash: {status, historyId?, ts}}
-  // Какую версию файла модель знает: projectId -> { relPath: sha256 }.
-  // Храним именно хэш, а не флаг: тогда следующее изменение файла снимает отметку само,
-  // и «модель проинформирована» не может устареть молча.
-  modelSynced: {},
+  // Журнал контекста (src/context.js). Знание привязано к ЧАТУ, а не к проекту:
+  // в одном проекте может быть несколько чатов, и в каждом модель знает своё.
+  contextKnown: {}, // chatId -> { "projectId::relPath" -> {hash, source, ts, historyId} }
+  contextSeen: {}, // chatId -> [contentHash] — какие блоки ответа модели уже разобраны
 });
 const HISTORY_LIMIT = 1000;
 // Кто инициировал запись файла (ТЗ §10). Без этого история не отличает правку пользователя
@@ -45,7 +45,12 @@ class Store {
   async load() {
     await fs.mkdir(this.backupDir, { recursive: true });
     this.config = { ...DEFAULTS(), ...(await readJson(this.configPath, {})) };
+    if (!this.config.contextKnown || typeof this.config.contextKnown !== 'object') this.config.contextKnown = {};
+    if (!this.config.contextSeen || typeof this.config.contextSeen !== 'object') this.config.contextSeen = {};
     const h = await readJson(this.historyPath, []);
+    // Прежние отметки «модель знает версию» переносим в журнал контекста — и сразу
+    // сохраняем, иначе устаревшее поле modelSynced навсегда осталось бы в config.json.
+    if (this._migrateModelSynced()) await this.saveConfig();
     // Записи старше Stage 0 не имеют source: до этого поля все изменения приходили из
     // предложений модели, поэтому отсутствующий source честно означает 'ai'.
     this.history = (Array.isArray(h) ? h : []).map((e) => (e && typeof e === 'object'
@@ -66,6 +71,49 @@ class Store {
   }
   saveConfig() { return this._write(this.configPath, this.config); }
   saveHistory() { return this._write(this.historyPath, this.history); }
+
+  /**
+   * Прежде отметка «модель знает версию» хранилась по проекту (modelSynced). Теперь она
+   * относится к чату. Переносим в каждый чат, привязанный к этому проекту: другого
+   * адресата из старых данных не вывести, а потерять подтверждение пользователя хуже.
+   */
+  _migrateModelSynced() {
+    const old = this.config.modelSynced;
+    if (!old || typeof old !== 'object') return false;
+    if (!Object.keys(old).length) { delete this.config.modelSynced; return true; }
+    const chatsByProject = {};
+    for (const [chatId, sess] of Object.entries(this.config.sessions || {})) {
+      if (!sess || !sess.projectId) continue;
+      (chatsByProject[sess.projectId] = chatsByProject[sess.projectId] || []).push(chatId);
+    }
+    for (const [projectId, files] of Object.entries(old)) {
+      if (!files || typeof files !== 'object') continue;
+      for (const chatId of chatsByProject[projectId] || []) {
+        if (!this.config.contextKnown[chatId]) this.config.contextKnown[chatId] = {};
+        for (const [relPath, hash] of Object.entries(files)) {
+          if (typeof hash !== 'string' || !hash) continue;
+          this.config.contextKnown[chatId][projectId + '::' + relPath] = {
+            hash, source: 'migrated', ts: Date.now(), historyId: null,
+          };
+        }
+      }
+    }
+    delete this.config.modelSynced;
+    return true;
+  }
+
+  // ---- журнал контекста ----
+  contextKnown() {
+    if (!this.config.contextKnown || typeof this.config.contextKnown !== 'object') this.config.contextKnown = {};
+    return this.config.contextKnown;
+  }
+
+  contextSeen() {
+    if (!this.config.contextSeen || typeof this.config.contextSeen !== 'object') this.config.contextSeen = {};
+    return this.config.contextSeen;
+  }
+
+  saveContext() { return this.saveConfig(); }
 
   // ---- проекты ----
   _key(p) { return process.platform === 'win32' ? p.toLowerCase() : p; }
@@ -89,38 +137,11 @@ class Store {
       if (s.projectId === id) delete this.config.sessions[chat];
     }
     if (this.config.lastProjectId === id) this.config.lastProjectId = null;
-    delete this.config.modelSynced[id];
+    if (this.config.modelSynced) delete this.config.modelSynced[id];
     await this.saveConfig();
   }
 
   getProject(id) { return this.config.projects.find((p) => p.id === id) || null; }
-
-  // ---- какая версия файла известна модели ----
-  getModelSynced(projectId, relPath) {
-    return this.config.modelSynced?.[projectId]?.[relPath] || null;
-  }
-
-  modelSyncedMap(projectId) {
-    return { ...(this.config.modelSynced?.[projectId] || {}) };
-  }
-
-  async setModelSynced(projectId, relPath, hash) {
-    if (!projectId || !relPath || !hash) return;
-    if (!this.config.modelSynced[projectId]) this.config.modelSynced[projectId] = {};
-    this.config.modelSynced[projectId][relPath] = hash;
-    const entries = Object.entries(this.config.modelSynced[projectId]);
-    if (entries.length > 5000) {
-      // защиты от роста достаточно: порядок в объекте — порядок вставки
-      for (const [rel] of entries.slice(0, entries.length - 5000)) delete this.config.modelSynced[projectId][rel];
-    }
-    await this.saveConfig();
-  }
-
-  async clearModelSynced(projectId, relPath) {
-    if (this.config.modelSynced?.[projectId]?.[relPath] === undefined) return;
-    delete this.config.modelSynced[projectId][relPath];
-    await this.saveConfig();
-  }
 
   getProposalDecision(chatId, contentHash) {
     return this.config.proposalDecisions?.[chatId]?.[contentHash] || null;

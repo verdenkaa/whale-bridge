@@ -309,16 +309,86 @@ test('editor-state: baseName и язык', () => {
   assert.equal(ES.describe(s, 'src/player.gd').language, 'whale-gdscript');
 });
 
-test('editor-state: загружается в браузере через window.WhaleVersions (без require)', () => {
+test('editor-state: modelDiverged — модель знает не ту версию, что на диске', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  const f = ES.get(s, 'a.gd');
+
+  // модель файл не видела — сравнивать не с чем, расхождения нет
+  assert.equal(ES.modelDiverged(f), false);
+  assert.equal(ES.describe(s, 'a.gd').modelDiverged, false);
+
+  ES.setKnown(s, 'a.gd', A, 'applied');
+  assert.equal(f.knownHash, A);
+  assert.equal(f.knownSource, 'applied');
+  assert.equal(ES.modelDiverged(f), false, 'версии совпадают');
+
+  // файл изменили на диске (или сохранили из редактора) — модель осталась на прежней версии
+  ES.setDiskHash(s, 'a.gd', B);
+  assert.equal(ES.modelDiverged(f), true);
+  const d = ES.describe(s, 'a.gd');
+  assert.equal(d.modelDiverged, true);
+  assert.equal(d.knownHash, A);
+  assert.equal(d.diskDrift, true);
+
+  // файл удалён — тоже расхождение
+  ES.setDiskHash(s, 'a.gd', null);
+  assert.equal(ES.modelDiverged(f), true);
+
+  // подтверждение пользователя снимает отметку
+  ES.setKnown(s, 'a.gd', A);
+  ES.setDiskHash(s, 'a.gd', B);
+  ES.setKnown(s, 'a.gd', B, 'ack');
+  assert.equal(ES.modelDiverged(f), false);
+  assert.equal(ES.setKnown(s, 'нет.gd', B), null);
+});
+
+test('editor-state: setKnownMap обновляет только присланные ключи', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  ES.open(s, opened('b.gd', 'v0\n', A));
+  ES.setKnown(s, 'b.gd', A, 'applied');
+
+  ES.setKnownMap(s, { 'a.gd': A, 'нет-в-списке.gd': B });
+  assert.equal(ES.get(s, 'a.gd').knownHash, A);
+  // отсутствие ключа не стирает знание: файл мог быть из другого проекта
+  assert.equal(ES.get(s, 'b.gd').knownHash, A);
+  ES.setKnownMap(s, null);
+  assert.equal(ES.get(s, 'a.gd').knownHash, A);
+});
+
+test('editor-state: dirty и modelDiverged — независимые оси', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  ES.setKnown(s, 'a.gd', A, 'applied');
+  const f = ES.get(s, 'a.gd');
+
+  // несохранённая правка при том, что диск и знание модели совпадают
+  ES.setText(s, 'a.gd', 'v1\n');
+  let d = ES.describe(s, 'a.gd');
+  assert.equal(d.dirty, true);
+  assert.equal(d.modelDiverged, false);
+  assert.equal(d.diskDrift, false);
+
+  // сохранили — диск уехал, модель осталась на старой версии
+  ES.setSaved(s, 'a.gd', { text: 'v1\n', hash: B });
+  d = ES.describe(s, 'a.gd');
+  assert.equal(d.dirty, false);
+  assert.equal(d.modelDiverged, true, 'после сохранения модель узнала о расхождении');
+});
+
+test('editor-state: загружается в браузере через window.WhaleVersions/WhaleContext (без require)', () => {
   const fakeWindow = {};
   const ctx = vm.createContext({ window: fakeWindow, console });
-  // порядок как в index.html: сначала versions, потом editor-state
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', 'versions.js'), 'utf8'), ctx, { filename: 'versions.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'ui', 'editor-state.js'), 'utf8'), ctx, { filename: 'editor-state.js' });
+  // порядок как в index.html: versions, context, затем editor-state
+  for (const f of ['src/versions.js', 'src/context.js', 'ui/editor-state.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', ...f.split('/')), 'utf8'), ctx, { filename: f });
+  }
 
   const browserES = fakeWindow.WhaleEditorState;
   assert.ok(browserES, 'window.WhaleEditorState появился');
   assert.ok(fakeWindow.WhaleVersions, 'window.WhaleVersions появился');
+  assert.ok(fakeWindow.WhaleContext, 'window.WhaleContext появился');
   const s = browserES.createState();
   browserES.open(s, { projectId: 'p1', path: 'a.gd', content: 'v0\n', hash: A });
   browserES.setText(s, 'a.gd', 'x\n');
@@ -326,4 +396,12 @@ test('editor-state: загружается в браузере через window
   const d = browserES.describe(s, 'a.gd');
   assert.equal(d.saveDecision, 'conflict', 'классификация в браузере совпадает с node');
   assert.equal(d.state, 'save-conflict');
+});
+
+test('editor-state: без src/context.js падает сразу, а не молча считает расхождений нет', () => {
+  const fakeWindow = {};
+  const ctx = vm.createContext({ window: fakeWindow, console });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'src', 'versions.js'), 'utf8'), ctx, { filename: 'versions.js' });
+  const src = fs.readFileSync(path.join(__dirname, '..', 'ui', 'editor-state.js'), 'utf8');
+  assert.throws(() => vm.runInContext(src, ctx, { filename: 'editor-state.js' }), /WhaleContext/);
 });

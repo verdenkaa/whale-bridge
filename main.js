@@ -346,12 +346,14 @@ function registerIpc() {
   handle('history:list', ({ projectId }) => proposals.listHistory(projectId ? String(projectId) : null));
   handle('history:view', ({ id }) => proposals.historyView(String(id)));
   handle('history:revert', ({ id, force }) => proposals.historyRevert(String(id), force === true));
-  handle('manual:list', ({ projectId }) => proposals.listManualChanges(String(projectId)));
-  handle('manual:view', ({ projectId, relPath }) => proposals.manualView(String(projectId), String(relPath)));
-  handle('manual:ack', ({ projectId, relPath }) => proposals.ackModelSynced(String(projectId), String(relPath)));
-  handle('manual:synced', ({ projectId, paths }) => proposals.modelSyncedHashes(String(projectId), paths));
+  // ---- учёт контекста: какую версию файла знает модель в текущем чате ----
+  handle('context:list', ({ projectId }) => proposals.listDivergences(currentChatId, String(projectId)));
+  handle('context:ack', ({ projectId, relPath }) => proposals.ackContext(currentChatId, String(projectId), String(relPath)));
+  handle('context:ack-all', ({ projectId }) => proposals.ackAllDivergent(currentChatId, String(projectId)));
+  handle('context:known', ({ projectId, paths }) => proposals.contextKnownHashes(currentChatId, String(projectId), paths));
+  handle('manual:view', ({ projectId, relPath }) => proposals.manualView(currentChatId, String(projectId), String(relPath)));
   handle('manual:copy', async ({ projectId }) => {
-    const r = await proposals.copyManualVersions(String(projectId));
+    const r = await proposals.copyDivergentVersions(currentChatId, String(projectId));
     if (r.ok) clipboard.writeText(r.text);
     return r;
   });
@@ -420,6 +422,7 @@ function registerIpc() {
     const tree = await fileops.getTree(project.path);
     const parts = [];
     const skipped = [];
+    const sentToModel = []; // что реально ушло в буфер обмена целиком
     let totalChars = 0;
     const MAX_TOTAL_CHARS = 20_000_000;
     const isExcluded = (rel) => {
@@ -444,7 +447,12 @@ function registerIpc() {
         if (text.error) { skipped.push(node.rel + ' (' + text.error + ')'); continue; }
         const remaining = MAX_TOTAL_CHARS - totalChars;
         const content = text.text.slice(0, remaining);
-        if (content.length < text.text.length) skipped.push(node.rel + ' (обрезан по лимиту общего объёма)');
+        if (content.length < text.text.length) {
+          // Обрезанный файл модель не увидит целиком — отмечать его как известный нельзя
+          skipped.push(node.rel + ' (обрезан по лимиту общего объёма)');
+        } else {
+          sentToModel.push({ relPath: node.rel, hash: text.hash });
+        }
         parts.push(`--- ${node.rel} ---\n${content}`);
         totalChars += content.length;
       }
@@ -454,7 +462,11 @@ function registerIpc() {
     let output = parts.join('\n\n');
     if (skipped.length) output += `\n\n--- Пропущено ---\n${skipped.map((x) => '- ' + x).join('\n')}`;
     clipboard.writeText(output);
-    return { ok: true, files: parts.length, skipped: skipped.length, length: output.length };
+    // Файлы ушли в буфер обмена как контекст модели — фиксируем их версии в журнале.
+    // Чат может быть ещё не открыт (currentChatId === null): тогда отмечать некого,
+    // и после привязки чата файлы честно окажутся «модель не знает».
+    const recorded = await proposals.recordContext(currentChatId, project.id, sentToModel, 'prompt');
+    return { ok: true, files: parts.length, skipped: skipped.length, length: output.length, recorded };
   });
   handle('prompt:preset-save', async ({ name, sections }) => {
     const n = String(name || '').trim().slice(0, 80);

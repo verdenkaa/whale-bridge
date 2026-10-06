@@ -7,9 +7,14 @@ const { resolveInProject, normalizeRel } = require('./paths');
 const { diffLines, diffStats, toRows } = require('./diff');
 const fileops = require('./fileops');
 const { ABSENT, classifyVersions } = require('./versions');
+const Context = require('./context');
+const editorfs = require('./editorfs');
 const { applyEdits } = require('./patch');
 
 const MAX_BACKUPS_PER_FILE = 2;
+// Сколько файлов журнала проверяем за один запрос: проверка требует чтения каждого.
+// Совпадает с внутренним лимитом editorfs.hashesForEditor.
+const MAX_DIVERGENCE_CHECK = 200;
 
 const MAX_ROWS = 4000;
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 24);
@@ -112,6 +117,11 @@ class ProposalManager {
       const hash = sha([chatId, parsed.marker.op, parsed.marker.path, parsed.content].join('\0'));
       const k = `${chatId}:${b.key}`;
       const ex = this.map.get(this.byKey.get(k));
+      // Блок, который мы уже разбирали в этом чате, новым стать не может. Без этого при
+      // прокрутке чата вверх DeepSeek догружает старые сообщения, их блоки приходят позже
+      // базового окна preload-chat.js (2.5 с) и предлагаются как свежие правки.
+      const seenBefore = Context.wasSeen(this.store.contextSeen(), chatId, hash);
+      Context.markSeen(this.store.contextSeen(), chatId, hash);
 
       if (ex) {
         if (ex.contentHash === hash) continue;
@@ -157,7 +167,7 @@ class ProposalManager {
         incomplete: parsed.incomplete,
         contentHash: hash,
         status: decision?.status || 'pending', // pending | applied | rejected
-        historical: !!b.initial,
+        historical: !!b.initial || seenBefore,
         // Stage 0 (ТЗ §37): версия файла, которую видела модель. Заполняется из sealAiBase()
         // сразу после ingest — сам ingest синхронный и диск не читает.
         // null = «ещё не запечатано», ABSENT = «файла не существовало».
@@ -189,6 +199,8 @@ class ProposalManager {
    * @returns {Promise<number>} сколько предложений запечатано
    */
   async sealAiBase(chatId) {
+    // Отметки «блок уже видели» проставлены синхронно в ingest — сохраняем их здесь.
+    await this.store.saveContext().catch((e) => console.error('[context]', e));
     let sealed = 0;
     for (const p of this.map.values()) {
       if (p.chatId !== chatId || p.status !== 'pending' || p.historical) continue;
@@ -238,6 +250,35 @@ class ProposalManager {
     const cur = await fileops.readRawFile(r.abs);
     if (cur.error || cur.hash === h.afterHash) return null;
     return { history: h, project, abs: r.abs, current: cur, hashOnly: h.source === 'rollback' };
+  }
+
+  /**
+   * Текущая версия файла против той, что известна модели в этом чате.
+   *
+   * Это и есть правильный вопрос. Прежний («диск против последней записи истории Whale
+   * Bridge») давал три сбоя: файл без истории приложения не проверялся вовсе, сохранение
+   * в редакторе само себя «гасило», а учёт обнулялся вместе с сессией.
+   *
+   * Файла нет в журнале — значит, модель его никогда не видела: сравнивать не с чем,
+   * и расхождением это не является (иначе подсвечивался бы весь проект).
+   *
+   * @param diskHash передайте, если файл уже прочитан, чтобы не читать его второй раз
+   */
+  async _divergence(chatId, projectId, relPath, diskHash) {
+    const known = Context.knownVersion(this.store.contextKnown(), chatId, projectId, relPath);
+    if (!known) return { diverged: false, known: null, diskHash: null };
+    let hash = diskHash;
+    if (hash === undefined) {
+      const project = this.store.getProject(projectId);
+      if (!project) return { diverged: false, known, diskHash: null };
+      const r = await resolveInProject(project.path, relPath);
+      if (!r.ok) return { diverged: false, known, diskHash: null };
+      if (!r.exists || !r.isFile) return { diverged: true, known, diskHash: null };
+      const cur = await fileops.readRawFile(r.abs);
+      if (cur.error) return { diverged: false, known, diskHash: null };
+      hash = cur.hash;
+    }
+    return { diverged: hash !== known.hash, known, diskHash: hash == null ? null : hash };
   }
 
   // Хэш файла для записи в историю: ABSENT — файла нет, null — путь недоступен или не читается.
@@ -325,15 +366,18 @@ class ProposalManager {
       }
       const cur = await fileops.readTextFile(r.abs);
       if (cur.error) return { ...out, state: 'unreadable', error: cur.error };
-      const manual = await this._manualBase(project.id, r.rel);
-      if (manual) {
-        // «Модель не знает об этом изменении». Если пользователь подтвердил, что передал ей
-        // текущую версию, предупреждение снимаем — иначе оно висело бы вечно и обесценилось.
-        const synced = this.store.getModelSynced(project.id, r.rel);
-        if (synced !== manual.current.hash) {
-          out.manualChanged = true;
-          out.manualHistoryId = manual.history.id;
-        }
+      // Модель не знает текущую версию файла — независимо от того, кто и как её изменил:
+      // внешний редактор, сохранение в нашем редакторе, откат, сборка, VCS.
+      const div = await this._divergence(p.chatId, project.id, r.rel, cur.hash);
+      if (div.diverged) {
+        out.manualChanged = true; // прежнее имя поля: его уже использует интерфейс
+        out.contextDiverged = true;
+        out.knownVersion = {
+          hash: div.known.hash, source: div.known.source,
+          label: Context.SOURCE_LABEL[div.known.source] || div.known.source, ts: div.known.ts,
+        };
+        const manual = await this._manualBase(project.id, r.rel);
+        if (manual) out.manualHistoryId = manual.history.id;
       }
       let newText = p.content;
       if (p.mode === 'patch') {
@@ -376,6 +420,8 @@ class ProposalManager {
         historical: ev.historical, stats: ev.stats || null,
         encodingWarning: ev.encodingWarning || null,
         manualChanged: !!ev.manualChanged,
+        contextDiverged: !!ev.contextDiverged,
+        knownVersion: ev.knownVersion || null,
         manualHistoryId: ev.manualHistoryId || null,
         warnings: ev.incomplete.length + (ev.shrink ? 1 : 0),
       });
@@ -483,9 +529,12 @@ class ProposalManager {
     });
     await this.store.pruneFile(project.id, ev.relPath, MAX_BACKUPS_PER_FILE).catch((e) => console.error('[prune]', e));
     // Содержимое получено от модели — значит, эта версия ей известна. Для move берём новый путь.
-    if (res.afterHash) {
-      await this.store.setModelSynced(project.id, ev.toRelPath || ev.relPath, res.afterHash)
-        .catch((e) => console.error('[modelSynced]', e));
+    if (res.afterHash && p.chatId) {
+      Context.record(this.store.contextKnown(), p.chatId, {
+        projectId: project.id, relPath: ev.toRelPath || ev.relPath,
+        hash: res.afterHash, source: 'applied', historyId: opId,
+      });
+      await this.store.saveContext().catch((e) => console.error('[context]', e));
     }
     p.status = 'applied';
     p.historyId = opId;
@@ -523,33 +572,54 @@ class ProposalManager {
   }
 
 
-  async listManualChanges(projectId) {
-    const out = [], seen = new Set();
-    for (const h of [...this.store.history].sort((a, b) => b.ts - a.ts)) {
-      if (h.projectId !== projectId || h.status !== 'applied' || !h.afterHash || h.pruned || seen.has(h.relPath)) continue;
-      seen.add(h.relPath);
-      const manual = await this._manualBase(projectId, h.relPath);
-      if (!manual) continue;
-      // Точка отсчёта — запись об откате: копии у неё нет, построчное сравнение построить нечем.
-      // Само изменение не теряется — proposal по-прежнему помечает файл как изменённый вручную.
-      if (manual.hashOnly) continue;
-      // Модель уже проинформирована об этой версии — показывать нечего
-      if (this.store.getModelSynced(projectId, h.relPath) === manual.current.hash) continue;
-      const current = await fileops.readTextFile(manual.abs);
-      const after = await fs.readFile(path.join(this.store.backupDir, h.id + '.after'), 'utf8').catch(() => null);
-      if (current.error || after == null) continue;
-      const ops = diffLines(after.replace(/^\uFEFF/, ''), current.text);
-      out.push({ relPath: h.relPath, historyId: h.id, stats: diffStats(ops), ts: h.ts });
-    }
-    return out;
+  /**
+   * Файлы, чья текущая версия отличается от той, что известна модели в этом чате.
+   *
+   * В отличие от прежнего listManualChanges, список строится по журналу контекста, а не по
+   * истории операций Whale Bridge. Поэтому в него попадают и файлы, которые приложение
+   * никогда не записывало, но показывало модели (скопировали в промпт, подтвердили вручную).
+   *
+   * Проверка требует чтения каждого файла, поэтому список ограничен MAX_DIVERGENCE_CHECK;
+   * факт обрезки возвращается явно, чтобы интерфейс мог об этом сказать.
+   */
+  async listDivergences(chatId, projectId, limit = MAX_DIVERGENCE_CHECK) {
+    const empty = { items: [], checked: 0, truncated: false };
+    if (!chatId || !projectId) return empty;
+    const project = this.store.getProject(projectId);
+    if (!project) return empty;
+    const known = this.store.contextKnown();
+    const all = Context.entries(known, chatId, projectId);
+    if (!all.length) return empty;
+    const slice = all.slice(0, limit);
+    const disk = await editorfs.hashesForEditor(project, slice.map((e) => e.relPath));
+    const items = Context.divergences(known, chatId, projectId, disk);
+    items.sort((x, y) => (y.knownTs || 0) - (x.knownTs || 0));
+    return { items, checked: slice.length, truncated: all.length > slice.length };
   }
 
-  async manualView(projectId, relPath) {
+  async manualView(chatId, projectId, relPath) {
+    const div = await this._divergence(chatId, projectId, relPath);
     const manual = await this._manualBase(projectId, relPath);
-    if (!manual) return null;
+    if (!manual) {
+      // Сравнение построить нечем (нет резервной копии), но расхождение есть — сообщаем о нём
+      if (!div.diverged) return null;
+      return {
+        relPath, historyId: null, noBase: true, diverged: true,
+        knownVersion: {
+          hash: div.known.hash, source: div.known.source, ts: div.known.ts,
+          label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
+        },
+        error: 'Резервной копии версии, которую видела модель, нет — построчное сравнение недоступно. Скопируйте актуальную версию и передайте модели.',
+      };
+    }
     if (manual.hashOnly) {
       return {
         relPath, historyId: manual.history.id, hashOnly: true,
+        diverged: div.diverged,
+        knownVersion: div.known ? {
+          hash: div.known.hash, source: div.known.source, ts: div.known.ts,
+          label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
+        } : null,
         error: 'Последняя операция над файлом — откат. Резервная копия для отката не хранится (откат неоткатим), поэтому построчное сравнение недоступно.',
       };
     }
@@ -560,20 +630,48 @@ class ProposalManager {
     const baseText = after.replace(/^\uFEFF/, '');
     const ops = diffLines(baseText, current.text), rows = toRows(ops, 3);
     return { relPath, historyId: manual.history.id, afterHash: manual.history.afterHash, currentHash: manual.current.hash,
-      synced: this.store.getModelSynced(projectId, relPath) === manual.current.hash,
+      diverged: div.diverged,
+      knownVersion: div.known ? {
+        hash: div.known.hash, source: div.known.source, ts: div.known.ts,
+        label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
+      } : null,
       stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS, currentText: current.text };
   }
 
-  async copyManualVersions(projectId) {
-    const list = await this.listManualChanges(projectId);
-    if (!list.length) return { ok: false, error: 'Ручных изменений относительно последней версии Whale Bridge не найдено' };
-    const parts = ['Эти файлы изменены мной вручную после последней операции Whale Bridge. Считай актуальной версию ниже.'];
-    for (const item of list) {
-      const view = await this.manualView(projectId, item.relPath);
-      if (view) parts.push(`--- ${item.relPath} ---\n${view.currentText}`);
+  /**
+   * Копирует текущие версии файлов, о которых модель знает устаревшее.
+   *
+   * Копирование фиксируется в журнале (source: 'manual-copy'): содержимое уходит в буфер
+   * обмена именно для того, чтобы попасть в чат. Компромисс сознательный — если пользователь
+   * скопировал и не отправил, отметка окажется преждевременной, но вред ограничен: она
+   * скроет расхождение только до следующего изменения файла, а любая новая правка снова
+   * его покажет. Обратная ошибка (требовать подтверждения на каждое копирование) дороже.
+   */
+  async copyDivergentVersions(chatId, projectId) {
+    const { items } = await this.listDivergences(chatId, projectId);
+    if (!items.length) return { ok: false, error: 'Расхождений нет: модель знает текущие версии всех отслеживаемых файлов' };
+    const project = this.store.getProject(projectId);
+    if (!project) return { ok: false, error: 'Проект не найден' };
+    const parts = ['Эти файлы изменились после того, как ты видела их последнюю версию. Считай актуальной версию ниже.'];
+    const copied = [];
+    for (const item of items) {
+      const r = await resolveInProject(project.path, item.relPath);
+      if (!r.ok || !r.exists || !r.isFile) continue;
+      const cur = await fileops.readTextFile(r.abs);
+      if (cur.error) continue; // не-UTF-8 модели передать всё равно нельзя
+      parts.push(`--- ${item.relPath} ---\n${cur.text}`);
+      copied.push({ relPath: item.relPath, hash: cur.hash });
     }
+    if (!copied.length) return { ok: false, error: 'Ни один из файлов с расхождением не удалось прочитать как текст' };
+    for (const c of copied) {
+      Context.record(this.store.contextKnown(), chatId, {
+        projectId, relPath: c.relPath, hash: c.hash, source: 'manual-copy',
+      });
+    }
+    await this.store.saveContext();
+    this.onChange();
     const text = parts.join('\n\n');
-    return { ok: true, length: text.length, files: list.length, text };
+    return { ok: true, length: text.length, files: copied.length, text };
   }
 
   async buildChatReport(chatId) {
@@ -590,7 +688,7 @@ class ProposalManager {
         if (h) {
           manualProjectId = h.projectId;
           manualRelPath = h.relPath;
-          manualChanged = !!(await this._manualBase(h.projectId, h.relPath));
+          manualChanged = (await this._divergence(chatId, h.projectId, h.relPath)).diverged;
         }
       }
       const status = p.status === 'applied' ? 'применён' : p.status === 'rejected' ? 'отклонён' : ev.state;
@@ -598,8 +696,8 @@ class ProposalManager {
       if (ev.patchResults?.length) ev.patchResults.forEach((r, i) => lines.push(`  Блок ${i + 1}: ${r.status === 'ok' ? 'применён' : r.status === 'skipped' ? 'пропущен' : 'не применён'}${r.hint ? ` — ${r.hint}` : ''}`));
       else if (ev.state === 'patch-failed' && ev.error) lines.push(`  Причина: ${ev.error}`);
       if (manualChanged) {
-        lines.push('  ⚠ Файл изменён вручную после последней операции Whale Bridge.');
-        const manual = manualProjectId ? await this.manualView(manualProjectId, manualRelPath) : null;
+        lines.push('  ⚠ Файл изменён после того, как модель видела его последнюю версию.');
+        const manual = manualProjectId ? await this.manualView(chatId, manualProjectId, manualRelPath) : null;
         if (manual?.rows?.length) {
           lines.push('  DIFF: последняя версия Whale Bridge → текущая версия на диске');
           for (const row of manual.rows) {
@@ -667,7 +765,12 @@ class ProposalManager {
    * Пользователь подтвердил: модель проинформирована о текущей версии файла.
    * Отметка снимется сама при следующем изменении — сравнивается хэш, а не флаг.
    */
-  async ackModelSynced(projectId, relPath) {
+  /**
+   * Пользователь подтвердил: модель проинформирована о текущей версии файла.
+   * Отметка снимется сама при следующем изменении — сравнивается хэш, а не флаг.
+   */
+  async ackContext(chatId, projectId, relPath) {
+    if (!chatId) return { ok: false, error: 'Чат не открыт: некому адресовать отметку' };
     const project = this.store.getProject(projectId);
     if (!project) return { ok: false, error: 'Проект не найден' };
     const r = await resolveInProject(project.path, relPath);
@@ -677,19 +780,50 @@ class ProposalManager {
     // нельзя — его содержимое всё равно не передать модели, и отметка вводила бы в заблуждение.
     const cur = await fileops.readTextFile(r.abs);
     if (cur.error) return { ok: false, error: cur.error };
-    await this.store.setModelSynced(projectId, r.rel, cur.hash);
+    Context.record(this.store.contextKnown(), chatId, {
+      projectId: project.id, relPath: r.rel, hash: cur.hash, source: 'ack',
+    });
+    await this.store.saveContext();
     this.onChange();
     return { ok: true, relPath: r.rel, hash: cur.hash };
   }
 
-  /** Какая версия файлов известна модели — для отметок в дереве и статусе редактора. */
-  modelSyncedHashes(projectId, rels) {
-    const all = this.store.modelSyncedMap(projectId);
-    const out = {};
-    for (const rel of (Array.isArray(rels) ? rels : []).slice(0, 200)) {
-      if (typeof rel === 'string' && rel) out[rel] = all[rel] || null;
+  /** Подтвердить сразу все файлы с расхождением — чтобы не кликать по каждому. */
+  async ackAllDivergent(chatId, projectId) {
+    const { items } = await this.listDivergences(chatId, projectId);
+    let ok = 0;
+    const failed = [];
+    for (const item of items) {
+      const r = await this.ackContext(chatId, projectId, item.relPath);
+      if (r.ok) ok++;
+      else failed.push(`${item.relPath}: ${r.error}`);
     }
-    return out;
+    return { ok: failed.length === 0, acked: ok, total: items.length, failed };
+  }
+
+  /** Какая версия файлов известна модели — для отметок в дереве и статусе редактора. */
+  contextKnownHashes(chatId, projectId, rels) {
+    return Context.knownHashes(this.store.contextKnown(), chatId, projectId, rels);
+  }
+
+  /**
+   * Фиксирует, что перечисленные версии файлов переданы модели (например, скопированы
+   * в промпт как контекст). Пакетом — чтобы не писать конфиг на каждый файл.
+   * @param files {[{relPath:string, hash:string}]}
+   */
+  async recordContext(chatId, projectId, files, source) {
+    if (!chatId || !projectId || !Array.isArray(files)) return 0;
+    let n = 0;
+    for (const f of files) {
+      if (!f || typeof f.relPath !== 'string' || !f.relPath) continue;
+      if (typeof f.hash !== 'string' || !f.hash) continue;
+      if (Context.record(this.store.contextKnown(), chatId, { projectId, relPath: f.relPath, hash: f.hash, source })) n++;
+    }
+    if (n) {
+      await this.store.saveContext();
+      this.onChange();
+    }
+    return n;
   }
 
   async historyRevert(id, force) {

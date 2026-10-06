@@ -9,7 +9,7 @@ const INVOKE = new Set([
   'history:list', 'history:view', 'history:revert',
   'backups:stats', 'backups:clear',
   'prompt:get', 'prompt:tree', 'prompt:save-draft', 'prompt:set-excluded', 'prompt:build', 'prompt:copy', 'prompt:copy-reminder', 'prompt:copy-files',
-  'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset', 'proposals:report', 'manual:list', 'manual:view', 'manual:copy', 'manual:ack', 'manual:synced', 'proposal:merge',
+  'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset', 'proposals:report', 'manual:view', 'manual:copy', 'context:list', 'context:ack', 'context:ack-all', 'context:known', 'proposal:merge',
   'layout:drag-start', 'layout:set', 'layout:drag-end',
 ]);
 const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound']);

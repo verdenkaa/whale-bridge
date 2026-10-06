@@ -174,6 +174,9 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .ed-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ed-mark { flex: none; font-size: 11px; line-height: 1; }
 .ed-mark.warn { color: var(--warn); }
+/* ◆ — модель в чате не знает текущую версию файла (расхождение контекста) */
+.ed-mark.ctx { color: #d9a400; }
+.ed-node.diverged .ed-name { box-shadow: inset 0 -1px 0 rgba(217, 164, 0, .55); }
 
 .ed-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
 .ed-tabs { display: flex; gap: 1px; overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
