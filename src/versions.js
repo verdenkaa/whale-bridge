@@ -67,7 +67,11 @@ function parseFileKey(key) {
 // ---------- Классификация версий ----------
 
 /**
- * @param {{aiBase?:string|null, disk?:string|null, saved?:string|null, editor?:string|null}} v
+ * @param {{aiBase?:string|null, disk?:string|null, saved?:string|null, editor?:string|null, dirty?:boolean}} v
+ *   editor — хэш буфера. Если он неизвестен, но dirty известен точно (renderer сравнивает
+ *   текст буфера с сохранённым посимвольно — это строже любого хэша), передайте dirty:
+ *   в sandbox-рендерере нет Node-crypto, а дублировать хэширование в два процесса нельзя —
+ *   расхождение дало бы «файл чист» при несохранённой правке.
  * @returns {{
  *   state: 'unknown'|'in-sync'|'editor-dirty'|'disk-drift'|'save-conflict',
  *   dirty: boolean, diskDrift: boolean, aiStale: boolean, saveConflict: boolean,
@@ -82,16 +86,20 @@ function classifyVersions(v = {}) {
   const saved = v.saved === undefined ? null : v.saved;
   const editor = v.editor === undefined ? null : v.editor;
 
-  // dirty — только если есть с чем сравнивать: буфер и точка сохранения известны
-  const dirty = known(editor) && known(saved) && editor !== saved;
+  // dirty — только если есть с чем сравнивать: буфер и точка сохранения известны.
+  // Явно переданный dirty имеет приоритет при неизвестном editor (см. JSDoc выше).
+  const dirty = known(editor) && known(saved)
+    ? editor !== saved
+    : (typeof v.dirty === 'boolean' ? v.dirty : false);
   // drift — диск уехал от того, что редактор загрузил/сохранил
   const diskDrift = known(saved) && known(disk) && disk !== saved;
   // предложение модели устарело: модель видела не ту версию, что сейчас на диске
   const aiStale = known(aiBase) && known(disk) && aiBase !== disk;
   const saveConflict = dirty && diskDrift;
 
+  const dirtyKnown = (known(editor) && known(saved)) || typeof v.dirty === 'boolean';
   let state = 'unknown';
-  if (known(editor) && known(saved) && known(disk)) {
+  if (dirtyKnown && known(saved) && known(disk)) {
     if (saveConflict) state = 'save-conflict';
     else if (dirty) state = 'editor-dirty';
     else if (diskDrift) state = 'disk-drift';
@@ -100,7 +108,7 @@ function classifyVersions(v = {}) {
 
   // Что делать на Ctrl+S (ТЗ §11–12). 'conflict' — запись запрещена, данные не тронуты.
   let saveDecision = 'unknown';
-  if (known(editor) && known(saved) && known(disk)) {
+  if (dirtyKnown && known(saved) && known(disk)) {
     if (saveConflict) saveDecision = 'conflict';
     else if (dirty) saveDecision = 'ok';
     else if (diskDrift) saveDecision = 'reload'; // своих правок нет — достаточно перечитать файл

@@ -132,6 +132,34 @@ test('versions: drift и конфликт сохранения (§11) — зап
   assert.equal(conflict.diskDrift, true);
 });
 
+test('versions: dirty можно передать явно, если хэш буфера неизвестен', () => {
+  // В sandbox-рендерере нет Node-crypto, поэтому «грязный ли буфер» renderer определяет
+  // точным сравнением текста с сохранённым. Классификация обязана это принимать.
+  const dirtyOnly = V.classifyVersions({ aiBase: A, disk: A, saved: A, dirty: true });
+  assert.equal(dirtyOnly.state, 'editor-dirty');
+  assert.equal(dirtyOnly.saveDecision, 'ok');
+  assert.equal(dirtyOnly.dirty, true);
+
+  const clean = V.classifyVersions({ disk: A, saved: A, dirty: false });
+  assert.equal(clean.state, 'in-sync');
+  assert.equal(clean.saveDecision, 'noop');
+
+  const reload = V.classifyVersions({ disk: B, saved: A, dirty: false });
+  assert.equal(reload.state, 'disk-drift');
+  assert.equal(reload.saveDecision, 'reload');
+
+  const conflict = V.classifyVersions({ aiBase: A, disk: B, saved: A, dirty: true });
+  assert.equal(conflict.state, 'save-conflict');
+  assert.equal(conflict.saveDecision, 'conflict');
+
+  // dirty:false без saved/disk — всё ещё «неизвестно», а не «чисто»
+  assert.equal(V.classifyVersions({ dirty: false }).state, 'unknown');
+  // хэш буфера, если он известен, важнее переданного флага
+  const byHash = V.classifyVersions({ disk: A, saved: A, editor: A, dirty: true });
+  assert.equal(byHash.dirty, false);
+  assert.equal(byHash.state, 'in-sync');
+});
+
 test('versions: aiApply (§22) — база слияния это aiBase, а не диск', () => {
   // буфер совпадает с тем, что видела модель → предложение ложится как есть
   assert.equal(V.classifyVersions({ aiBase: A, disk: A, saved: A, editor: A }).aiApply, 'direct');

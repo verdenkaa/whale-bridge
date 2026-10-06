@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const INVOKE = new Set([
   'state:get', 'project:add', 'project:remove', 'project:bind', 'project:pending',
   'fs:list', 'file:open',
+  'file:read', 'file:write', 'file:hashes',
   'proposals:list', 'proposal:dismiss', 'proposals:dismissAll', 'proposal:get', 'proposal:retarget', 'proposal:apply', 'proposal:reject', 'proposal:fromClipboard',
   'history:list', 'history:view', 'history:revert',
   'backups:stats', 'backups:clear',

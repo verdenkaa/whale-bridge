@@ -7,6 +7,7 @@ const {
 const { Store } = require('./src/store');
 const { ProposalManager } = require('./src/proposals');
 const fileops = require('./src/fileops');
+const editorfs = require('./src/editorfs');
 const { resolveInProject } = require('./src/paths');
 const { extractFencedBlocks } = require('./src/parser');
 const pg = require('./src/promptgen');
@@ -264,6 +265,24 @@ function registerIpc() {
   });
 
   handle('fs:list', ({ projectId, rel }) => fileops.listDir(projectOr(projectId).path, rel ? String(rel) : ''));
+
+  // ---- редактор (Stage A) ----
+  // projectId может быть неизвестен (проект удалён из списка) — тогда editorfs вернёт
+  // внятную ошибку вместо исключения, чтобы renderer показал её в диалоге, а не в тосте.
+  const projectOf = (projectId) => (projectId ? store.getProject(String(projectId)) : null);
+
+  handle('file:read', ({ projectId, path: rel }) => editorfs.readForEditor(projectOf(projectId), rel));
+
+  handle('file:write', async ({ projectId, path: rel, content, expectedHash }) => {
+    const project = projectOf(projectId);
+    const r = await editorfs.writeFromEditor({
+      project, rel, content, expectedHash, store, chatId: currentChatId,
+    });
+    if (r.ok) proposals.onChange(); // drift-детекция предложений зависит от нового состояния файла
+    return r;
+  });
+
+  handle('file:hashes', ({ projectId, paths }) => editorfs.hashesForEditor(projectOf(projectId), paths));
 
   handle('file:open', async ({ projectId, rel, mode }) => {
     const r = await resolveInProject(projectOr(projectId).path, String(rel));
