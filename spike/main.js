@@ -103,7 +103,21 @@ function writeReports(all) {
   for (const r of all) {
     lines.push(`## Стратегия \`${r.id}\` — ${r.ok ? 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : 'ЕСТЬ ПРОВАЛЫ'}`, '');
     if (r.timeout) { lines.push('Стенд не ответил (таймаут).', ''); }
-    if (r.env) lines.push(`Окружение: ${JSON.stringify(r.env)}`, '');
+    if (r.env) {
+      const { workerSpy, ...env } = r.env;
+      lines.push(`Окружение: ${JSON.stringify(env)}`, '');
+      if (Array.isArray(workerSpy) && workerSpy.length) {
+        lines.push(`Создано воркеров: ${workerSpy.length}`, '');
+        for (const w of workerSpy) {
+          lines.push(`- type: \`${w.type}\`, name: ${w.name || '—'}, ошибок: ${w.errors.length}`);
+          lines.push(`  url: ${w.url}`);
+          for (const e of w.errors) lines.push(`  ! ${e}`);
+        }
+        lines.push('');
+      } else {
+        lines.push('Создано воркеров: 0 — Monaco обошёлся без них', '');
+      }
+    }
     for (const p of r.probes) lines.push(reportLine(p));
     if (r.cspViolations && r.cspViolations.length) {
       lines.push('', 'Нарушения CSP (их нужно учесть в политике):', '');
@@ -152,6 +166,11 @@ app.whenReady().then(async () => {
     for (const v of r.cspViolations || []) {
       console.log(`  ! CSP ${v.effectiveDirective}: ${v.blockedURI}`);
     }
+    const spy = (r.env && r.env.workerSpy) || [];
+    console.log(`  воркеров создано: ${spy.length}` + (spy.length
+      ? ' → ' + spy.map((w) => `${w.type}${w.errors.length ? '(!)' : ''}`).join(', ')
+      : ''));
+    for (const w of spy) for (const e of w.errors) console.log(`    ! воркер ${w.type}: ${e}`);
     if (r.timeout) console.log('  ! таймаут — смотрите spike/report.md');
     console.log('');
   }

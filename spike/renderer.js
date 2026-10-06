@@ -10,6 +10,20 @@
   const cspViolations = [];
   const runtimeErrors = [];
   const workerLog = [];
+  const workerSpy = [];
+
+  // Шпион за созданием воркеров. Ставится до загрузки Monaco, поэтому фиксирует ЛЮБОЙ воркер,
+  // кем бы он ни был создан — нашим getWorker или штатным путём Monaco (blob: + module).
+  // Без этого нельзя отличить «воркер поднялся» от «Monaco обошёлся без воркера».
+  const NativeWorker = window.Worker;
+  window.Worker = function SpiedWorker(url, opts) {
+    const rec = { url: String(url), type: (opts && opts.type) || 'classic', name: (opts && opts.name) || null, errors: [] };
+    workerSpy.push(rec);
+    const w = new NativeWorker(url, opts);
+    w.addEventListener('error', (ev) => { rec.errors.push(String(ev.message || 'worker error')); });
+    return w;
+  };
+  window.Worker.prototype = NativeWorker.prototype;
 
   const logEl = document.getElementById('log');
   const listEl = document.getElementById('probes');
@@ -83,7 +97,7 @@
   // ---------- воркеры ----------
   // 'classic' — создаём воркер сами (обычный, не модульный) через MonacoEnvironment.getWorker.
   // 'default' — не вмешиваемся: Monaco сам сделает blob: + module worker.
-  if (strategy === 'classic') {
+  if (strategy !== 'default') {
     window.MonacoEnvironment = {
       getWorker(_moduleId, label) {
         const url = new URL('worker-host.js', document.baseURI);
@@ -199,11 +213,12 @@
     try {
       const src = '@export var speed: float = 5.0\n# комментарий\nfunc _ready():\n\t$Node.hide()\n';
       const lines = monaco.editor.tokenize(src, 'whale-gdscript');
-      const types = new Set(lines.flat().map((t) => t.scopes));
+      // В d.ts у Token заявлены {startIndex, scopes}, а рантайм отдаёт {offset, type, language}
+      const types = new Set(lines.flat().map((t) => t.type ?? t.scopes));
       const need = ['tag.gd', 'comment.gd', 'function.gd', 'variable.gd', 'type.gd', 'number.float.gd'];
       const missing = need.filter((n) => !types.has(n));
       return rec('monaco.editor.tokenize (подсветка GDScript)', missing.length === 0,
-        missing.length ? 'нет токенов: ' + missing.join(', ') : [...types].slice(0, 8).join(', '));
+        missing.length ? `нет токенов: ${missing.join(', ')}; получено: ${[...types].join(', ') || 'пусто'}` : `${types.size} типов токенов`);
     } catch (e) {
       return rec('monaco.editor.tokenize (подсветка GDScript)', false, e.message);
     }
@@ -231,18 +246,67 @@
     return rec('Язык определяется по расширению (§16)', bad.length === 0, bad.length ? bad.join('; ') : `${cases.length} расширений`);
   }
 
+  // Прямые проверки воркеров. Отделяют «CSP/окружение не дают создать воркер» от
+  // «Monaco не стал его создавать» — без них проба Diff неоднозначна.
+  function probeClassicWorker() {
+    return new Promise((resolve) => {
+      let w = null;
+      const finish = (ok, detail) => {
+        if (w) { try { w.terminate(); } catch { /* ignore */ } }
+        resolve(rec('Classic-воркер создаётся (worker-src self)', ok, detail));
+      };
+      try {
+        w = new window.Worker(new URL('echo-worker.js', document.baseURI).href, { type: 'classic', name: 'spike-classic' });
+        const timer = setTimeout(() => finish(false, 'таймаут 5 с: воркер не ответил'), 5000);
+        w.addEventListener('error', (e) => { clearTimeout(timer); finish(false, 'error: ' + (e.message || 'скрипт воркера не загрузился')); });
+        w.onmessage = (e) => { clearTimeout(timer); finish(!!(e.data && e.data.ok), (e.data && e.data.detail) || 'эхо получено'); };
+        w.postMessage({ ping: 'classic' });
+      } catch (e) {
+        finish(false, e.message);
+      }
+    });
+  }
+
+  // Штатный путь Monaco: blob-URL + type:'module'. Проверяем отдельно, потому что именно он
+  // подозревается в несовместимости с file:// (модульный импорт проверяется по CORS).
+  function probeBlobModuleWorker() {
+    return new Promise((resolve) => {
+      let w = null;
+      let url = null;
+      const finish = (ok, detail) => {
+        if (w) { try { w.terminate(); } catch { /* ignore */ } }
+        if (url) { try { URL.revokeObjectURL(url); } catch { /* ignore */ } }
+        resolve(rec('Blob+module воркер создаётся (штатный путь Monaco)', ok, detail));
+      };
+      try {
+        url = URL.createObjectURL(new Blob(["globalThis.postMessage({ ok: true, detail: 'blob module worker работает' });"], { type: 'application/javascript' }));
+        w = new window.Worker(url, { type: 'module', name: 'spike-blob-module' });
+        const timer = setTimeout(() => finish(false, 'таймаут 5 с: blob-воркер не ответил — нужен worker-src blob:'), 5000);
+        w.addEventListener('error', (e) => { clearTimeout(timer); finish(false, 'error: ' + (e.message || 'blob module worker не создался')); });
+        w.onmessage = (e) => { clearTimeout(timer); finish(!!(e.data && e.data.ok), (e.data && e.data.detail) || 'эхо получено'); };
+      } catch (e) {
+        finish(false, e.message);
+      }
+    });
+  }
+
   // Главная проба: без работающего воркера Diff (а значит и Stage C) не получить.
+  // Документы намеренно большие: на крошечных нельзя отличить «воркер ответил» от
+  // «Monaco обошёлся без воркера», а именно это и нужно измерить.
+  const bigDoc = (tag) => Array.from({ length: 3000 }, (_, i) => (i % 97 === 0 ? `${tag} changed line ${i}` : `line ${i} of the file`)).join('\n');
+
   function probeWorkerViaDiff() {
     return new Promise((resolve) => {
       let diff = null;
       let orig = null;
       let mod = null;
       try {
+        const spyBefore = workerSpy.length;
         const host = document.getElementById('diff-host');
         host.classList.remove('hidden');
         diff = monaco.editor.createDiffEditor(host, { theme: 'vs-dark', automaticLayout: false, renderSideBySide: true });
-        orig = monaco.editor.createModel('a\nb\nc\n', 'plaintext');
-        mod = monaco.editor.createModel('a\nB\nc\nd\n', 'plaintext');
+        orig = monaco.editor.createModel(bigDoc('original'), 'plaintext');
+        mod = monaco.editor.createModel(bigDoc('modified'), 'plaintext');
         diff.setModel({ original: orig, modified: mod });
 
         let settled = false;
@@ -255,10 +319,13 @@
           const changes = ok && diff.getLineChanges() ? diff.getLineChanges().length : 0;
           if (diff) diff.dispose();
           orig.dispose(); mod.dispose();
-          const extra = workerLog.length ? ' | ' + workerLog.join(' | ') : '';
-          resolve(rec('Web worker: Diff считается (getLineChanges)', ok, detail + (ok ? `, изменений: ${changes}` : '') + extra));
+          const created = workerSpy.slice(spyBefore);
+          const extra = ` | воркеров создано: ${created.length}` + (created.length
+            ? ' → ' + created.map((w) => `${w.type}${w.errors.length ? ' (ОШИБКА: ' + w.errors.join('; ') + ')' : ''} ${w.url.slice(0, 60)}`).join(' ; ')
+            : ' — Diff посчитан БЕЗ воркера');
+          resolve(rec('Web worker: Diff на 3000 строк (getLineChanges)', ok, detail + (ok ? `, изменений: ${changes}` : '') + extra));
         };
-        const timer = setTimeout(() => finish(false, 'таймаут 12 с: Diff не посчитался — воркер не поднялся'), 12000);
+        const timer = setTimeout(() => finish(false, 'таймаут 20 с: Diff не посчитался — воркер не поднялся'), 20000);
         const sub = diff.onDidUpdateDiff(() => {
           const ch = diff.getLineChanges();
           if (ch) finish(true, 'воркер ответил');
@@ -307,11 +374,12 @@
       editor.setModel(m);
       editor.restoreViewState(saved);
       const pos = editor.getPosition();
-      const ok = !!saved && pos.lineNumber === 120 && pos.column === 7 && editor.getScrollTop() > 0;
+      const scroll = editor.getScrollTop();
+      const ok = !!saved && pos.lineNumber === 120 && pos.column === 7 && scroll > 0;
+      const detail = `курсор ${pos.lineNumber}:${pos.column}, scrollTop ${scroll}`;
       editor.setModel(mainModel);
       m.dispose();
-      return rec('saveViewState/restoreViewState (§14)', ok,
-        ok ? `курсор ${pos.lineNumber}:${pos.column}, scrollTop ${editor.getScrollTop()}` : `cursor=${JSON.stringify(pos)} scroll=${editor.getScrollTop()}`);
+      return rec('saveViewState/restoreViewState (§14)', ok, detail);
     } catch (e) {
       return rec('saveViewState/restoreViewState (§14)', false, e.message);
     }
@@ -381,6 +449,8 @@
     await probeCodiconFont();
     probeTokenizeApi();
     probeLanguageByExtension();
+    await probeClassicWorker();
+    await probeBlobModuleWorker();
     await probeWorkerViaDiff();
     probeModelReuse();
     probeViewState();
@@ -409,7 +479,10 @@
         protocol: location.protocol,
         origin: location.origin,
         monacoVersion: (window.monaco && monaco.editor && monaco.editor.EditorOptions) ? 'loaded' : 'unknown',
-        workersRequested: workerLog.length,
+        monacoEnvironmentSet: !!(window.MonacoEnvironment && typeof window.MonacoEnvironment.getWorker === 'function'),
+        workersRequestedByMonacoEnv: workerLog.length,
+        workersCreatedTotal: workerSpy.length,
+        workerSpy,
       },
     });
   }

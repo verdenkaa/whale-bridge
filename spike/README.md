@@ -34,6 +34,13 @@ npm run spike
 | `default` | `file://` | штатный путь Monaco: `blob:` + `type: 'module'` + `await import('file://…')` | замерить, правда ли он ломается на `file://` |
 | `protocol` | `whale-spike://app/…` | как в `classic` | запасной: свой scheme даёт настоящий origin, если `file://` режет воркеры |
 
+Во всех трёх пробах за созданием воркеров следит шпион: `window.Worker` оборачивается до
+загрузки Monaco, поэтому в отчёт попадает **каждый** созданный воркер с его URL, типом и
+ошибками. Без этого невозможно отличить «воркер поднялся» от «Monaco обошёлся без воркера».
+
+Документы в пробе Diff намеренно большие (3000 строк): на крошечных нельзя отличить ответ
+воркера от любого внутреннего быстрого пути, и проба теряет смысл.
+
 Почему `classic` — основной кандидат. Штатный путь Monaco 0.57 (см. `AJ`/`MJ` в
 `min/vs/editor-BdtEMBbM.js`) создаёт blob-воркер, внутри которого выполняется
 `await import("<абсолютный URL>")`, и поднимает его как `new Worker(blobUrl, { type: 'module' })`.
@@ -53,7 +60,9 @@ npm run spike
 | шрифт codicon | хватает ли `font-src data:` (в min-сборке шрифт инлайнится base64) |
 | `monaco.editor.tokenize` | работает ли подсветка GDScript в рантайме |
 | язык по расширению | `.gd → whale-gdscript`, остальные — встроенные языки Monaco (§16) |
-| **Diff через `getLineChanges()`** | **поднялся ли web worker** — ключевая проба |
+| classic-воркер напрямую | создаётся ли обычный воркер при нашей CSP (`worker-src 'self'`) |
+| blob+module воркер напрямую | создаётся ли воркер штатным способом Monaco (`worker-src blob:`) |
+| **Diff на 3000 строк через `getLineChanges()`** | **поднялся ли web worker** — ключевая проба |
 | смена model без пересоздания editor | требование §7 |
 | `saveViewState`/`restoreViewState` | требование §14 |
 | `layout()` после изменения Grid | требование §5 |
@@ -90,8 +99,9 @@ spike/
 ├── preload.js       contextBridge (те же contextIsolation + sandbox, что в приложении)
 ├── index.html       CSP + разметка целевой IDE-раскладки
 ├── spike.css        CSS Grid: chat-slot | файлы | редактор | боковая панель | нижняя панель
-├── renderer.js      батарея проб
-└── worker-host.js   classic-воркер: importScripts(loader.js) → vs/editor/editor.worker
+├── renderer.js      батарея проб + шпион за window.Worker
+├── echo-worker.js   эхо-воркер для прямой проверки worker-src 'self'
+└── worker-host.js   classic-воркер Monaco: importScripts(loader.js) → vs/editor/editor.worker
 ```
 
 Определение GDScript лежит в `ui/languages/gdscript.js`, а не здесь: оно проверяется
