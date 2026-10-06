@@ -217,9 +217,18 @@ class ProposalManager {
 
   get(id) { return this.map.get(id) || null; }
 
+  /**
+   * Последняя операция Whale Bridge над файлом — точка отсчёта для «изменён ли файл вручную».
+   *
+   * Записи об откате учитываются, хотя резервных копий у них нет (hashOnly): их afterHash
+   * точно описывает то, что теперь на диске. Без этого после принудительного отката старой
+   * операции точкой отсчёта осталась бы более новая запись, её afterHash не совпал бы с
+   * диском, и приложение показывало бы ложное «файл изменён вручную».
+   */
   async _manualBase(projectId, relPath) {
     const h = [...this.store.history]
-      .filter((x) => x.projectId === projectId && x.relPath === relPath && x.status === 'applied' && x.afterHash && !x.pruned)
+      .filter((x) => x.projectId === projectId && x.relPath === relPath && x.status === 'applied' && x.afterHash
+        && (!x.pruned || x.source === 'rollback'))
       .sort((a, b) => b.ts - a.ts)[0];
     if (!h) return null;
     const project = this.store.getProject(projectId);
@@ -228,7 +237,17 @@ class ProposalManager {
     if (!r.ok || !r.exists || !r.isFile) return null;
     const cur = await fileops.readRawFile(r.abs);
     if (cur.error || cur.hash === h.afterHash) return null;
-    return { history: h, project, abs: r.abs, current: cur };
+    return { history: h, project, abs: r.abs, current: cur, hashOnly: h.source === 'rollback' };
+  }
+
+  // Хэш файла для записи в историю: ABSENT — файла нет, null — путь недоступен или не читается.
+  async _hashAt(root, rel) {
+    if (!rel) return null;
+    const r = await resolveInProject(root, rel);
+    if (!r.ok) return null;
+    if (!r.exists || !r.isFile) return ABSENT;
+    const cur = await fileops.readRawFile(r.abs);
+    return cur.error ? null : cur.hash;
   }
 
   // Обёртка над _evaluate: добавляет версию, которую видела модель, и её сравнение с диском.
@@ -498,6 +517,9 @@ class ProposalManager {
       seen.add(h.relPath);
       const manual = await this._manualBase(projectId, h.relPath);
       if (!manual) continue;
+      // Точка отсчёта — запись об откате: копии у неё нет, построчное сравнение построить нечем.
+      // Само изменение не теряется — proposal по-прежнему помечает файл как изменённый вручную.
+      if (manual.hashOnly) continue;
       const current = await fileops.readTextFile(manual.abs);
       const after = await fs.readFile(path.join(this.store.backupDir, h.id + '.after'), 'utf8').catch(() => null);
       if (current.error || after == null) continue;
@@ -510,6 +532,12 @@ class ProposalManager {
   async manualView(projectId, relPath) {
     const manual = await this._manualBase(projectId, relPath);
     if (!manual) return null;
+    if (manual.hashOnly) {
+      return {
+        relPath, historyId: manual.history.id, hashOnly: true,
+        error: 'Последняя операция над файлом — откат. Резервная копия для отката не хранится (откат неоткатим), поэтому построчное сравнение недоступно.',
+      };
+    }
     const after = await fs.readFile(path.join(this.store.backupDir, manual.history.id + '.after'), 'utf8').catch(() => null);
     if (after == null) return null;
     const current = await fileops.readTextFile(manual.abs);
@@ -613,22 +641,43 @@ class ProposalManager {
     return { ok: true, historyId: opId };
   }
 
+  /**
+   * Откат операции. Сам откат попадает в журнал (source: 'rollback'), но повторно откатить
+   * его НЕЛЬЗЯ: резервные копии для него не создаются — иначе каждый откат удваивал бы число
+   * файлов в backups/, а цепочка «откат отката» только путает. Записей об откате хранится
+   * не больше ROLLBACK_RECORD_LIMIT на файл.
+   */
   async historyRevert(id, force) {
     const h = this.store.getHistory(id);
     if (!h || h.status !== 'applied') return { ok: false, code: 'state', error: 'Эту операцию нельзя откатить' };
+    if (h.revertible === false || h.source === 'rollback') {
+      return { ok: false, code: 'not-revertible', error: 'Это запись об откате — повторно откатить её нельзя' };
+    }
     const project = this.store.getProject(h.projectId);
     if (!project) return { ok: false, code: 'state', error: 'Проект удалён из списка' };
     if (h.pruned && h.op !== 'create') {
       return { ok: false, code: 'pruned', error: 'Резервная копия этой операции удалена (хранятся 2 последние версии файла)' };
     }
+    // До перемещения файл лежит в newRelPath, после отката — снова в relPath
+    const beforeHash = await this._hashAt(project.path, h.op === 'move' ? h.newRelPath : h.relPath);
     const res = await fileops.restore({
       root: project.path, rel: h.relPath, op: h.op, newRel: h.newRelPath, backupDir: this.store.backupDir,
       opId: h.id, afterHash: h.afterHash, force: !!force,
     });
-    if (res.ok) {
-      await this.store.updateHistory(id, { status: 'reverted', revertedAt: Date.now() });
-      this.onChange();
-    }
+    if (!res.ok) return res;
+
+    await this.store.updateHistory(id, { status: 'reverted', revertedAt: Date.now() });
+    const afterHash = await this._hashAt(project.path, h.relPath);
+    await this.store.addHistory({
+      id: crypto.randomUUID(), ts: Date.now(), chatId: h.chatId ?? null,
+      projectId: h.projectId, projectName: h.projectName,
+      relPath: h.relPath, op: h.op, newRelPath: h.newRelPath || null,
+      status: 'applied', source: 'rollback', revertible: false, revertedHistoryId: h.id,
+      beforeHash, afterHash, error: null,
+      pruned: true, // резервных копий нет — Diff и повторный откат недоступны
+    });
+    await this.store.pruneRollbackRecords(h.projectId, h.relPath).catch((e) => console.error('[rollback prune]', e));
+    this.onChange();
     return res;
   }
 }

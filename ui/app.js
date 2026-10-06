@@ -404,6 +404,7 @@
     if (!S.project) return;
     const d = await call('manual:view', { projectId: S.project.id, relPath });
     if (!d) return toast('Ручные изменения не найдены', 'err');
+    if (d.error) return toast(d.error, 'err'); // например: точка отсчёта — откат, копии для сравнения нет
     S.view = { kind: 'manual', data: d }; render();
   }
   async function copyManualVersions() {
@@ -522,7 +523,7 @@
     const marks = new Set(S.proposals.filter((p) => p.status === 'pending' && !p.historical && p.state !== 'missing').map((p) => p.relPath));
     const manual = new Set(S.manual.map((x) => x.relPath));
     const undo = new Map(); // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
-    for (const e of S.history) if (e.status === 'applied' && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
+    for (const e of S.history) if (e.status === 'applied' && e.revertible !== false && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
     const box = h('div', { class: 'stack' },
       h('div', { class: 'toolbar' },
         h('span', { class: 'path grow' }, S.project.path),
@@ -577,10 +578,12 @@
             h('div', { class: 'card-meta' },
               h('span', {}, fmtTime(e.ts)),
               h('span', { class: 'badge' + (e.status === 'failed' ? ' bad' : '') }, statusLabel[e.status] || e.status),
-              e.pruned && h('span', { class: 'badge', title: 'Копии этой операции удалены' }, 'копия удалена'),
+              e.source === 'rollback'
+                ? h('span', { class: 'badge', title: 'Откат операции. Резервная копия не хранится — откатить повторно нельзя' }, 'откат')
+                : e.pruned && h('span', { class: 'badge', title: 'Копии этой операции удалены' }, 'копия удалена'),
               e.error && h('span', { class: 'badge bad', title: e.error }, e.error.slice(0, 60)))),
           e.status !== 'failed' && !e.pruned && h('button', { class: 'btn', onclick: () => openHistory(e.id) }, 'Diff'),
-          e.status === 'applied' && !(e.pruned && e.op !== 'create') && h('button', { class: 'btn', onclick: () => onRevert(e.id) }, 'Восстановить'))));
+          e.status === 'applied' && e.revertible !== false && !(e.pruned && e.op !== 'create') && h('button', { class: 'btn', onclick: () => onRevert(e.id) }, 'Восстановить'))));
   }
 
   function renderManualView(d) {

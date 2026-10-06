@@ -72,13 +72,15 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
     'history:list': [
       { id: 'h1', ts: Date.now(), op: 'update', relPath: 'a.gd', status: 'applied', pruned: true },
       { id: 'h2', ts: Date.now(), op: 'update', relPath: 'a.gd', status: 'applied' },
+      // запись об откате: копии у неё не было, откатить повторно нельзя
+      { id: 'h3', ts: Date.now(), op: 'create', relPath: 'n.gd', status: 'applied', pruned: true, source: 'rollback', revertible: false },
     ],
     'backups:stats': { files: 4, bytes: 2048 },
     'prompt:get': { sections, presets: [{ id: 'pr1', name: 'Godot' }], excluded: [], defaults: pg.defaultTexts() },
     'prompt:tree': tree,
     'prompt:build': { text: 'ПРОМПТ', partial: false },
     'prompt:copy': { ok: true, length: 6, partial: false },
-    'fs:list': { items: [{ name: 'a.gd', rel: 'a.gd', isDir: false }] },
+    'fs:list': { items: [{ name: 'a.gd', rel: 'a.gd', isDir: false }, { name: 'n.gd', rel: 'n.gd', isDir: false }] },
   };
   global.window = {
     innerWidth: 1500,
@@ -128,9 +130,22 @@ test('UI: вкладки, патч-предложения, бэкапы, ген�
   assert.match(text(roots.body), /Хранятся 2 последние версии/);
   assert.match(text(roots.body), /копия удалена/);
   const diffBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Diff');
-  assert.equal(diffBtns.length, 1); // у устаревшей операции Diff скрыт
+  assert.equal(diffBtns.length, 1); // у устаревшей операции и у отката Diff скрыт
+  // откат показан отдельным значком и не предлагает «Восстановить» — даже для create,
+  // где обычное правило (pruned && op !== 'create') кнопку бы оставило
+  assert.match(text(roots.body), /откат/);
+  const revertBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Восстановить');
+  assert.equal(revertBtns.length, 1);
+  assert.equal(findAll(roots.body, (e) => text(e) === 'копия удалена').length, 1); // у отката такого значка нет
   await click(findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Очистить бэкапы')[0]);
   assert.ok(log.some(([ch]) => ch === 'backups:clear'));
+
+  // вкладка «Файлы»: кнопка «↩ Откатить» не предлагается для записи об откате.
+  // n.gd создан и откачен — единственная запись о нём неоткатима, поэтому кнопки быть не должно.
+  await click(tabs[1]);
+  await tick(90);
+  const undoBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === '↩ Откатить');
+  assert.equal(undoBtns.length, 1); // только a.gd
 
   // вкладка «Промпт»
   await click(tabs[3]);

@@ -205,12 +205,17 @@ test('бэкапы: хранятся только 2 последние опер�
   assert.equal((await pm.historyRevert(ids[3], false)).ok, true);
   assert.equal(await fs.readFile(file, 'utf8'), 'v3\n');
 
+  // откат добавил в журнал запись, но не добавил ни одного файла копии
+  const rollback = store.history.find((h) => h.source === 'rollback');
+  assert.ok(rollback, 'запись об откате появилась в журнале');
+  assert.equal(rollback.revertible, false);
+  assert.equal(rollback.pruned, true);
   const stats = await store.backupStats();
-  assert.equal(stats.files, 4);
+  assert.equal(stats.files, 4); // откат копий не создаёт
   await store.clearBackups();
   assert.equal((await store.backupStats()).files, 0);
   assert.ok(store.history.every((h) => h.pruned));
-  assert.equal(store.history.length, 4); // журнал остаётся
+  assert.equal(store.history.length, 5); // журнал остаётся: 4 операции + запись об откате
 });
 
 test('бэкапы: лимит считается отдельно по каждому файлу; создание можно откатить после очистки', async (t) => {
