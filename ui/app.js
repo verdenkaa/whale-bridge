@@ -30,6 +30,10 @@
     }
   }
 
+  const COPY_TITLE = 'Скопировать в буфер то, что изменилось в этих файлах с тех пор, как модель видела их последней: '
+    + 'unified diff, а если точная версия не сохранилась или файл крошечный — файл целиком. '
+    + 'Отметки при этом НЕ снимаются: скопировать в буфер не значит отправить в чат.';
+
   const STATE_LABEL = {
     update: 'Обновление', create: 'Создание', delete: 'Удаление', move: 'Перемещение', identical: 'Без изменений', missing: 'Файл не найден',
     exists: 'Файл уже существует', 'invalid-path': 'Небезопасный путь', 'no-project': 'Нет проекта',
@@ -570,9 +574,9 @@
         h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить'),
         manual.size > 0 && h('button', {
           class: 'btn',
-          title: 'Скопировать текущие версии файлов, о которых модель знает устаревшее, и отметить их как известные ей',
+          title: COPY_TITLE,
           onclick: copyManualVersions,
-        }, 'Скопировать актуальные версии для модели'),
+        }, 'Скопировать изменения для модели'),
         manual.size > 0 && h('button', {
           class: 'btn', title: `Отметить все ${manual.size} файл(ов) как известные модели`,
           onclick: ackAllManual,
@@ -657,7 +661,7 @@
         : h('div', { class: 'notice' }, d.note || 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
       d.rows && d.rows.length ? diffTable(d.rows, d.truncated) : null,
       h('div', { class: 'actions' },
-        h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
+        h('button', { class: 'btn', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать изменения для модели'),
         d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
         h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл')));
   }
@@ -675,7 +679,7 @@
       h('div', { class: 'path' }, 'Вариант с маркерами конфликтов:'),
       h('pre', { class: 'code' }, d.mergedText),
       h('div', { class: 'actions' },
-        h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
+        h('button', { class: 'btn', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать изменения для модели'),
         h('button', { class: 'btn', onclick: closeView }, 'Назад')));
   }
 

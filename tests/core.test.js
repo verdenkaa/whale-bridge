@@ -404,3 +404,64 @@ test('proposals: MOVE не перезаписывает существующий
   assert.equal(result.code, 'state');
   assert.equal(await fs.readFile(path.join(root, 'a.txt'), 'utf8'), 'a\n');
 });
+
+// --- unified diff: то, чем заменяется копирование файлов целиком ---
+
+test('toUnifiedDiff: правка одной строки в большом файле — компактный hunk', () => {
+  const { toUnifiedDiff } = require('../src/diff');
+  const old = Array.from({ length: 40 }, (_, i) => `s${i + 1}`).join('\n') + '\n';
+  const next = old.replace('s20', 'S20');
+  const d = toUnifiedDiff(old, next, { oldLabel: 'a/f.py', newLabel: 'b/f.py' });
+  assert.match(d, /^--- a\/f\.py$/m);
+  assert.match(d, /^\+\+\+ b\/f\.py$/m);
+  assert.match(d, /^@@ -\d+,\d+ \+\d+,\d+ @@$/m);
+  assert.match(d, /^-s20$/m);
+  assert.match(d, /^\+S20$/m);
+  assert.ok(d.length < old.length, 'diff короче файла');
+  assert.ok(!d.includes('s1\n'), 'далёкие строки в diff не попадают');
+});
+
+test('toUnifiedDiff: идентичные тексты — пустая строка', () => {
+  const { toUnifiedDiff } = require('../src/diff');
+  assert.equal(toUnifiedDiff('a\nb\n', 'a\nb\n'), '');
+});
+
+test('toUnifiedDiff: две далёкие правки — два hunk\'а', () => {
+  const { toUnifiedDiff } = require('../src/diff');
+  const old = Array.from({ length: 40 }, (_, i) => `s${i + 1}`).join('\n') + '\n';
+  const next = old.replace('s2', 'S2').replace('s38', 'S38');
+  const d = toUnifiedDiff(old, next, { context: 2 });
+  assert.equal(d.split('\n').filter((l) => l.startsWith('@@')).length, 2);
+});
+
+test('toUnifiedDiff: создание файла из пустого — заголовок по соглашению git', () => {
+  const { toUnifiedDiff } = require('../src/diff');
+  const d = toUnifiedDiff('', 'x\ny\n');
+  assert.match(d, /^@@ -0,0 \+1,2 @@$/m);
+});
+
+test('toUnifiedDiff: удаление всего содержимого — нулевой счётчик новой стороны', () => {
+  const { toUnifiedDiff } = require('../src/diff');
+  const d = toUnifiedDiff('x\ny\n', '');
+  assert.match(d, /^@@ -1,2 \+0,0 @@$/m);
+});
+
+test('toUnifiedDiff: результат принимает git apply', async (t) => {
+  // Формат проверяется не «на глаз», а реальным инструментом
+  const { execFileSync } = require('node:child_process');
+  const { toUnifiedDiff } = require('../src/diff');
+  let ok = true;
+  try { execFileSync('git', ['--version']); } catch { ok = false; }
+  if (!ok) { t.skip('git недоступен'); return; }
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-udiff-'));
+  t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir });
+  const old = Array.from({ length: 30 }, (_, i) => `s${i + 1}`).join('\n') + '\n';
+  const next = old.replace('s3', 'S3') + 's31\n';
+  await fs.writeFile(path.join(dir, 'f.txt'), old);
+  const patch = 'diff --git a/f.txt b/f.txt\n' + toUnifiedDiff(old, next, { oldLabel: 'a/f.txt', newLabel: 'b/f.txt' });
+  await fs.writeFile(path.join(dir, 'd.patch'), patch);
+  execFileSync('git', ['apply', 'd.patch'], { cwd: dir });
+  assert.equal(await fs.readFile(path.join(dir, 'f.txt'), 'utf8'), next);
+});

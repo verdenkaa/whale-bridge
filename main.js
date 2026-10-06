@@ -294,6 +294,19 @@ function registerIpc() {
 
   handle('file:write', async ({ projectId, path: rel, content, expectedHash }) => {
     const project = projectOf(projectId);
+    // До перезаписи: если журнал знает текущее содержимое только по хэшу (записи,
+    // сделанные до появления снимков, и перенесённые миграцией), успеваем сохранить его.
+    // Через мгновение файл перезапишут, и сравнение «версия модели -> диск» останется
+    // без второй стороны навсегда.
+    if (project && rel && currentChatId) {
+      try {
+        const rp = await resolveInProject(project.path, rel);
+        if (rp.ok && rp.exists && rp.isFile) {
+          const cur = await fileops.readTextFile(rp.abs);
+          if (!cur.error) await proposals.ensureContextSnapshot(currentChatId, projectId, rel, cur.hash, cur.text);
+        }
+      } catch { /* страховка не должна мешать сохранению */ }
+    }
     const r = await editorfs.writeFromEditor({
       project, rel, content, expectedHash, store, chatId: currentChatId,
     });
@@ -451,7 +464,9 @@ function registerIpc() {
           // Обрезанный файл модель не увидит целиком — отмечать его как известный нельзя
           skipped.push(node.rel + ' (обрезан по лимиту общего объёма)');
         } else {
-          sentToModel.push({ relPath: node.rel, hash: text.hash });
+          // content обязателен: без него журнал знает только хэш, и показать модели
+          // «что именно изменилось» будет нечем
+          sentToModel.push({ relPath: node.rel, hash: text.hash, content: text.text });
         }
         parts.push(`--- ${node.rel} ---\n${content}`);
         totalChars += content.length;

@@ -113,4 +113,61 @@ function toRows(ops, ctx = 3) {
   return rows;
 }
 
-module.exports = { diffLines, diffStats, toRows, splitLines };
+/**
+ * Обычный unified diff — то, что понимает и `patch`, и любая модель.
+ *
+ * Нужен именно он, а не полный текст файла: передавать модели миллион строк ради
+ * одной заменённой строки импорта — значит выбросить её контекст. Diff сообщает
+ * ровно то, что требуется: что изменилось с тех пор, как модель видела файл.
+ *
+ * @returns {string} пустая строка, если тексты идентичны
+ */
+function toUnifiedDiff(oldText, newText, opts = {}) {
+  const ctx = opts.context == null ? 3 : opts.context;
+  const ops = diffLines(oldText, newText);
+  const changed = [];
+  for (let i = 0; i < ops.length; i++) if (ops[i].type !== 'eq') changed.push(i);
+  if (!changed.length) return '';
+
+  // Координаты в обоих файлах для каждой операции. diffLines проставляет только
+  // «свою» сторону (у del нет newNo, у add нет oldNo), а заголовок hunk'а требует обеих.
+  const coord = [];
+  let o = 1;
+  let n = 1;
+  for (const op of ops) {
+    coord.push({ o, n });
+    if (op.type === 'eq') { o++; n++; } else if (op.type === 'del') { o++; } else { n++; }
+  }
+
+  // Правки, разделённые больше чем двумя ширинами контекста, попадают в разные hunk'и
+  const groups = [[changed[0]]];
+  for (let k = 1; k < changed.length; k++) {
+    if (changed[k] - changed[k - 1] <= ctx * 2) groups[groups.length - 1].push(changed[k]);
+    else groups.push([changed[k]]);
+  }
+
+  const out = [];
+  if (opts.oldLabel != null) out.push('--- ' + opts.oldLabel);
+  if (opts.newLabel != null) out.push('+++ ' + opts.newLabel);
+
+  for (const g of groups) {
+    const from = Math.max(0, g[0] - ctx);
+    const to = Math.min(ops.length - 1, g[g.length - 1] + ctx);
+    const body = [];
+    let oldCount = 0;
+    let newCount = 0;
+    for (let i = from; i <= to; i++) {
+      const op = ops[i];
+      if (op.type === 'eq') { body.push(' ' + op.text); oldCount++; newCount++; } else if (op.type === 'del') { body.push('-' + op.text); oldCount++; } else { body.push('+' + op.text); newCount++; }
+    }
+    // При нулевом количестве строк с одной из сторон git указывает предыдущую строку,
+    // а не следующую. Держимся того же соглашения — иначе diff не применится патчем.
+    const oldStart = oldCount === 0 ? Math.max(0, coord[from].o - 1) : coord[from].o;
+    const newStart = newCount === 0 ? Math.max(0, coord[from].n - 1) : coord[from].n;
+    out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    out.push(...body);
+  }
+  return out.join('\n') + '\n';
+}
+
+module.exports = { diffLines, diffStats, toRows, splitLines, toUnifiedDiff };

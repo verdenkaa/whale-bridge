@@ -167,14 +167,20 @@ test('контекст: журнал переживает перезапуск �
   assert.equal((await pendingView(pm2, chat)).manualChanged, true);
 });
 
-test('контекст: копирование версий для модели фиксирует их, ack-all подтверждает пачкой', async (t) => {
+test('контекст: копирование отправляет diff, а не файл целиком, и не снимает предупреждений', async (t) => {
   const { root, store, pm, chat, project } = await setup(t);
-  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
-  await fs.writeFile(path.join(root, 'b.py'), 'y = 1\n');
-  await applyAi({ pm, chat, key: 'k', text: '# &a.py\nx = 2\n' });
-  await pm.recordContext(chat, project.id, [{ relPath: 'b.py', hash: H('y = 1\n') }], 'prompt');
-  await fs.writeFile(path.join(root, 'a.py'), 'x = 3\n');
-  await fs.writeFile(path.join(root, 'b.py'), 'y = 3\n');
+  // Реалистичный размер: 60 строк, меняется одна. Именно ради этого diff и нужен —
+  // передавать файл целиком из-за одной строки импорта значит выбросить контекст модели.
+  const body = Array.from({ length: 60 }, (_, i) => (i === 9 ? 'import os' : `line ${i}`)).join('\n') + '\n';
+  const changed = body.replace('import os', 'import sys');
+  await fs.writeFile(path.join(root, 'a.py'), body);
+  await fs.writeFile(path.join(root, 'b.py'), body);
+  await pm.recordContext(chat, project.id, [
+    { relPath: 'a.py', hash: H(body), content: body },
+    { relPath: 'b.py', hash: H(body), content: body },
+  ], 'prompt');
+  await fs.writeFile(path.join(root, 'a.py'), changed);
+  await fs.writeFile(path.join(root, 'b.py'), changed);
 
   const before = await pm.listDivergences(chat, project.id);
   assert.equal(before.items.length, 2);
@@ -182,8 +188,19 @@ test('контекст: копирование версий для модели 
   const copied = await pm.copyDivergentVersions(chat, project.id);
   assert.equal(copied.ok, true, JSON.stringify(copied));
   assert.equal(copied.files, 2);
-  assert.match(copied.text, /--- a\.py ---\nx = 3/);
-  assert.match(copied.text, /--- b\.py ---\ny = 3/);
+  assert.equal(copied.asDiff, 2, 'оба файла ушли диффом');
+  assert.equal(copied.asFull, 0);
+  // полезная часть (без преамбулы) против двух полных файлов
+  assert.ok(copied.payloadChars < body.length * 2,
+    `diff'ы (${copied.payloadChars}) должны быть короче файлов целиком (${body.length * 2})`);
+  assert.match(copied.text, /a\.py \(версия, которую ты видела последней\)/);
+  assert.match(copied.text, /^-import os$/m);
+  assert.match(copied.text, /^\+import sys$/m);
+  assert.match(copied.text, /^@@ -\d+,\d+ \+\d+,\d+ @@$/m);
+  assert.match(copied.text, /unified diff/);
+  // несуществующие строки файла в текст не попали
+  assert.ok(!copied.text.includes('line 40'), 'контекст ограничен, файл не копируется целиком');
+
   // копирование НЕ снимает предупреждений: скопировать в буфер — не значит отправить в чат,
   // а ложное «модель знает» хуже заметного, потому что скрывает уехавший контекст
   assert.equal((await pm.listDivergences(chat, project.id)).items.length, 2);
@@ -365,7 +382,9 @@ test('снимки: слишком большая версия не сохран
   const v = await pm.manualView(chat, project.id, 'big.txt');
   assert.equal(v.diverged, true);
   assert.equal(v.noBase, true);
-  assert.match(v.error, /не сохранено/);
+  // сообщение должно отвечать на вопрос «а с чем тогда сравнивается»
+  assert.match(v.error, /SHA-256/);
+  assert.match(v.error, /не сохранён/);
 });
 
 test('снимки: нет расхождения — сравнение не строится, но причина объяснена', async (t) => {
@@ -481,4 +500,78 @@ test('миграция: прежние отметки modelSynced перенос
   assert.deepEqual((await pm.listDivergences(CHAT, project.id)).items, []);
   await fs.writeFile(path.join(root, 'a.py'), 'x = 2\n');
   assert.equal((await pm.listDivergences(CHAT, project.id)).items.length, 1);
+});
+
+// --- снимки содержимого: без них расхождение видно, а показать нечего ---
+
+const BIG = Array.from({ length: 40 }, (_, i) => `s${i + 1}`).join('\n') + '\n';
+
+test('страховка: снимок известной версии досоздаётся перед перезаписью файла', async (t) => {
+  const { root, store, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), BIG);
+  // Запись без content — ровно так делали сборки до появления снимков.
+  // Журнал знает версию по хэшу, но показать «что изменилось» нечем.
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H(BIG) }], 'prompt');
+
+  const cur = await fileops.readTextFile(path.join(root, 'a.py'));
+  assert.equal(await store.readContextSnapshot(cur.hash), null, 'снимка изначально нет');
+
+  // main вызывает страховку непосредственно перед file:write
+  assert.equal(await pm.ensureContextSnapshot(chat, project.id, 'a.py', cur.hash, cur.text), true);
+  assert.equal(await store.readContextSnapshot(cur.hash), BIG, 'содержимое сохранено');
+  // повторно досоздавать нечего
+  assert.equal(await pm.ensureContextSnapshot(chat, project.id, 'a.py', cur.hash, cur.text), false);
+
+  await fs.writeFile(path.join(root, 'a.py'), BIG.replace('s20', 'S20'));
+  const copied = await pm.copyDivergentVersions(chat, project.id);
+  assert.equal(copied.ok, true, JSON.stringify(copied));
+  assert.equal(copied.asDiff, 1, 'после страховки уходит diff, а не файл целиком');
+  assert.match(copied.text, /^-s20$/m);
+  assert.match(copied.text, /^\+S20$/m);
+});
+
+test('страховка: чужую версию под известную не выдаёт', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), BIG);
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H(BIG), content: BIG }], 'prompt');
+  // хэш не совпадает с тем, что знает журнал: сохранённый текст был бы ложной «версией модели»
+  assert.equal(await pm.ensureContextSnapshot(chat, project.id, 'a.py', H('совсем другое\n'), 'совсем другое\n'), false);
+  // и пустые аргументы не создают мусор
+  assert.equal(await pm.ensureContextSnapshot(chat, project.id, 'a.py', '', ''), false);
+  assert.equal(await pm.ensureContextSnapshot(null, project.id, 'a.py', H(BIG), BIG), false);
+});
+
+test('копирование без снимка: файл целиком с честной оговоркой', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), BIG);
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H(BIG) }], 'prompt');
+  await fs.writeFile(path.join(root, 'a.py'), BIG.replace('s20', 'S20'));
+
+  const copied = await pm.copyDivergentVersions(chat, project.id);
+  assert.equal(copied.ok, true, JSON.stringify(copied));
+  assert.equal(copied.asDiff, 0);
+  assert.equal(copied.asFull, 1);
+  assert.match(copied.text, /не сохранена/, 'модели сказано, что предыдущая версия неизвестна');
+  assert.match(copied.text, /^S20$/m, 'содержимое при этом передано полностью');
+
+  const v = await pm.manualView(chat, project.id, 'a.py');
+  assert.equal(v.diverged, true);
+});
+
+test('копирование крошечного файла: diff длиннее файла — уходит полный текст', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  // на двух строках заголовки diff'а с подписями весят больше самого файла
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H('x = 1\n'), content: 'x = 1\n' }], 'prompt');
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 2\n');
+
+  const copied = await pm.copyDivergentVersions(chat, project.id);
+  assert.equal(copied.ok, true, JSON.stringify(copied));
+  assert.equal(copied.asDiff, 0);
+  assert.equal(copied.asFull, 1);
+  // «@@» встречается в преамбуле как объяснение формата, поэтому смотрим именно на hunk-заголовки
+  assert.equal(copied.text.split('\n').filter((l) => /^@@ -\d+,\d+ \+\d+,\d+ @@$/.test(l)).length, 0,
+    'hunk-заголовков нет — файл маленький');
+  // оговорка про несохранённую версию здесь неуместна: снимок-то есть
+  assert.ok(!copied.text.includes('не сохранена'), 'оговорка не приписана к файлу со снимком');
 });

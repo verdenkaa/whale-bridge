@@ -4,7 +4,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { parseBlock } = require('./parser');
 const { resolveInProject, normalizeRel } = require('./paths');
-const { diffLines, diffStats, toRows } = require('./diff');
+const { diffLines, diffStats, toRows, toUnifiedDiff } = require('./diff');
 const fileops = require('./fileops');
 const { ABSENT, classifyVersions } = require('./versions');
 const Context = require('./context');
@@ -12,9 +12,25 @@ const editorfs = require('./editorfs');
 const { applyEdits } = require('./patch');
 
 const MAX_BACKUPS_PER_FILE = 2;
+
+// Что именно отправляется модели вместе с diff'ом. Формат объясняется явно: модель должна
+// понять, что «+» — это текущее содержимое, иначе её блоки SEARCH не совпадут с файлом.
+const COPY_PREAMBLE = `ЭТИ ФАЙЛЫ ИЗМЕНИЛИСЬ С ТЕХ ПОР, КАК ТЫ ВИДЕЛА ИХ ПОСЛЕДНЮЮ ВЕРСИЮ
+
+Формат — обычный unified diff. Строки с «-» были в той версии, которую ты видела; строки с «+»
+есть в файле сейчас; строки с пробелом в начале — неизменённый контекст. Заголовки @@ -a,b +c,d @@
+дают номера строк. Актуальна версия «после».
+
+Учти это, прежде чем предлагать правки: фрагменты в твоих блоках SEARCH должны совпадать
+с ТЕКУЩИМ содержимым файла, а не с тем, которое ты видела раньше.
+
+Если точная версия файла не сохранилась, он приведён целиком — это оговорено в его заголовке.`;
 // Сколько файлов журнала проверяем за один запрос: проверка требует чтения каждого.
 // Совпадает с внутренним лимитом editorfs.hashesForEditor.
 const MAX_DIVERGENCE_CHECK = 200;
+// Общий бюджет на копируемый текст. Diff обычно в разы меньше файла, но при массовой
+// переписке и он может раздуться — молча обрезать список нельзя, поэтому он возвращается.
+const MAX_COPY_CHARS = 4_000_000;
 
 const MAX_ROWS = 4000;
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 24);
@@ -666,7 +682,7 @@ class ProposalManager {
     }
     return {
       relPath, diverged: true, knownVersion, noBase: true, currentHash: current.hash, currentText: current.text,
-      error: 'Содержимое версии, которую видела модель, не сохранено — построчное сравнение недоступно. Скопируйте актуальную версию и передайте модели.',
+      error: 'Расхождение определено по SHA-256, для него содержимое не нужно. А вот показать построчно нечего: точный текст версии, которую видела модель, не сохранён — отметка появилась до того, как приложение начало хранить снимки, либо файл больше 1 МБ. Передайте модели текущую версию и подтвердите это.',
     };
   }
 
@@ -682,19 +698,57 @@ class ProposalManager {
     if (!items.length) return { ok: false, error: 'Расхождений нет: модель знает текущие версии всех отслеживаемых файлов' };
     const project = this.store.getProject(projectId);
     if (!project) return { ok: false, error: 'Проект не найден' };
-    const parts = ['Эти файлы изменились после того, как ты видела их последнюю версию. Считай актуальной версию ниже.'];
-    const copied = [];
+
+    const parts = [COPY_PREAMBLE];
+    const skipped = [];
+    let chars = 0;
+    let asDiff = 0;
+    let asFull = 0;
     for (const item of items) {
       const r = await resolveInProject(project.path, item.relPath);
-      if (!r.ok || !r.exists || !r.isFile) continue;
+      if (!r.ok || !r.exists || !r.isFile) { skipped.push(item.relPath + ' (недоступен)'); continue; }
       const cur = await fileops.readTextFile(r.abs);
-      if (cur.error) continue; // не-UTF-8 модели передать всё равно нельзя
-      parts.push(`--- ${item.relPath} ---\n${cur.text}`);
-      copied.push({ relPath: item.relPath, hash: cur.hash });
+      if (cur.error) { skipped.push(`${item.relPath} (${cur.error})`); continue; }
+
+      // По умолчанию — diff, а не файл целиком: передавать миллион строк ради одной
+      // заменённой строки импорта значит выбросить контекст модели.
+      const knownText = item.missing ? null : await this.store.readContextSnapshot(item.knownHash);
+      let block = null;
+      let usedDiff = false;
+      if (knownText != null) {
+        const diff = toUnifiedDiff(knownText, cur.text, {
+          context: 3,
+          oldLabel: `${item.relPath} (версия, которую ты видела последней)`,
+          newLabel: `${item.relPath} (текущая версия на диске)`,
+        });
+        const fenced = '```diff\n' + diff + '```';
+        // Файл переписан почти целиком или очень мал — diff выходит длиннее самого файла,
+        // выгоднее послать файл. Сравниваем с «честной» длиной файла: оговорка про
+        // несохранённую версию здесь ни при чём, она относится только к ветке без снимка.
+        const fullPlain = `--- ${item.relPath} ---\n${cur.text}`;
+        if (diff && fenced.length < fullPlain.length) { block = fenced; usedDiff = true; } else { block = fullPlain; }
+      } else {
+        block = `--- ${item.relPath} --- (точная версия, которую ты видела, не сохранена — вот текущий файл целиком)\n${cur.text}`;
+      }
+      if (chars + block.length > MAX_COPY_CHARS) {
+        skipped.push(item.relPath + ' (лимит общего объёма)');
+        continue;
+      }
+      chars += block.length;
+      if (usedDiff) asDiff++; else asFull++;
+      parts.push(block);
     }
-    if (!copied.length) return { ok: false, error: 'Ни один из файлов с расхождением не удалось прочитать как текст' };
+    if (!asDiff && !asFull) {
+      return { ok: false, error: 'Ни один из файлов с расхождением не удалось подготовить: ' + (skipped.join('; ') || 'неизвестная причина') };
+    }
+    if (skipped.length) parts.push('--- Не подготовлено ---\n' + skipped.map((x) => '- ' + x).join('\n'));
     const text = parts.join('\n\n');
-    return { ok: true, length: text.length, files: copied.length, text };
+    return {
+      ok: true, length: text.length, files: asDiff + asFull, text,
+      // payloadChars — объём самих файлов без преамбулы: по нему видно выигрыш от diff'а
+      payloadChars: chars,
+      asDiff, asFull, skipped: skipped.length, truncated: skipped.length > 0,
+    };
   }
 
   async buildChatReport(chatId) {
@@ -792,6 +846,28 @@ class ProposalManager {
    * Пользователь подтвердил: модель проинформирована о текущей версии файла.
    * Отметка снимется сама при следующем изменении — сравнивается хэш, а не флаг.
    */
+  /**
+   * Страховка перед перезаписью файла.
+   *
+   * Журнал может знать версию только по хэшу: так получалось у записей, созданных до
+   * появления снимков, и у перенесённых миграцией. Пока эта версия лежит на диске, её
+   * содержимое ещё можно сохранить; через мгновение файл перезапишут — и сравнение
+   * «версия модели -> диск» останется без второй стороны навсегда. Поэтому вызов
+   * происходит непосредственно перед записью.
+   *
+   * @param {string} hash хэш из fileops.readTextFile — по сырым байтам, пересчитывать
+   *   его от text нельзя: у файла с BOM или CRLF значения не совпадут
+   * @returns {Promise<boolean>} true — снимок досоздан
+   */
+  async ensureContextSnapshot(chatId, projectId, relPath, hash, text) {
+    if (!chatId || !relPath || typeof hash !== 'string' || !hash || typeof text !== 'string') return false;
+    const known = this.store.contextKnown();
+    const e = Context.knownVersion(known, chatId, projectId, relPath);
+    if (!e || e.hash !== hash) return false; // журнал знает другую версию — её содержимого здесь нет
+    if (await this.store.readContextSnapshot(hash) != null) return false; // уже есть
+    return !!(await this.store.saveContextSnapshot(hash, text));
+  }
+
   async ackContext(chatId, projectId, relPath) {
     if (!chatId) return { ok: false, error: 'Чат не открыт: некому адресовать отметку' };
     const project = this.store.getProject(projectId);
