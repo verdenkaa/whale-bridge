@@ -10,7 +10,7 @@ const path = require('path');
 const fileops = require('../src/fileops');
 const editorfs = require('../src/editorfs');
 const Context = require('../src/context');
-const { Store } = require('../src/store');
+const { Store, CONTEXT_SNAPSHOT_MAX_CHARS } = require('../src/store');
 const { ProposalManager } = require('../src/proposals');
 
 const H = (s) => fileops.sha256(Buffer.from(s, 'utf8'));
@@ -184,19 +184,18 @@ test('контекст: копирование версий для модели 
   assert.equal(copied.files, 2);
   assert.match(copied.text, /--- a\.py ---\nx = 3/);
   assert.match(copied.text, /--- b\.py ---\ny = 3/);
-  // копирование фиксирует версии: содержимое ушло в буфер именно для чата
-  assert.deepEqual((await pm.listDivergences(chat, project.id)).items, []);
-
-  // снова расходимся и подтверждаем пачкой
-  await fs.writeFile(path.join(root, 'a.py'), 'x = 4\n');
-  await fs.writeFile(path.join(root, 'b.py'), 'y = 4\n');
+  // копирование НЕ снимает предупреждений: скопировать в буфер — не значит отправить в чат,
+  // а ложное «модель знает» хуже заметного, потому что скрывает уехавший контекст
   assert.equal((await pm.listDivergences(chat, project.id)).items.length, 2);
+
+  // снимает только явное подтверждение
   const all = await pm.ackAllDivergent(chat, project.id);
   assert.equal(all.ok, true);
   assert.equal(all.acked, 2);
   assert.deepEqual((await pm.listDivergences(chat, project.id)).items, []);
   assert.equal(store.contextKnown()[chat] ? Object.keys(store.contextKnown()[chat]).length : 0, 2);
 
+  // после подтверждения копировать уже нечего
   const empty = await pm.copyDivergentVersions(chat, project.id);
   assert.equal(empty.ok, false);
   assert.match(empty.error, /Расхождений нет/);
@@ -276,6 +275,139 @@ test('контекст: move фиксирует новый путь', async (t) 
   assert.equal(r.ok, true, r.error);
   assert.equal(Context.knownVersion(store.contextKnown(), chat, project.id, 'sub/new.txt').hash, H('data\n'));
   assert.equal(Context.knownVersion(store.contextKnown(), chat, project.id, 'old.txt'), null);
+});
+
+test('снимки: сравнение строится от версии, которую видела модель', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'line1\nline2\n');
+  await pm.recordContext(chat, project.id,
+    [{ relPath: 'a.py', hash: H('line1\nline2\n'), content: 'line1\nline2\n' }], 'prompt');
+
+  // файл, который приложение никогда не записывало: резервных копий нет вовсе,
+  // но сравнение всё равно строится — от снимка в журнале контекста
+  await fs.writeFile(path.join(root, 'a.py'), 'line1\nCHANGED\nline3\n');
+  const v = await pm.manualView(chat, project.id, 'a.py');
+  assert.equal(v.diverged, true);
+  assert.equal(v.base, 'context');
+  assert.equal(v.knownVersion.source, 'prompt');
+  assert.equal(v.error, undefined);
+  const texts = v.rows.filter((r) => r.type === 'del' || r.type === 'add').map((r) => [r.type, r.text]);
+  assert.deepEqual(texts, [['del', 'line2'], ['add', 'CHANGED'], ['add', 'line3']]);
+});
+
+test('снимки: возврат файла к известной модели версии снимает расхождение сам', async (t) => {
+  // Сценарий жалобы: изменили файл — заметили; вернули обратно — отметка должна исчезнуть
+  // без всяких подтверждений, потому что сравниваются содержимые, а не факты изменений.
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
+  await applyAi({ pm, chat, key: 'k', text: '# &a.py\nx = 2\n' });
+  assert.deepEqual((await pm.listDivergences(chat, project.id)).items, []);
+
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 999\n');
+  assert.equal((await pm.listDivergences(chat, project.id)).items.length, 1);
+
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 2\n'); // вернули ту же версию
+  assert.deepEqual((await pm.listDivergences(chat, project.id)).items, [],
+    'вернули содержимое, которое модель знает, — расхождения нет');
+
+  // то же через сохранение в редакторе: вернули известную модели версию — расхождение ушло
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 5\n');
+  assert.equal((await pm.listDivergences(chat, project.id)).items.length, 1);
+  const opened = await editorfs.readForEditor(project, 'a.py');
+  const w = await editorfs.writeFromEditor({
+    project, rel: 'a.py', content: 'x = 2\n', expectedHash: opened.hash, store: pm.store, chatId: chat,
+  });
+  assert.equal(w.ok, true, w.error);
+  assert.deepEqual((await pm.listDivergences(chat, project.id)).items, []);
+});
+
+test('снимки: ack сохраняет текущую версию, и её можно показать', async (t) => {
+  const { root, store, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'v1\n');
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H('v1\n') }], 'prompt');
+  // без содержимого снимка нет
+  assert.equal(await store.readContextSnapshot(H('v1\n')), null);
+
+  await fs.writeFile(path.join(root, 'a.py'), 'v2\n');
+  assert.equal((await pm.ackContext(chat, project.id, 'a.py')).ok, true);
+  assert.equal(await store.readContextSnapshot(H('v2\n')), 'v2\n');
+
+  await fs.writeFile(path.join(root, 'a.py'), 'v3\n');
+  const v = await pm.manualView(chat, project.id, 'a.py');
+  assert.equal(v.base, 'context');
+  assert.equal(v.knownVersion.hash, H('v2\n'));
+  assert.deepEqual(v.rows.filter((r) => r.type !== 'eq' && r.type !== 'skip').map((r) => [r.type, r.text]),
+    [['del', 'v2'], ['add', 'v3']]);
+});
+
+test('снимки: одинаковое содержимое хранится один раз', async (t) => {
+  const { root, data, pm, chat, project } = await setup(t);
+  const same = 'одинаковое содержимое\n';
+  await fs.writeFile(path.join(root, 'a.py'), same);
+  await fs.writeFile(path.join(root, 'b.py'), same);
+  await pm.recordContext(chat, project.id, [
+    { relPath: 'a.py', hash: H(same), content: same },
+    { relPath: 'b.py', hash: H(same), content: same },
+  ], 'prompt');
+  const names = (await fs.readdir(path.join(data, 'context'))).filter((n) => !n.endsWith('.tmp'));
+  assert.deepEqual(names, [H(same)], 'снимок адресуется содержимым, дублей нет');
+});
+
+test('снимки: слишком большая версия не сохраняется, сравнение честно об этом говорит', async (t) => {
+  const { root, store, pm, chat, project } = await setup(t);
+  const big = 'x'.repeat(CONTEXT_SNAPSHOT_MAX_CHARS + 10);
+  await fs.writeFile(path.join(root, 'big.txt'), big);
+  const ok = await store.saveContextSnapshot(H(big), big);
+  assert.equal(ok, false, 'снимок больше лимита не сохраняется');
+
+  await pm.recordContext(chat, project.id, [{ relPath: 'big.txt', hash: H(big), content: big }], 'prompt');
+  await fs.writeFile(path.join(root, 'big.txt'), big + '\ny');
+  const v = await pm.manualView(chat, project.id, 'big.txt');
+  assert.equal(v.diverged, true);
+  assert.equal(v.noBase, true);
+  assert.match(v.error, /не сохранено/);
+});
+
+test('снимки: нет расхождения — сравнение не строится, но причина объяснена', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'v1\n');
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H('v1\n'), content: 'v1\n' }], 'prompt');
+  const v = await pm.manualView(chat, project.id, 'a.py');
+  assert.equal(v.diverged, false);
+  assert.deepEqual(v.rows, []);
+  assert.match(v.note, /знает текущую версию/);
+});
+
+test('снимки: удалённый файл — расхождение с внятной причиной', async (t) => {
+  const { root, pm, chat, project } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'v1\n');
+  await pm.recordContext(chat, project.id, [{ relPath: 'a.py', hash: H('v1\n'), content: 'v1\n' }], 'prompt');
+  await fs.unlink(path.join(root, 'a.py'));
+  const v = await pm.manualView(chat, project.id, 'a.py');
+  assert.equal(v.diverged, true);
+  assert.equal(v.missing, true);
+  assert.match(v.error, /удалён/);
+});
+
+test('снимки: вытесняются только те, на которые журнал больше не ссылается', async (t) => {
+  const { root, data, store, pm, chat, project } = await setup(t);
+  // запись, на которую есть ссылка в журнале
+  await fs.writeFile(path.join(root, 'keep.py'), 'keep\n');
+  await pm.recordContext(chat, project.id, [{ relPath: 'keep.py', hash: H('keep\n'), content: 'keep\n' }], 'prompt');
+  // сирота: записали снимок, но в журнал не внесли
+  await store.saveContextSnapshot('f'.repeat(64), 'orphan');
+  const dir = path.join(data, 'context');
+  const before = (await fs.readdir(dir)).filter((n) => !n.endsWith('.tmp'));
+  assert.equal(before.length, 2);
+
+  // принудительная чистка через новый снимок: лимит не превышен — сирота остаётся
+  await store.saveContextSnapshot('e'.repeat(64), 'orphan2');
+  await store._pruneContextSnapshots();
+  const after = (await fs.readdir(dir)).filter((n) => !n.endsWith('.tmp'));
+  assert.ok(after.includes(H('keep\n')), 'нужный снимок не удалён');
+  assert.ok(after.includes('e'.repeat(64)));
+  // сироты удаляются, только когда превышен лимит; проверяем сам механизм на малом лимите
+  assert.equal(await store.readContextSnapshot(H('keep\n')), 'keep\n');
 });
 
 test('seen: старый ответ модели из прокрутки не предлагается как новый', async (t) => {

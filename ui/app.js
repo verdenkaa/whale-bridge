@@ -410,9 +410,9 @@
   async function copyManualVersions() {
     if (!S.project) return;
     const r = await call('manual:copy', { projectId: S.project.id });
-    // Копирование фиксирует версии в журнале: содержимое уходит в буфер именно для чата
+    // Копирование НЕ снимает отметки: скопировать в буфер — не значит отправить в чат
     toast(r?.ok
-      ? `Актуальные версии скопированы (${r.files} файлов) и отмечены как известные модели. Вставьте их в чат.`
+      ? `Актуальные версии скопированы (${r.files} файлов). Вставьте их в чат, затем нажмите «✓ Модель проинформирована».`
       : r?.error, r?.ok ? 'ok' : 'err');
   }
 
@@ -427,6 +427,7 @@
     if (!r.ok) { toast(r.error, 'err'); return; }
     toast('Отмечено: модель знает текущую версию файла', 'ok');
     await loadContext();
+    if (window.WhaleEditor) await window.WhaleEditor.refreshDisk();
     if (S.view && S.view.kind === 'manual') await openManual(relPath);
     else render();
   }
@@ -441,6 +442,7 @@
       ? `Отмечено файлов: ${r.acked}`
       : `Отмечено ${r.acked} из ${r.total}. Не удалось: ${r.failed.slice(0, 3).join('; ')}`, r.ok ? 'ok' : 'err');
     await loadContext();
+    if (window.WhaleEditor) await window.WhaleEditor.refreshDisk();
     render();
   }
   async function openFile(projectId, rel) {
@@ -576,7 +578,10 @@
           onclick: ackAllManual,
         }, '✓ Модель знает все')),
       manual.size > 0 && h('div', { class: 'notice warn' },
-        `Модель не знает текущую версию: ${manual.size} файл(ов). Она может предлагать правки от устаревшего кода.`),
+        `Модель не знает текущую версию: ${manual.size} файл(ов). Она может предлагать правки от устаревшего кода.`,
+        // Имена перечисляем явно: файл может лежать в свёрнутой папке, и тогда отметка
+        // в дереве не видна — без списка плашка выглядит необъяснимой.
+        h('div', { class: 'path' }, [...manual].slice(0, 8).join(', ') + (manual.size > 8 ? ` … ещё ${manual.size - 8}` : ''))),
       S.context.truncated && h('div', { class: 'notice' },
         `Проверено ${S.context.checked} файлов из журнала — остальные не поместились в лимит одного запроса.`));
     if (S.tree[''] === undefined) {
@@ -646,10 +651,11 @@
       d.diverged
         ? h('div', { class: 'notice warn' },
           'Модель в чате не знает об этом изменении и может предлагать правки от устаревшей версии.',
-          d.knownVersion ? h('div', { class: 'path' }, `Последняя известная модели версия: ${fmtTime(d.knownVersion.ts)} · ${d.knownVersion.label}`) : null,
+          d.knownVersion ? h('div', { class: 'path' }, `Известная модели версия: ${fmtTime(d.knownVersion.ts)} · ${d.knownVersion.label}`) : null,
+          d.notice ? h('div', { class: 'path' }, d.notice) : null,
           h('div', {}, 'Передайте ей актуальный файл и отметьте его — или подтвердите, что уже это сделали.'))
-        : h('div', { class: 'notice' }, 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
-      diffTable(d.rows, d.truncated),
+        : h('div', { class: 'notice' }, d.note || 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
+      d.rows && d.rows.length ? diffTable(d.rows, d.truncated) : null,
       h('div', { class: 'actions' },
         h('button', { class: 'btn', onclick: copyManualVersions }, 'Скопировать актуальные версии для модели'),
         d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
@@ -999,6 +1005,11 @@
   api.on('projects:changed', loadState);
   api.on('project:auto-bound', async ({ project }) => { toast(`Привязан ${project.name} · Изменить`, 'ok'); await loadState(); });
   api.on('files:changed', async () => {
+    // Порядок важен: refreshTree() внутри вызывает render(), поэтому журнал контекста
+    // должен быть обновлён ДО него. Иначе отметки рисуются по прежним данным и залипают
+    // до следующей перерисовки — возвращение файла к версии модели выглядело так,
+    // будто предупреждение не снимается.
+    await loadContext();
     await refreshTree();
     // Файл мог измениться под открытым буфером: обновляем diskHash, чтобы Ctrl+S
     // вовремя показал конфликт (§11), а не перезаписал чужие правки.
@@ -1008,7 +1019,6 @@
       paintPromptTree();
       refreshPreview();
     }
-    await loadContext();
     const v = S.view;
     if (v && v.kind === 'proposal' && v.data.status === 'pending') { // открытый Diff пересчитываем по свежему файлу
       const d = await call('proposal:get', { id: v.data.id });

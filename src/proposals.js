@@ -534,6 +534,9 @@ class ProposalManager {
         projectId: project.id, relPath: ev.toRelPath || ev.relPath,
         hash: res.afterHash, source: 'applied', historyId: opId,
       });
+      // Снимок содержимого: без него журнал знает только хэш, и на «а что именно изменилось»
+      // ответить нечем — сравнение версии модели с диском построить нельзя.
+      await this.store.saveContextSnapshot(res.afterHash, ev.newText || '');
       await this.store.saveContext().catch((e) => console.error('[context]', e));
     }
     p.status = 'applied';
@@ -597,55 +600,82 @@ class ProposalManager {
     return { items, checked: slice.length, truncated: all.length > slice.length };
   }
 
+  /**
+   * Сравнение «что знала модель → что сейчас на диске».
+   *
+   * База сравнения — снимок версии из журнала контекста, а НЕ резервная копия последней
+   * операции Whale Bridge. Это разные вещи: после отката, сохранения в редакторе или
+   * внешней правки копия последней операции уже не описывает то, что видела модель, и
+   * прежняя схема на таких файлах отвечала «резервной копии нет».
+   */
   async manualView(chatId, projectId, relPath) {
+    const project = this.store.getProject(projectId);
+    if (!project) return null;
     const div = await this._divergence(chatId, projectId, relPath);
+    const knownVersion = div.known ? {
+      hash: div.known.hash, source: div.known.source, ts: div.known.ts,
+      label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
+    } : null;
+
+    const r = await resolveInProject(project.path, relPath);
+    if (!r.ok) return { relPath, diverged: div.diverged, knownVersion, error: r.error };
+    if (!r.exists || !r.isFile) {
+      return {
+        relPath, diverged: div.diverged, knownVersion, missing: true,
+        error: div.diverged ? 'Файл удалён или недоступен: модель знает версию, которой больше нет.' : null,
+      };
+    }
+    const current = await fileops.readTextFile(r.abs);
+    if (current.error) return { relPath, diverged: div.diverged, knownVersion, error: current.error };
+
+    if (!div.diverged) {
+      return {
+        relPath, diverged: false, knownVersion, currentHash: current.hash, currentText: current.text,
+        rows: [], stats: { added: 0, removed: 0 },
+        note: 'Модель знает текущую версию файла — сравнивать нечего.',
+      };
+    }
+
+    const knownText = div.known ? await this.store.readContextSnapshot(div.known.hash) : null;
+    if (knownText != null) {
+      const ops = diffLines(knownText, current.text);
+      const rows = toRows(ops, 3);
+      return {
+        relPath, diverged: true, knownVersion, base: 'context',
+        currentHash: current.hash, currentText: current.text,
+        stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS,
+      };
+    }
+
+    // Снимка нет (версия слишком большая, записана до появления снимков или уже вытеснена).
+    // Пробуем резервную копию последней операции — это хуже, но лучше, чем пустой экран.
     const manual = await this._manualBase(projectId, relPath);
-    if (!manual) {
-      // Сравнение построить нечем (нет резервной копии), но расхождение есть — сообщаем о нём
-      if (!div.diverged) return null;
-      return {
-        relPath, historyId: null, noBase: true, diverged: true,
-        knownVersion: {
-          hash: div.known.hash, source: div.known.source, ts: div.known.ts,
-          label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
-        },
-        error: 'Резервной копии версии, которую видела модель, нет — построчное сравнение недоступно. Скопируйте актуальную версию и передайте модели.',
-      };
+    if (manual && !manual.hashOnly) {
+      const after = await fs.readFile(path.join(this.store.backupDir, manual.history.id + '.after'), 'utf8').catch(() => null);
+      if (after != null) {
+        const baseText = after.replace(/^\uFEFF/, '');
+        const ops = diffLines(baseText, current.text);
+        const rows = toRows(ops, 3);
+        return {
+          relPath, diverged: true, knownVersion, base: 'backup', historyId: manual.history.id,
+          afterHash: manual.history.afterHash, currentHash: current.hash, currentText: current.text,
+          stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS,
+          notice: 'Точной версии, которую видела модель, нет — показано сравнение с последней операцией Whale Bridge.',
+        };
+      }
     }
-    if (manual.hashOnly) {
-      return {
-        relPath, historyId: manual.history.id, hashOnly: true,
-        diverged: div.diverged,
-        knownVersion: div.known ? {
-          hash: div.known.hash, source: div.known.source, ts: div.known.ts,
-          label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
-        } : null,
-        error: 'Последняя операция над файлом — откат. Резервная копия для отката не хранится (откат неоткатим), поэтому построчное сравнение недоступно.',
-      };
-    }
-    const after = await fs.readFile(path.join(this.store.backupDir, manual.history.id + '.after'), 'utf8').catch(() => null);
-    if (after == null) return null;
-    const current = await fileops.readTextFile(manual.abs);
-    if (current.error) return { relPath, historyId: manual.history.id, error: current.error };
-    const baseText = after.replace(/^\uFEFF/, '');
-    const ops = diffLines(baseText, current.text), rows = toRows(ops, 3);
-    return { relPath, historyId: manual.history.id, afterHash: manual.history.afterHash, currentHash: manual.current.hash,
-      diverged: div.diverged,
-      knownVersion: div.known ? {
-        hash: div.known.hash, source: div.known.source, ts: div.known.ts,
-        label: Context.SOURCE_LABEL[div.known.source] || div.known.source,
-      } : null,
-      stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS, currentText: current.text };
+    return {
+      relPath, diverged: true, knownVersion, noBase: true, currentHash: current.hash, currentText: current.text,
+      error: 'Содержимое версии, которую видела модель, не сохранено — построчное сравнение недоступно. Скопируйте актуальную версию и передайте модели.',
+    };
   }
 
   /**
    * Копирует текущие версии файлов, о которых модель знает устаревшее.
    *
-   * Копирование фиксируется в журнале (source: 'manual-copy'): содержимое уходит в буфер
-   * обмена именно для того, чтобы попасть в чат. Компромисс сознательный — если пользователь
-   * скопировал и не отправил, отметка окажется преждевременной, но вред ограничен: она
-   * скроет расхождение только до следующего изменения файла, а любая новая правка снова
-   * его покажет. Обратная ошибка (требовать подтверждения на каждое копирование) дороже.
+   * Копирование НЕ снимает предупреждений: скопировать в буфер — не значит отправить
+   * в чат, а ложное «модель знает» хуже заметного, потому что скрывает уехавший контекст.
+   * Отметку ставит только явное действие — «✓ Модель проинформирована».
    */
   async copyDivergentVersions(chatId, projectId) {
     const { items } = await this.listDivergences(chatId, projectId);
@@ -663,13 +693,6 @@ class ProposalManager {
       copied.push({ relPath: item.relPath, hash: cur.hash });
     }
     if (!copied.length) return { ok: false, error: 'Ни один из файлов с расхождением не удалось прочитать как текст' };
-    for (const c of copied) {
-      Context.record(this.store.contextKnown(), chatId, {
-        projectId, relPath: c.relPath, hash: c.hash, source: 'manual-copy',
-      });
-    }
-    await this.store.saveContext();
-    this.onChange();
     const text = parts.join('\n\n');
     return { ok: true, length: text.length, files: copied.length, text };
   }
@@ -783,6 +806,7 @@ class ProposalManager {
     Context.record(this.store.contextKnown(), chatId, {
       projectId: project.id, relPath: r.rel, hash: cur.hash, source: 'ack',
     });
+    await this.store.saveContextSnapshot(cur.hash, cur.text);
     await this.store.saveContext();
     this.onChange();
     return { ok: true, relPath: r.rel, hash: cur.hash };
@@ -809,7 +833,7 @@ class ProposalManager {
   /**
    * Фиксирует, что перечисленные версии файлов переданы модели (например, скопированы
    * в промпт как контекст). Пакетом — чтобы не писать конфиг на каждый файл.
-   * @param files {[{relPath:string, hash:string}]}
+   * @param files {[{relPath:string, hash:string, content?:string}]} content нужен для снимка
    */
   async recordContext(chatId, projectId, files, source) {
     if (!chatId || !projectId || !Array.isArray(files)) return 0;
@@ -817,7 +841,9 @@ class ProposalManager {
     for (const f of files) {
       if (!f || typeof f.relPath !== 'string' || !f.relPath) continue;
       if (typeof f.hash !== 'string' || !f.hash) continue;
-      if (Context.record(this.store.contextKnown(), chatId, { projectId, relPath: f.relPath, hash: f.hash, source })) n++;
+      if (!Context.record(this.store.contextKnown(), chatId, { projectId, relPath: f.relPath, hash: f.hash, source })) continue;
+      if (typeof f.content === 'string') await this.store.saveContextSnapshot(f.hash, f.content);
+      n++;
     }
     if (n) {
       await this.store.saveContext();

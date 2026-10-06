@@ -21,6 +21,10 @@ const HISTORY_SOURCES = ['ai', 'manual', 'rollback'];
 // Сколько записей об откате держим на один файл. Откат неоткатим и резервных копий не
 // хранит, поэтому запись — только для журнала; больше двух на файл не нужно.
 const ROLLBACK_RECORD_LIMIT = 2;
+// Снимки версий для сравнения «что знала модель → что на диске». Ограничения нужны,
+// чтобы журнал не превратился в склад копий проекта.
+const CONTEXT_SNAPSHOT_MAX_CHARS = 1_000_000; // ~1 МБ текста на версию
+const CONTEXT_SNAPSHOT_LIMIT = 300; // всего снимков, лишние — невостребованные и старые
 const normalizeSource = (s) => (HISTORY_SOURCES.includes(s) ? s : 'ai');
 
 async function readJson(file, fallback) {
@@ -37,6 +41,9 @@ class Store {
     this.configPath = path.join(dir, 'config.json');
     this.historyPath = path.join(dir, 'history.json');
     this.backupDir = path.join(dir, 'backups');
+    // Снимки версий, которые видела модель. Адресуются по содержимому (имя файла = sha256),
+    // поэтому одинаковый текст двух файлов хранится один раз.
+    this.contextDir = path.join(dir, 'context');
     this.config = DEFAULTS();
     this.history = [];
     this._q = Promise.resolve();
@@ -114,6 +121,78 @@ class Store {
   }
 
   saveContext() { return this.saveConfig(); }
+
+  /**
+   * Сохраняет текст версии, которую видела модель, чтобы потом показать сравнение
+   * «что знала модель → что на диске». Без снимка журнал знает только хэш, и на любой
+   * вопрос «а что именно изменилось» ответить нечем.
+   *
+   * Храним декодированный текст, а не байты: сравнивать его будем с currentText из
+   * readTextFile, то есть в том же виде. Ключ — хэш байтов, он же идентификатор записи
+   * журнала, поэтому снимок находится без дополнительных сопоставлений.
+   *
+   * @returns {Promise<boolean>} false — снимок не сохранён (слишком большой, ошибка ввода-вывода)
+   */
+  async saveContextSnapshot(hash, text) {
+    if (typeof hash !== 'string' || !hash || typeof text !== 'string') return false;
+    if (text.length > CONTEXT_SNAPSHOT_MAX_CHARS) return false;
+    const file = path.join(this.contextDir, hash);
+    try {
+      await fs.mkdir(this.contextDir, { recursive: true });
+      try {
+        await fs.access(file);
+        return true; // контент-адресуемый: такой снимок уже есть
+      } catch { /* нет — пишем */ }
+      const tmp = file + '.tmp';
+      await fs.writeFile(tmp, text, 'utf8');
+      await fs.rename(tmp, file);
+      await this._pruneContextSnapshots();
+      return true;
+    } catch (e) {
+      console.error('[context snapshot]', e.message);
+      return false;
+    }
+  }
+
+  /** @returns {Promise<string|null>} текст версии, которую видела модель, или null */
+  async readContextSnapshot(hash) {
+    if (typeof hash !== 'string' || !hash) return null;
+    try {
+      return await fs.readFile(path.join(this.contextDir, hash), 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  /** Хэши всех снимков, на которые ссылается журнал. */
+  _referencedSnapshots() {
+    const used = new Set();
+    for (const bucket of Object.values(this.contextKnown())) {
+      for (const e of Object.values(bucket || {})) if (e && typeof e.hash === 'string') used.add(e.hash);
+    }
+    return used;
+  }
+
+  // Удаляет снимки, на которые журнал больше не ссылается, сверх лимита — начиная со старых.
+  async _pruneContextSnapshots() {
+    let names;
+    try {
+      names = await fs.readdir(this.contextDir);
+    } catch {
+      return 0;
+    }
+    const used = this._referencedSnapshots();
+    const orphan = names.filter((n) => !n.endsWith('.tmp') && !used.has(n));
+    if (names.length - orphan.length <= CONTEXT_SNAPSHOT_LIMIT) return 0;
+    const stats = await Promise.all(orphan.map(async (n) => {
+      const st = await fs.stat(path.join(this.contextDir, n)).catch(() => null);
+      return { n, mtime: st ? st.mtimeMs : 0 };
+    }));
+    stats.sort((a, b) => a.mtime - b.mtime);
+    const drop = stats.slice(0, Math.max(0, names.length - CONTEXT_SNAPSHOT_LIMIT));
+    for (const d of drop) await fs.rm(path.join(this.contextDir, d.n), { force: true });
+    return drop.length;
+  }
 
   // ---- проекты ----
   _key(p) { return process.platform === 'win32' ? p.toLowerCase() : p; }
@@ -291,4 +370,4 @@ class Store {
   }
 }
 
-module.exports = { Store, HISTORY_SOURCES, ROLLBACK_RECORD_LIMIT };
+module.exports = { Store, HISTORY_SOURCES, ROLLBACK_RECORD_LIMIT, CONTEXT_SNAPSHOT_MAX_CHARS, CONTEXT_SNAPSHOT_LIMIT };

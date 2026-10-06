@@ -195,13 +195,18 @@ test('rollback: после отката модель знает устаревш
   assert.equal((await pm.ackContext(chat, project.id, 'a.py')).ok, true);
   assert.ok(!(await pm.view(pending.id)).manualChanged);
 
-  // точка отсчёта для сравнения — запись об откате, копии у неё нет: объясняем это
-  // вместо пустого экрана, но само расхождение при этом не теряем
+  // Снова расходимся и смотрим сравнение. Оно строится от версии, которую видела модель
+  // (снимок в журнале контекста), а не от резервной копии последней операции: после отката
+  // копия последней операции знание модели уже не описывает, и прежняя схема отвечала
+  // «резервной копии нет» вместо того, чтобы показать отличия.
   await fs.writeFile(path.join(root, 'a.py'), 'vX\n');
   const mv = await pm.manualView(chat, project.id, 'a.py');
-  assert.equal(mv.hashOnly, true);
   assert.equal(mv.diverged, true);
-  assert.match(mv.error, /откат/i);
+  assert.equal(mv.base, 'context');
+  assert.equal(mv.knownVersion.hash, H('v0\n'), 'модели сообщили v0 подтверждением');
+  assert.ok(mv.rows.length > 0, 'построчное сравнение построено');
+  assert.equal(mv.error, undefined);
+
   const { items } = await pm.listDivergences(chat, project.id);
   assert.deepEqual(items.map((x) => x.relPath), ['a.py']);
 });

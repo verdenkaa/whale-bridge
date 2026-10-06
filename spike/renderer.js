@@ -60,7 +60,7 @@
     return !!ok;
   }
 
-  // ---------- сбор diagnostики ----------
+  // ---------- сбор диагностики ----------
   document.addEventListener('securitypolicyviolation', (e) => {
     const v = {
       effectiveDirective: e.effectiveDirective,
