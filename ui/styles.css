@@ -16,13 +16,9 @@
   --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
   /* Раскладка (ТЗ §5): размеры в px задаёт renderer (ui/layout.js), здесь — только
      стартовые значения до state:get. --split-w обязан совпадать с L.SPLITTER в
-     ui/layout.js: математику разделителей тесты считают по нему.
-     --chat-col-w — вся колонка чата (слот + «Промпт», когда открыт). */
+     ui/layout.js: математику разделителей тесты считают по нему. */
+  --left-w: 320px;
   --chat-w: 420px;
-  --chat-col-w: 420px;
-  --files-w: 220px;
-  --prompt-w: 460px;
-  --bottom-h: 260px;
   --split-w: 5px;
 }
 * { box-sizing: border-box; }
@@ -32,37 +28,58 @@ button, select, input { font: inherit; color: inherit; }
 ::selection { background: rgba(232, 176, 75, 0.3); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ---------- сетка IDE: topbar / workspace / hsplit / нижняя панель ---------- */
-.app { height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
+/* ---------- сетка IDE: topbar / workspace ---------- */
+.app { height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 
 .topbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel); }
 .brand { font-weight: 700; white-space: nowrap; }
 
-/* Колонки: чат | разделитель | IDE. Чат справа — тот же набор, зеркально (§6):
-   переключение стороны — чисто CSS, main знает только прямоугольник #chat-slot. */
-.workspace { min-height: 0; display: grid; grid-template-columns: var(--chat-col-w) var(--split-w) minmax(0, 1fr); }
-.workspace > .chat-col { grid-column: 1; }
+/* Колонки: IDE | разделитель | чат. Чат всегда справа: перенос стороны ломал рендер
+   нативного WebContentsView, поэтому переключателя стороны больше нет. */
+.workspace { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--split-w) var(--chat-w); }
+.workspace > .ide { grid-column: 1; }
 .workspace > #vsplit-chat { grid-column: 2; }
-.workspace > .ide { grid-column: 3; }
-.workspace.chat-right { grid-template-columns: minmax(0, 1fr) var(--split-w) var(--chat-col-w); }
-.workspace.chat-right > .chat-col { grid-column: 3; }
-.workspace.chat-right > #vsplit-chat { grid-column: 2; }
-.workspace.chat-right > .ide { grid-column: 1; }
-
-/* Чат-колонка: слот DeepSeek + (опционально) панель «Промпт» рядом с ним.
-   «Промпт» — обычный DOM: нативный WebContentsView занимает только #chat-slot (§24). */
-.chat-col { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; }
-.chat-col.prompt-open { grid-template-columns: minmax(0, 1fr) var(--split-w) var(--prompt-w); }
+.workspace > #chat-slot { grid-column: 3; }
 
 /* Сюда main физически кладёт WebContentsView с DeepSeek. Элемент пустой: его задача —
    задать геометрию, которую ResizeObserver отправляет в main (chat:set-bounds, §4). */
 #chat-slot { min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
 
-#vsplit-prompt, .prompt-col { display: none; }
-.chat-col.prompt-open #vsplit-prompt, .chat-col.prompt-open .prompt-col { display: flex; }
-.prompt-col { flex-direction: column; background: var(--panel); border-left: 1px solid var(--line);
-  min-width: 0; min-height: 0; overflow: hidden; }
+/* IDE-область: левая панель | разделитель | редактор. */
+.ide { min-width: 0; min-height: 0; display: grid;
+  grid-template-columns: var(--left-w) var(--split-w) minmax(0, 1fr); }
+
+.vsplit { cursor: col-resize; background: var(--line); transition: background 0.15s; touch-action: none; }
+.vsplit:hover, .vsplit.drag { background: var(--accent); }
+
+/* ---------- левая панель: Файлы / Предложения / История ---------- */
+.left-panel { min-width: 0; min-height: 0; overflow: hidden;
+  background: var(--panel); display: flex; flex-direction: column; }
+.left-tabs { flex: none; display: flex; align-items: center; gap: 1px; padding: 0 8px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+.tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 9px 7px; cursor: pointer; color: #969696; font-size: 13px; white-space: nowrap; }
+.tab:hover { color: var(--text); }
+.tab.on { color: #e7e7e7; border-bottom-color: #4d8dff; }
+.count { margin-left: 5px; background: #303030; color: #bdbdbd; border-radius: 8px; padding: 1px 5px; font-size: 10px; font-weight: 600; }
+/* счётчик нерассмотренных предложений на вкладке «Файлы»: дерево остаётся активным,
+   но пользователь обязан видеть, что его ждут предложения */
+.count.alert { background: rgba(240, 162, 74, .18); color: var(--warn); }
+
+.files-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.left-body { flex: 1; min-height: 0; overflow: auto; padding: 12px;
+  scrollbar-color: #3b3b3b transparent; scrollbar-width: thin; }
+
+/* ---------- панель редактора ---------- */
+/* position:relative — якорь для оверлеев и тоста: они не должны вылезать над чатом (§24). */
+.editor-panel { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
+
+/* Просмотр предложения / истории / «моих правок» — занимает место редактора */
+.view-host { flex: 1; min-height: 0; overflow: auto; padding: 14px; background: var(--bg);
+  scrollbar-color: #3b3b3b transparent; scrollbar-width: thin; }
+
+/* Конструктор промптов — тоже занимает место редактора (переключатель в topbar) */
+.prompt-host { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
 .prompt-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
   border-bottom: 1px solid var(--line); color: var(--dim); }
 .panel-title { font-size: 10px; letter-spacing: .09em; }
@@ -70,33 +87,9 @@ button, select, input { font: inherit; color: inherit; }
 .prompt-body { flex: 1; min-height: 0; overflow: auto; padding: 12px;
   scrollbar-color: #3b3b3b transparent; scrollbar-width: thin; }
 
-/* IDE-область: файлы | разделитель | редактор.
-   position:relative — якорь для оверлеев и тоста: они не должны вылезать над чатом (§24). */
-.ide { position: relative; min-width: 0; min-height: 0; display: grid;
-  grid-template-columns: var(--files-w) var(--split-w) minmax(0, 1fr); }
-
-.vsplit { cursor: col-resize; background: var(--line); transition: background 0.15s; touch-action: none; }
-.vsplit:hover, .vsplit.drag { background: var(--accent); }
-.hsplit { height: var(--split-w); cursor: row-resize; background: var(--line); transition: background 0.15s; touch-action: none; }
-.hsplit:hover, .hsplit.drag { background: var(--accent); }
-.app.bottom-collapsed .hsplit { display: none; }
-
-/* Нижняя панель: «Предложения» и «История» (как консоль в VS Code). Сворачивается
-   до строки вкладок; высота хранится в --bottom-h и тянется горизонтальным разделителем. */
-.bottom-panel { height: var(--bottom-h); min-height: 0; display: flex; flex-direction: column;
-  background: var(--panel); border-top: 1px solid var(--line); overflow: hidden; }
-.app.bottom-collapsed .bottom-panel { height: auto; }
-.app.bottom-collapsed #body { display: none; }
-.bottom-bar { flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px 0 10px;
-  border-bottom: 1px solid var(--line); }
-.app.bottom-collapsed .bottom-bar { border-bottom: 0; }
-
-.files-panel { min-width: 0; min-height: 0; overflow: hidden;
-  background: var(--panel); display: flex; flex-direction: column; }
-.editor-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
-
 /* ---------- шапка ---------- */
 #head { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; flex-wrap: wrap; }
+#head .grow { flex: 1; }
 .chat-line { display: flex; align-items: baseline; gap: 8px; color: var(--dim); font-size: 12px; white-space: nowrap; }
 .chat-line b { color: var(--text); font-weight: 600; font-family: var(--mono); font-size: 12px; }
 .proj-row { display: flex; gap: 6px; min-width: 0; }
@@ -113,18 +106,11 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .btn.primary:hover:not(:disabled) { background: #5a96ff; border-color: #5a96ff; filter: none; }
 .btn.danger:hover:not(:disabled) { border-color: var(--del); color: var(--del); }
 .btn.ghost { background: transparent; border-color: transparent; }
+/* Кнопка-переключатель «Промпт / Редактор кода» — текущий режим подсвечен */
+.btn.mode { border-color: var(--accent); color: var(--accent); }
 .hint { background: var(--raised); border-left: 3px solid var(--accent); padding: 5px 10px; border-radius: 0 5px 5px 0;
   display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
-/* ---------- нижняя панель: вкладки и содержимое ---------- */
-#tabs { display: flex; align-items: center; gap: 1px; flex: 1; min-width: 0; }
-#tabs .grow { flex: 1; }
-.tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 9px 7px; cursor: pointer; color: #969696; font-size: 13px; }
-.tab:hover { color: var(--text); }
-.tab.on { color: #e7e7e7; border-bottom-color: #4d8dff; }
-.count { margin-left: 5px; background: #303030; color: #bdbdbd; border-radius: 8px; padding: 1px 5px; font-size: 10px; font-weight: 600; }
-
-#body { flex: 1; min-height: 0; overflow: auto; padding: 14px; scrollbar-color: #3b3b3b transparent; scrollbar-width: thin; }
 .stack { display: grid; gap: 8px; align-content: start; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .toolbar .grow { flex: 1; }
@@ -160,8 +146,7 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .sugg { display: flex; flex-wrap: wrap; gap: 6px; }
 
-/* Diff и код крутятся внутри себя, а не растягивают нижнюю панель до бесконечности */
-.diff { border: 1px solid var(--line); border-radius: 6px; overflow: auto; font: 12px/1.5 var(--mono); background: var(--bg); max-height: max(180px, calc(var(--bottom-h) - 160px)); min-height: 80px; }
+.diff { border: 1px solid var(--line); border-radius: 6px; overflow: auto; font: 12px/1.5 var(--mono); background: var(--bg); max-height: calc(100vh - 330px); min-height: 80px; }
 .dl { display: flex; min-width: max-content; }
 .dl .ln { flex: none; width: 44px; padding: 0 6px; text-align: right; color: #566074; user-select: none; }
 .dl .sg { flex: none; width: 18px; text-align: center; color: var(--dim); user-select: none; }
@@ -170,7 +155,7 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .dl.add { background: var(--add-bg); } .dl.add .sg, .dl.add .tx { color: var(--add); }
 .dl.del { background: var(--del-bg); } .dl.del .sg, .dl.del .tx { color: var(--del); }
 .dl.skip { color: #566074; padding: 2px 12px; background: var(--panel); border-block: 1px solid var(--line); font-style: italic; min-width: 0; }
-.code { white-space: pre; font: 12px/1.5 var(--mono); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; background: var(--bg); max-height: max(180px, calc(var(--bottom-h) - 160px)); margin: 0; }
+.code { white-space: pre; font: 12px/1.5 var(--mono); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; background: var(--bg); max-height: calc(100vh - 330px); margin: 0; }
 
 /* история */
 .row { display: flex; align-items: center; gap: 8px; padding: 9px 11px; background: #222; border: 1px solid #303030; border-radius: 8px; }
@@ -186,7 +171,7 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 #toast.ok { border-color: var(--add); } #toast.err { border-color: var(--del); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
-/* генератор промптов (живёт в панели «Промпт» рядом с чатом) */
+/* генератор промптов (панель «Промпт» вместо редактора) */
 .presetbar { padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
 .presetbar input[type="text"] { flex: 1; min-width: 0; }
 .sec { background: var(--raised); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; display: grid; gap: 7px; }
@@ -204,7 +189,7 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .promptbar { position: sticky; bottom: -12px; margin: 4px -12px -12px; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-/* ---------- панель файлов (дерево живёт здесь, отдельной вкладки нет) ---------- */
+/* ---------- панель файлов: заголовок, плашка, дерево ---------- */
 .btn.tiny { padding: 1px 7px; font-size: 11px; }
 
 .files-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 8px;
@@ -274,7 +259,7 @@ button.ed-mark.ctx:hover { background: rgba(217, 164, 0, .18); }
   border-top: 1px solid var(--line); background: var(--panel); font-size: 11.5px; color: var(--dim); }
 .ed-status .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Оверлеи — внутри IDE-области: WebContentsView с DeepSeek CSS-слоями не перекрывается (§24) */
+/* Оверлеи — внутри области редактора: WebContentsView с DeepSeek CSS-слоями не перекрывается (§24) */
 .ed-overlay { position: absolute; inset: 0; z-index: 30; background: rgba(10, 10, 10, .62);
   display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px; overflow: auto; }
 /* min-width:0 обязателен: у flex-элемента min-width:auto не даёт сжаться до контейнера,

@@ -1,7 +1,8 @@
 'use strict';
 // Дымовой тест интерфейса на минимальной имитации DOM (без Electron и jsdom).
-// Этап B: раскладка IDE — нижняя панель и её вкладки, панель файлов (заголовок, плашка,
-// данные для дерева), геометрия чата (chat:set-bounds / chat:set-visible), разделители.
+// Раскладка после ручной проверки этапа B: левая панель (Файлы/Предложения/История),
+// редактор с режимами (код / просмотр / «Промпт»), чат всегда справа, геометрия чата
+// (chat:set-bounds / chat:set-visible) и разделители.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
@@ -49,11 +50,11 @@ const tick = (ms = 25) => new Promise((r) => setTimeout(r, ms));
 const CHAT = '17b45023-2aba-4a1a-a966-17bbe41926ea';
 const PROJECT = { id: 'p1', name: 'Proj', path: '/x' };
 
-test('UI: раскладка IDE, вкладки, панель файлов, геометрия чата', async () => {
+test('UI: левая панель, режимы редактора, геометрия чата', async () => {
   const roots = {};
-  for (const id of ['app', 'head', 'tabs', 'body', 'toast', 'workspace', 'chat-col', 'chat-slot',
-    'vsplit-chat', 'vsplit-files', 'vsplit-prompt', 'hsplit-bottom', 'prompt-close', 'prompt-body',
-    'files-head', 'files-banner',
+  for (const id of ['head', 'left-tabs', 'files-pane', 'body', 'toast', 'workspace', 'chat-slot',
+    'vsplit-left', 'vsplit-chat', 'files-head', 'files-banner', 'prompt-close',
+    'view-host', 'prompt-host', 'prompt-body',
     'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
@@ -77,7 +78,7 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
     { id: 'c', status: 'pending', state: 'create', op: 'create', relPath: 'n.gd', mode: 'full', patchBlocks: 0, stats: { added: 3, removed: 0 }, warnings: 0, historical: false },
   ];
   const canned = {
-    'state:get': { projects: [PROJECT], chatId: CHAT, project: PROJECT, lastProjectId: 'p1', layout: { chatW: 420, filesW: 220, promptW: 460, bottomH: 260, chatSide: 'left', promptOpen: false, bottomCollapsed: false } },
+    'state:get': { projects: [PROJECT], chatId: CHAT, project: PROJECT, lastProjectId: 'p1', layout: { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' } },
     'proposals:list': proposals,
     'proposal:get': {
       id: 'a', status: 'pending', state: 'update', op: 'update', relPath: 'big.gd', mode: 'patch', projectId: 'p1', incomplete: [], shrink: null, suggestions: [],
@@ -159,17 +160,30 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
 
   const text = (el) => el.textContent;
   const btn = (root, label) => findAll(root, (e) => e.tag === 'button' && text(e) === label)[0];
-  const tabs = findAll(roots.tabs, (e) => e.tag === 'button');
-  // Нижняя панель: «Предложения» и «История»; «Промпт» — выключатель панели рядом с чатом,
-  // последняя кнопка сворачивает нижнюю панель
-  assert.deepEqual(tabs.map((t) => text(t).replace(/\d+$/, '')),
-    ['Предложения', 'История', 'Промпт', '▾']);
-  const TAB = { proposals: 0, history: 1, prompt: 2, collapse: 3 };
+  const hidden = (el) => el.classList.contains('hidden');
+  const leftTabs = () => findAll(roots['left-tabs'], (e) => e.tag === 'button');
+  const leftTab = (label) => leftTabs().find((b) => text(b).replace(/\d+$/, '') === label);
 
-  // редактор смонтирован один раз и со всеми нужными узлами (§7), видимость включена сразу
+  // ---------- левая панель: Файлы / Предложения / История ----------
+  assert.deepEqual(leftTabs().map((t) => text(t).replace(/\d+$/, '')), ['Файлы', 'Предложения', 'История']);
+  // нерассмотренные предложения подсвечены на ОБЕИХ вкладках: на «Файлах» — потому что
+  // пользователь обычно смотрит в дерево и должен видеть, что его ждут предложения
+  const filesCount = findAll(leftTab('Файлы'), (e) => e.className === 'count alert');
+  assert.equal(filesCount.length, 1, 'на вкладке «Файлы» виден счётчик предложений');
+  assert.equal(text(filesCount[0]), '3');
+  const propCount = findAll(leftTab('Предложения'), (e) => e.className === 'count');
+  assert.equal(text(propCount[0]), '3');
+
+  // по умолчанию открыто дерево
+  assert.equal(hidden(roots['files-pane']), false);
+  assert.equal(hidden(roots.body), true);
+
+  // редактор смонтирован один раз и со всеми нужными узлами (§7), режим — код
   assert.equal(ed.mount, 1);
   for (const k of ['tree', 'tabs', 'host', 'empty', 'status', 'overlay']) assert.ok(ed.els[k], `нет узла ${k}`);
   assert.equal(ed.setVisible[ed.setVisible.length - 1], true);
+  assert.equal(hidden(roots['prompt-host']), true);
+  assert.equal(hidden(roots['view-host']), true);
 
   // ---------- панель файлов: заголовок, плашка, данные дерева ----------
   assert.match(text(roots['files-head']), /ФАЙЛЫ/);
@@ -186,22 +200,27 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
   assert.equal(ed.extras.proposals.get('big.gd').firstId, 'a');
   assert.equal(ed.extras.proposals.get('n.gd').count, 1);
 
-  // клик по ◆ в дереве ведёт в сравнение «мои правки» (колбэк вызывает app.js)
+  // клик по ◆ в дереве открывает сравнение «мои правки» ВМЕСТО редактора
   await ed.extras.callbacks.onManual('a.gd');
   await tick(30);
   assert.ok(log.some(([ch, a]) => ch === 'manual:view' && a.relPath === 'a.gd'));
-  assert.match(text(roots.body), /Мои правки/);
-  assert.match(text(roots.body), /Модель в чате не знает об этом изменении/);
-  await click(btn(roots.body, '✓ Модель проинформирована'));
+  assert.equal(hidden(roots['view-host']), false, 'просмотр занял место редактора');
+  assert.match(text(roots['view-host']), /Мои правки/);
+  assert.match(text(roots['view-host']), /Модель в чате не знает об этом изменении/);
+  await click(btn(roots['view-host'], '✓ Модель проинформирована'));
   assert.ok(log.some(([ch, a]) => ch === 'context:ack' && a.relPath === 'a.gd'));
   await tick(30);
+  await click(btn(roots['view-host'], '← Закрыть'));
+  await tick(40);
+  assert.equal(hidden(roots['view-host']), true, 'просмотр закрыт — снова редактор');
 
-  // клик по синей точке открывает карточку предложения
+  // клик по синей точке открывает карточку предложения и переключает левую панель
   await ed.extras.callbacks.onProposal('big.gd');
-  await tick(30);
-  assert.match(text(roots.body), /Частичная правка: блоков 3/);
-  await click(btn(roots.body, '← К списку'));
-  await tick(30);
+  await tick(40);
+  assert.match(text(roots['view-host']), /Частичная правка: блоков 3/);
+  assert.equal(log.filter(([ch]) => ch === 'layout:save').pop()[1].layout.leftTab, 'proposals');
+  await click(btn(roots['view-host'], '← К списку'));
+  await tick(40);
 
   // откат из дерева — тот же обработчик, что был во вкладке «Файлы»
   await ed.extras.callbacks.onUndo({ id: 'h2', op: 'update', ts: Date.now() });
@@ -213,122 +232,64 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
   await tick(30);
   assert.ok(log.some(([ch, a]) => ch === 'file:open' && a.mode === 'reveal' && a.rel === 'a.gd'));
 
-  // ---------- карточки предложений ----------
+  // ---------- список предложений (левая панель) ----------
+  assert.equal(hidden(roots.body), false, 'после «← К списку» показаны предложения');
   assert.equal(findAll(roots.body, (e) => e.className === 'dismiss').length, 3);
   assert.match(text(roots.body), /частичная правка · 2/);
   assert.match(text(roots.body), /Правка не применяется/);
   assert.ok(!/Инструкция для ИИ/.test(text(roots.body)));
+  // дубля кнопки открытия промпта в списке нет — переключатель живёт в шапке
+  assert.ok(!btn(roots.body, 'Промпт для ИИ'), 'кнопка «Промпт для ИИ» удалена (дубль)');
 
-  // открыть патч-предложение
+  // открыть патч-предложение — просмотр вместо редактора
   await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
-  assert.match(text(roots.body), /Частичная правка: блоков 3/);
-  assert.match(text(roots.body), /функция\/класс заменены целиком, строки 5–8/);
-  assert.match(text(roots.body), /без учёта отступов/);
-  assert.match(text(roots.body), /почти весь файл/);
-  assert.match(text(roots.body), /Путь исправлен автоматически: «proj\/big\.gd» → «big\.gd»/);
-  assert.match(text(roots.body), /Просмотреть итоговый файл/);
-  await click(btn(roots.body, '← К списку'));
+  assert.equal(hidden(roots['view-host']), false);
+  assert.match(text(roots['view-host']), /Частичная правка: блоков 3/);
+  assert.match(text(roots['view-host']), /функция\/класс заменены целиком, строки 5–8/);
+  assert.match(text(roots['view-host']), /Путь исправлен автоматически: «proj\/big\.gd» → «big\.gd»/);
+  assert.match(text(roots['view-host']), /Просмотреть итоговый файл/);
+  await click(btn(roots['view-host'], '← К списку'));
+  await tick(30);
 
-  // крестик
+  // крестик карточки
   await click(findAll(roots.body, (e) => e.className === 'dismiss')[0]);
   assert.ok(log.some(([ch, a]) => ch === 'proposal:dismiss' && a.id === 'a'));
 
-  // ---------- история + бэкапы ----------
-  await click(tabs[TAB.history]);
+  // ---------- история ----------
+  await click(leftTab('История'));
+  await tick(30);
   assert.match(text(roots.body), /Хранятся 2 последние версии/);
   assert.match(text(roots.body), /копия удалена/);
   const diffBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Diff');
   assert.equal(diffBtns.length, 1); // у устаревшей операции и у отката Diff скрыт
-  // откат показан отдельным значком и не предлагает «Восстановить» — даже для create,
-  // где обычное правило (pruned && op !== 'create') кнопку бы оставило
   assert.match(text(roots.body), /откат/);
   const revertBtns = findAll(roots.body, (e) => e.tag === 'button' && text(e) === 'Восстановить');
   assert.equal(revertBtns.length, 1);
-  assert.equal(findAll(roots.body, (e) => text(e) === 'копия удалена').length, 1); // у отката такого значка нет
   await click(btn(roots.body, 'Очистить бэкапы'));
   assert.ok(log.some(([ch]) => ch === 'backups:clear'));
+  await click(leftTab('Файлы'));
+  await tick(20);
+  assert.equal(hidden(roots['files-pane']), false);
+  assert.equal(hidden(roots.body), true);
 
-  // ---------- геометрия (§4, §6, §28) ----------
-  // Перенос чата на другую сторону: класс на workspace, раскладка сохранена, bounds
-  // отправлены СИНХРОННО (прежняя версия ждала requestAnimationFrame — чат оставался слева).
-  const sideBtn = btn(roots.head, 'Чат справа ⇄');
-  assert.ok(sideBtn, 'кнопка переключения стороны чата');
-  sent.length = 0;
-  await click(sideBtn);
-  await tick(30);
-  assert.equal(roots.workspace.classList.contains('chat-right'), true);
-  let save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.chatSide, 'right');
-  // на перенос стороны чат не скрывается: прямоугольник уходит тем же тактом
-  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible'), [],
-    'перенос стороны не должен прятать чат');
-  // кнопка перерисована под новое состояние
-  assert.ok(btn(roots.head, 'Чат слева ⇄'));
-  await click(btn(roots.head, 'Чат слева ⇄'));
-  await tick(30);
-  assert.equal(roots.workspace.classList.contains('chat-right'), false);
-
-  // разделитель панели файлов: размеры считает ui/layout.js, сохранение — layout:save
-  const sp = roots['vsplit-files'];
-  const sentBefore = sent.length;
-  for (const f of sp.listeners.pointerdown) f({ button: 0, clientX: 500, pointerId: 1, preventDefault() {} });
-  for (const f of sp.listeners.pointermove) f({ clientX: 550 });
-  for (const f of sp.listeners.pointerup) f({});
-  await tick(60);
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.filesW, 270); // 220 + 50
-  assert.equal(sent.length, sentBefore, 'перетаскивание разделителя файлов не должно трогать чат');
-  assert.ok(ed.layoutCalls > 0, 'после разделителя Monaco пересчитан');
-
-  // разделитель чата: на время перетаскивания чат скрыт, в конце показан
-  const spc = roots['vsplit-chat'];
-  sent.length = 0;
-  for (const f of spc.listeners.pointerdown) f({ button: 0, clientX: 400, pointerId: 1, preventDefault() {} });
-  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false]);
-  for (const f of spc.listeners.pointermove) f({ clientX: 460 });
-  for (const f of spc.listeners.pointerup) f({});
-  await tick(60);
-  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false, true]);
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.chatW, 480); // 420 + 60
-
-  // разделитель нижней панели: вверх — выше; чат скрывается на время перетаскивания
-  // (высота слота меняется каждый кадр, а setBounds на каждый кадр дорог на Windows)
-  const spb = roots['hsplit-bottom'];
-  sent.length = 0;
-  for (const f of spb.listeners.pointerdown) f({ button: 0, clientY: 700, pointerId: 1, preventDefault() {} });
-  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false]);
-  for (const f of spb.listeners.pointermove) f({ clientY: 620 });
-  for (const f of spb.listeners.pointerup) f({});
-  await tick(60);
-  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false, true]);
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.bottomH, 340); // 260 + 80
-
-  // сворачивание нижней панели
-  await click(btn(roots.tabs, '▾'));
-  await tick(40);
-  assert.equal(roots.app.classList.contains('bottom-collapsed'), true);
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.bottomCollapsed, true);
-  // выбор вкладки разворачивает панель обратно
-  await click(findAll(roots.tabs, (e) => e.tag === 'button')[TAB.proposals]);
-  await tick(40);
-  assert.equal(roots.app.classList.contains('bottom-collapsed'), false);
-
-  // ---------- панель «Промпт» рядом с чатом ----------
-  await click(findAll(roots.tabs, (e) => e.tag === 'button')[TAB.prompt]);
+  // ---------- «Промпт» вместо редактора ----------
+  const promptBtn = btn(roots.head, 'Промпт');
+  assert.ok(promptBtn, 'кнопка «Промпт» в шапке');
+  await click(promptBtn);
   await tick(80);
-  assert.equal(roots['chat-col'].classList.contains('prompt-open'), true, 'чат-колонка расширилась');
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(hidden(roots['prompt-host']), false, 'промпт занял место редактора');
+  assert.equal(hidden(roots['ed-tabs']), true, 'вкладки редактора скрыты');
+  assert.equal(ed.setVisible[ed.setVisible.length - 1], false, 'редактор выключен');
+  assert.ok(btn(roots.head, 'Редактор кода'), 'кнопка сменила подпись');
+  let save = log.filter(([ch]) => ch === 'layout:save').pop();
   assert.equal(save[1].layout.promptOpen, true);
+
   const pb = roots['prompt-body'];
   const titles = findAll(pb, (e) => e.className === 'sec-title').map((e) => e.attrs.value);
-  assert.deepEqual(titles, sections.map((s) => s.title)); // порядок и состав полей — как в наборе по умолчанию
+  assert.deepEqual(titles, sections.map((s) => s.title));
   assert.ok(titles.includes('СТРУКТУРА ПРОЕКТА') && titles.includes('ЗАДАЧА'));
   const areas = findAll(pb, (e) => e.tag === 'textarea');
-  assert.equal(areas.length, sections.filter((s) => s.type !== 'tree').length); // по одному полю на текстовую секцию
-  // ищем поле по названию секции, а не по индексу: порядок полей может меняться
+  assert.equal(areas.length, sections.filter((s) => s.type !== 'tree').length);
   const areaOf = (title) => {
     const sec = findAll(pb, (e) => e.tag === 'section').find((s) => findAll(s, (n) => n.className === 'sec-title' && n.attrs.value === title).length);
     return sec ? findAll(sec, (e) => e.tag === 'textarea')[0] : null;
@@ -353,7 +314,7 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
   assert.deepEqual(ex[1].excluded, ['scripts']);
   assert.match(text(document.querySelector('#prompt-tree-count')), /Скрыто элементов: 1/);
 
-  // добавить поле, удалить поле, копирование
+  // добавить поле, удалить поле, копирование промпта
   const secTitles = () => findAll(pb, (e) => e.className === 'sec-title');
   const before = secTitles().length; // 8 полей по умолчанию
   await click(btn(pb, '＋ Добавить поле'));
@@ -363,29 +324,55 @@ test('UI: раскладка IDE, вкладки, панель файлов, г�
   assert.equal(secTitles().length, before);
   await click(btn(pb, 'Скопировать промпт'));
   assert.ok(log.some(([ch]) => ch === 'prompt:copy'));
-  await click(btn(pb, '⧗ Напомнить формат'));
-  assert.ok(log.some(([ch]) => ch === 'prompt:copy-reminder'));
+  // «Напомнить формат» переехал в шапку — в форме его больше нет
+  assert.ok(!btn(pb, '⧗ Напомнить формат'), 'памятка формата больше не в форме промпта');
 
-  // крестик панели «Промпт» закрывает её
-  await click(roots['prompt-close']);
-  await tick(40);
-  assert.equal(roots['chat-col'].classList.contains('prompt-open'), false);
-  save = log.filter(([ch]) => ch === 'layout:save').pop();
-  assert.equal(save[1].layout.promptOpen, false);
-  await click(findAll(roots.tabs, (e) => e.tag === 'button')[TAB.prompt]); // вернуть для следующих проверок
-  await tick(60);
-
-  // «files:changed» не пересобирает форму промпта (фокус в поле не теряется),
-  // но доходит до дерева и редактора
+  // «files:changed» не пересобирает форму (фокус в поле не теряется)
   const areaBefore = findAll(pb, (e) => e.tag === 'textarea')[0];
   const refreshBefore = ed.refreshDisk;
   const treeBefore = ed.refreshTree;
   await handlers['files:changed']();
   await tick(60);
-  // файл мог измениться под открытым буфером — редактор перечитывает хэши диска (§11)
   assert.ok(ed.refreshDisk > refreshBefore, 'files:changed дошёл до редактора');
   assert.ok(ed.refreshTree > treeBefore, 'files:changed перечитал дерево');
   assert.equal(findAll(pb, (e) => e.tag === 'textarea')[0], areaBefore);
+
+  // открытие файла из дерева возвращает панель в режим редактора
+  await ed.hooks.onWantEditorMode();
+  await tick(30);
+  assert.equal(hidden(roots['prompt-host']), true);
+  assert.equal(hidden(roots['ed-tabs']), false);
+  assert.equal(ed.setVisible[ed.setVisible.length - 1], true);
+
+  // ---------- шапка: памятка формата ----------
+  await click(btn(roots.head, '⧗ Напомнить формат'));
+  assert.ok(log.some(([ch]) => ch === 'prompt:copy-reminder'));
+
+  // ---------- геометрия чата (§4, §28): чат всегда справа ----------
+  // разделитель левой панели: размеры считает ui/layout.js, сохранение — layout:save
+  const sp = roots['vsplit-left'];
+  const sentBefore = sent.length;
+  for (const f of sp.listeners.pointerdown) f({ button: 0, clientX: 500, pointerId: 1, preventDefault() {} });
+  for (const f of sp.listeners.pointermove) f({ clientX: 550 });
+  for (const f of sp.listeners.pointerup) f({});
+  await tick(60);
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.leftW, 370); // 320 + 50
+  assert.equal(sent.length, sentBefore, 'разделитель левой панели не трогает чат');
+  assert.ok(ed.layoutCalls > 0, 'после разделителя Monaco пересчитан');
+
+  // разделитель чата: на время перетаскивания чат скрыт, в конце показан;
+  // разделитель слева от чата, поэтому движение ВЛЕВО делает чат шире
+  const spc = roots['vsplit-chat'];
+  sent.length = 0;
+  for (const f of spc.listeners.pointerdown) f({ button: 0, clientX: 1100, pointerId: 1, preventDefault() {} });
+  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false]);
+  for (const f of spc.listeners.pointermove) f({ clientX: 1040 });
+  for (const f of spc.listeners.pointerup) f({});
+  await tick(60);
+  assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false, true]);
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.chatW, 480); // 420 + 60
 
   console.error = origErr;
   assert.deepEqual(errors, []);

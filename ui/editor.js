@@ -46,6 +46,7 @@
   let visible = false;
   let toast = () => {};
   let onDirtyChange = () => {};
+  let onWantEditorMode = () => {};
   let overlayClose = null;           // как закрыть текущий оверлей
   let marksTimer = null;
   let cursorInfo = { ln: 1, col: 1 };
@@ -120,14 +121,20 @@
       if (f.viewState) editor.restoreViewState(f.viewState);
     }
     monaco.editor.setModelLanguage(m, f.language);
-    els.host.classList.remove('hidden');
-    els.empty.classList.add('hidden');
-    editor.focus();
-    editor.layout();
+    // Узлы показываем только в режиме редактора: панель может быть занята «Промптом»
+    // или просмотром предложения (их переключает app.js), а showInEditor вызывается
+    // в том числе внешними событиями — редактор не должен из-под них вылезать.
+    if (visible) {
+      els.host.classList.remove('hidden');
+      els.empty.classList.add('hidden');
+      editor.focus();
+      editor.layout();
+    }
   }
 
   function showEmpty() {
     if (editor) editor.setModel(null);
+    if (!visible) return; // режим редактора выключен — узлы не трогаем (см. showInEditor)
     els.host.classList.add('hidden');
     els.empty.classList.remove('hidden');
   }
@@ -152,6 +159,9 @@
     const useProject = pid || projectId;
     if (!useProject) { toast('Сначала выберите проект', 'err'); return false; }
     if (typeof rel !== 'string' || !rel) return false;
+    // Панель редактора может показывать «Промпт» или просмотр предложения: открытие
+    // файла — явное намерение видеть код, поэтому сначала возвращаем режим редактора.
+    onWantEditorMode();
     const existing = ES.get(state, rel);
     if (existing) { await activate(rel); return true; }
 
@@ -833,6 +843,7 @@
     els = elements;
     toast = (hooks && hooks.toast) || (() => {});
     onDirtyChange = (hooks && hooks.onDirtyChange) || (() => {});
+    onWantEditorMode = (hooks && hooks.onWantEditorMode) || (() => {});
     installKeys();
     renderAll();
     showEmpty();

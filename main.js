@@ -547,8 +547,8 @@ function registerIpc() {
   // main не считает геометрию: renderer присылает готовые ширины панелей, а позицию чата
   // задаёт прямоугольником в chat:set-bounds (ниже, в ipcMain.on).
   handle('layout:save', async ({ layout }) => {
-    const [winW, winH] = win && !win.isDestroyed() ? win.getContentSize() : [null, null];
-    store.config.layout = layoutMath.sanitize(layout, winW, winH);
+    const winW = win && !win.isDestroyed() ? win.getContentSize()[0] : null;
+    store.config.layout = layoutMath.sanitize(layout, winW);
     await store.saveConfig();
     return store.config.layout;
   });

@@ -18,75 +18,75 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- Раскладка (ТЗ §5, доработка по просьбе пользователя):
-       .app       — строки: topbar / workspace / горизонтальный разделитель / нижняя панель
-       .workspace — колонки: chat-col / разделитель / .ide (чат слева или справа — класс .chat-right)
-       .chat-col  — колонки: #chat-slot / разделитель / «Промпт» (когда открыт: класс .prompt-open).
-                    «Промпт» стоит рядом с DeepSeek намеренно: они нужны по очереди и логически
-                    связаны, а нативный WebContentsView занимает только #chat-slot — соседняя
-                    колонка остаётся обычным DOM и полностью работоспособна.
-       .ide       — колонки: файлы / разделитель / редактор
-       нижняя панель — «Предложения» и «История» (как консоль в VS Code), сворачивается.
+  <!-- Раскладка (итог ручной проверки этапа B):
+       .app       — строки: topbar / workspace
+       .workspace — колонки: .ide / разделитель / #chat-slot. Чат ВСЕГДА справа:
+                    перенос стороны ломал рендер нативного слоя, переключатель удалён.
+       .ide       — колонки: левая панель / разделитель / редактор.
+       Левая панель — вкладки «Файлы / Предложения / История»: дерево проекта,
+       список предложений и журнал операций живут в одной колонке и переключаются.
+       Панель редактора показывает одно из четырёх: вкладки+код (Monaco), просмотр
+       предложения/истории (#view-host), «Промпт» (#prompt-host) или пустое состояние.
        Геометрией владеет renderer (§4, §28): main получает только прямоугольник #chat-slot. -->
   <div class="app" id="app">
     <header class="topbar">
       <div class="brand" aria-label="Whale Bridge">🐋 Whale Bridge</div>
-      <!-- содержимое рисует ui/app.js: чат, проект, подсказки, перенос чата на другую сторону -->
+      <!-- содержимое рисует ui/app.js: чат, проект, подсказки, «Промпт» и «Напомнить формат» -->
       <div id="head"></div>
     </header>
 
     <main class="workspace" id="workspace">
-      <div class="chat-col" id="chat-col">
-        <!-- Пустой контейнер: задаёт геометрию, которую ResizeObserver отправляет в main
-             (chat:set-bounds), и main физически кладёт сюда WebContentsView с DeepSeek. -->
-        <div id="chat-slot"></div>
-        <div class="vsplit" id="vsplit-prompt" title="Ширина панели «Промпт»" role="separator" aria-orientation="vertical"></div>
-        <section class="prompt-col" id="prompt-col" aria-label="Конструктор промптов">
-          <div class="prompt-head">
-            <span class="panel-title">ПРОМПТ</span>
-            <span class="grow"></span>
-            <button class="btn ghost tiny" id="prompt-close" type="button" title="Скрыть панель (кнопка «Промпт» внизу вернёт её)">✕</button>
-          </div>
-          <div id="prompt-body" class="prompt-body"></div>
-        </section>
-      </div>
-      <div class="vsplit" id="vsplit-chat" title="Ширина чата" role="separator" aria-orientation="vertical"></div>
-
       <div class="ide" id="ide">
-        <section class="files-panel" aria-label="Файлы проекта">
-          <!-- заголовок и плашка расхождений — ui/app.js; само дерево — ui/editor.js -->
-          <div id="files-head" class="files-head"></div>
-          <div id="files-banner"></div>
-          <div id="ed-tree" class="ed-tree"></div>
+        <section class="left-panel" aria-label="Файлы, предложения, история">
+          <!-- вкладки левой панели рисует ui/app.js -->
+          <nav id="left-tabs" class="left-tabs"></nav>
+          <!-- Файлы: заголовок и плашку расхождений рисует ui/app.js, дерево — ui/editor.js -->
+          <div id="files-pane" class="files-pane">
+            <div id="files-head" class="files-head"></div>
+            <div id="files-banner"></div>
+            <div id="ed-tree" class="ed-tree"></div>
+          </div>
+          <!-- Предложения / История: списки и журналы -->
+          <div id="body" class="left-body hidden"></div>
         </section>
-        <div class="vsplit" id="vsplit-files" title="Ширина панели файлов" role="separator" aria-orientation="vertical"></div>
+        <div class="vsplit" id="vsplit-left" title="Ширина левой панели" role="separator" aria-orientation="vertical"></div>
 
         <section class="editor-panel" aria-label="Редактор">
           <div id="ed-tabs" class="ed-tabs"></div>
-          <!-- Monaco создаётся один раз и живёт в #ed-host постоянно (§7): вкладки и
-               панели переключаются классом hidden, DOM-контейнер не пересоздаётся. -->
+          <!-- Monaco создаётся один раз и живёт в #ed-host постоянно (§7): режимы панели
+               переключаются классом hidden, DOM-контейнер редактора не пересоздаётся. -->
           <div id="ed-host" class="ed-host hidden"></div>
           <!-- ячейка Monaco DiffEditor (этап C) -->
           <div id="diff-host" class="diff-host hidden"></div>
+          <!-- просмотр предложения / операции истории / «моих правок» / конфликта merge -->
+          <div id="view-host" class="view-host hidden"></div>
+          <!-- конструктор промптов: открывается вместо редактора кнопкой в topbar -->
+          <div id="prompt-host" class="prompt-host hidden">
+            <div class="prompt-head">
+              <span class="panel-title">ПРОМПТ</span>
+              <span class="grow"></span>
+              <button class="btn ghost tiny" id="prompt-close" type="button" title="Закрыть и вернуться к редактору">✕</button>
+            </div>
+            <div id="prompt-body" class="prompt-body"></div>
+          </div>
           <div id="ed-empty" class="ed-empty">
             <div>Файл не открыт.</div>
             <div class="path">Выберите файл в дереве слева или нажмите Ctrl+P.</div>
           </div>
           <div id="ed-status" class="ed-status"></div>
+
+          <!-- Оверлеи и тосты — только внутри IDE-области: WebContentsView с DeepSeek
+               перекрывает любые CSS-слои, поверх чата не нарисуется ничего (§24). -->
+          <div id="ed-overlay" class="ed-overlay hidden"></div>
+          <div id="toast" role="status" aria-live="polite"></div>
         </section>
-
-        <!-- Оверлеи и тосты — только внутри IDE-области: WebContentsView с DeepSeek
-             перекрывает любые CSS-слои, поверх чата не нарисуется ничего (§24). -->
-        <div id="ed-overlay" class="ed-overlay hidden"></div>
-        <div id="toast" role="status" aria-live="polite"></div>
       </div>
-    </main>
+      <div class="vsplit" id="vsplit-chat" title="Ширина чата" role="separator" aria-orientation="vertical"></div>
 
-    <div class="hsplit" id="hsplit-bottom" title="Высота нижней панели" role="separator" aria-orientation="horizontal"></div>
-    <section class="bottom-panel" id="bottom-panel" aria-label="Предложения и история">
-      <div class="bottom-bar" id="tabs"></div>
-      <div id="body"></div>
-    </section>
+      <!-- Пустой контейнер: задаёт геометрию, которую ResizeObserver отправляет в main
+           (chat:set-bounds), и main физически кладёт сюда WebContentsView с DeepSeek. -->
+      <div id="chat-slot"></div>
+    </main>
   </div>
 
   <!-- Порядок важен: каждый следующий модуль использует предыдущий.

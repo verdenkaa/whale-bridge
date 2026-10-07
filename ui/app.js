@@ -36,6 +36,14 @@
   const COPY_TITLE = 'Скопировать в буфер то, что изменилось в этих файлах с тех пор, как модель видела их последней: '
     + 'unified diff, а если точная версия не сохранилась или файл крошечный — файл целиком. '
     + 'Отметки при этом НЕ снимаются: скопировать в буфер не значит отправить в чат.';
+  const COPY_REMINDER_TITLE = 'Скопировать короткую памятку о маркерах, Diff и формате кода — чтобы вставить её в чат';
+
+  /** Памятка о формате нужна и вне конструктора промптов, поэтому кнопка живёт в шапке. */
+  async function copyFormatReminder() {
+    const r = await call('prompt:copy-reminder');
+    if (!r) return;
+    toast(r.ok ? 'Памятка по формату скопирована. Вставьте её в чат.' : 'Не удалось скопировать памятку.', r.ok ? 'ok' : 'err');
+  }
 
   const STATE_LABEL = {
     update: 'Обновление', create: 'Создание', delete: 'Удаление', move: 'Перемещение', identical: 'Без изменений', missing: 'Файл не найден',
@@ -48,13 +56,13 @@
   // ---------- состояние ----------
   const S = {
     projects: [], chatId: null, project: null, pendingProjectId: null, lastProjectId: null,
-    tab: 'proposals', proposals: [], showHistorical: false,
-    view: null, // {kind:'proposal'|'history'|'manual'|'merge', data}
+    proposals: [], showHistorical: false,
+    view: null, // {kind:'proposal'|'history'|'manual'|'merge', data} — показывается вместо редактора
     history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
     context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
-    // Раскладка (этап B, §5): ширины панелей в px и сторона чата. Состояние UI,
-    // main его только хранит (layout:save) — геометрию чата задаёт #chat-slot (§4).
+    // Раскладка (ТЗ §5): ширины панелей, открытая вкладка левой панели и режим редактора.
+    // Состояние UI, main его только хранит (layout:save) — геометрию чата задаёт #chat-slot (§4).
     layout: { ...L.DEFAULTS },
     prompt: {
       loaded: false, loading: false, sections: [], presets: [], excluded: new Set(), defaults: {}, tree: null,
@@ -70,10 +78,10 @@
     const projectChanged = (S.project && S.project.id) !== (st.project && st.project.id);
     const chatChanged = S.chatId !== st.chatId;
     Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, pendingProjectId: st.pendingProjectId, lastProjectId: st.lastProjectId });
-    // Сохранённые размеры панелей (config.json) → CSS-переменные, сторона чата,
-    // видимость «Промпта» и свёрнутость нижней панели. sanitize защищает и от мусора
-    // в конфиге, и от окна, ставшего меньше минимумов.
-    S.layout = L.sanitize(st.layout, window.innerWidth, window.innerHeight);
+    // Сохранённые размеры панелей (config.json) → CSS-переменные, вкладка левой панели
+    // и режим редактора. sanitize защищает и от мусора в конфиге, и от окна, ставшего
+    // уже минимумов, и мигрирует прежние схемы раскладки (см. ui/layout.js).
+    S.layout = L.sanitize(st.layout, window.innerWidth);
     applyLayout();
     if (projectChanged) {
       P.loaded = false;
@@ -86,32 +94,20 @@
       await loadPrompt();
       renderPromptPanel();
     } else if (S.layout.promptOpen && !P.loaded && !P.loading) {
-      // панель открыта с прошлого запуска: показать «Загрузка…» и запустить загрузку
+      // «Промпт» открыт с прошлого запуска: показать «Загрузка…» и запустить загрузку
       renderPromptPanel();
     }
   }
 
-  /**
-   * CSS-переменные раскладки + классы состояния. Единственное место, где они ставятся.
-   * Три независимых переключателя (§6 и просьба пользователя):
-   *   .chat-right       — чат справа вместо слева
-   *   .prompt-open      — панель «Промпт» рядом с чатом показана
-   *   .bottom-collapsed — нижняя панель свёрнута до строки вкладок
-   */
+  /** CSS-переменные раскладки. Единственное место, где они ставятся. */
   function applyLayout() {
     const vars = L.cssVars(S.layout);
     for (const k of Object.keys(vars)) document.documentElement.style.setProperty(k, vars[k]);
-    const ws = $('#workspace');
-    if (ws && ws.classList) ws.classList.toggle('chat-right', S.layout.chatSide === 'right');
-    const cc = $('#chat-col');
-    if (cc && cc.classList) cc.classList.toggle('prompt-open', !!S.layout.promptOpen);
-    const app = $('#app');
-    if (app && app.classList) app.classList.toggle('bottom-collapsed', !!S.layout.bottomCollapsed);
   }
 
   async function closeView() {
     S.view = null;
-    if (S.tab === 'history') await loadHistory();
+    if (S.layout.leftTab === 'history') await loadHistory();
     await loadProposals();
   }
 
@@ -142,13 +138,23 @@
         sel,
         h('button', { class: 'btn', title: 'Добавить папку проекта', onclick: onAddProject }, 'Добавить папку'),
         S.project && h('button', { class: 'btn ghost danger', title: 'Убрать проект из списка (файлы не удаляются)', onclick: onRemoveProject }, 'Убрать')),
-      // §6: чат слева/справа — чисто CSS-перестановка колонок. main про сторону не знает:
-      // он получает только новый прямоугольник #chat-slot.
+      h('span', { class: 'grow' }),
+      // Переключатель режима панели редактора: «Промпт» заменяет код, повторное нажатие
+      // возвращает редактор. Подпись кнопки — то, что будет показано по клику.
       h('button', {
-        class: 'btn side-toggle', type: 'button',
-        title: 'Перенести чат DeepSeek на другую сторону окна',
-        onclick: toggleChatSide,
-      }, S.layout.chatSide === 'left' ? 'Чат справа ⇄' : 'Чат слева ⇄'),
+        class: 'btn mode' + (S.layout.promptOpen ? ' on' : ''), type: 'button',
+        title: S.layout.promptOpen
+          ? 'Вернуться к редактору кода'
+          : 'Открыть конструктор промптов вместо редактора кода',
+        onclick: () => setPromptOpen(!S.layout.promptOpen),
+      }, S.layout.promptOpen ? 'Редактор кода' : 'Промпт'),
+      // Памятка о маркерах и формате кода нужна в любой момент, а не только внутри
+      // конструктора промптов — поэтому живёт в шапке.
+      h('button', {
+        class: 'btn', type: 'button',
+        title: COPY_REMINDER_TITLE,
+        onclick: copyFormatReminder,
+      }, '⧗ Напомнить формат'),
     );
     const pending = S.projects.find((p) => p.id === S.pendingProjectId);
     if (!S.chatId && pending) head.append(h('div', { class: 'hint' }, `Выбран «${pending.name}». Он будет автоматически привязан после первого сообщения.`));
@@ -184,68 +190,45 @@
   }
 
   /**
-   * Вкладки нижней панели. «Предложения» и «История» — содержимое #body; «Промпт»
-   * здесь не вкладка, а выключатель панели рядом с чатом (пользователь просил именно
-   * так: промпт и чат нужны по очереди и логически связаны). Справа — свернуть/развернуть.
+   * Вкладки левой панели: Файлы / Предложения / История — одна колонка, три режима.
+   *
+   * Счётчик нерассмотренных предложений дублируется на вкладке «Файлы» намеренно:
+   * пользователь обычно смотрит в дерево, и предупреждение «тебя ждут предложения»
+   * обязано быть видно без перехода на другую вкладку.
    */
   function renderTabs() {
     const pending = S.proposals.filter((p) => p.status === 'pending' && !p.historical).length;
-    const tabs = [['proposals', 'Предложения'], ['history', 'История']];
-    $('#tabs').replaceChildren(
-      ...tabs.map(([id, label]) =>
-        h('button', { class: 'tab' + (S.tab === id ? ' on' : ''), onclick: () => switchTab(id) },
-          label, id === 'proposals' && pending > 0 && h('span', { class: 'count' }, pending))),
-      h('span', { class: 'grow' }),
-      h('button', {
-        class: 'tab' + (S.layout.promptOpen ? ' on' : ''),
-        title: 'Конструктор промптов — панель рядом с чатом DeepSeek',
-        onclick: () => togglePrompt(),
-      }, 'Промпт'),
-      h('button', {
-        class: 'tab', title: S.layout.bottomCollapsed ? 'Развернуть панель' : 'Свернуть панель',
-        onclick: toggleBottom,
-      }, S.layout.bottomCollapsed ? '▴' : '▾'));
+    const tabs = [['files', 'Файлы'], ['proposals', 'Предложения'], ['history', 'История']];
+    $('#left-tabs').replaceChildren(
+      ...tabs.map(([id, label]) => {
+        const withCount = (id === 'proposals' || (id === 'files' && pending > 0)) && pending > 0;
+        return h('button', {
+          class: 'tab' + (S.layout.leftTab === id ? ' on' : ''),
+          title: id === 'files' && pending > 0 ? `Нерассмотренных предложений: ${pending}` : null,
+          onclick: () => switchTab(id),
+        },
+        label,
+        withCount && h('span', { class: 'count' + (id === 'files' ? ' alert' : '') }, pending));
+      }));
   }
 
   async function switchTab(id) {
-    S.tab = id;
-    S.view = null;
-    // В свёрнутой панели содержимое скрыто: выбор вкладки означает «покажи»
-    if (S.layout.bottomCollapsed) await setBottomCollapsed(false);
+    if (!L.LEFT_TABS.includes(id)) return;
+    S.layout = { ...S.layout, leftTab: id };
     if (id === 'history') await loadHistory();
     render();
-  }
-
-  /** Открыть просмотр в нижней панели, даже если она свёрнута. */
-  async function ensureBottomOpen() {
-    if (S.layout.bottomCollapsed) await setBottomCollapsed(false);
-  }
-
-  async function setBottomCollapsed(v) {
-    const next = !!v;
-    if (S.layout.bottomCollapsed === next) return;
-    S.layout = { ...S.layout, bottomCollapsed: next };
-    applyLayout();
-    renderTabs();
-    // Высота рабочей области изменилась → ResizeObserver сам пришлёт новые bounds чата.
-    // Monaco пересчитываем явно: automaticLayout может не успеть за сменой строки Grid.
-    if (window.WhaleEditor.layout) window.WhaleEditor.layout();
     await call('layout:save', { layout: S.layout });
   }
 
-  const toggleBottom = () => setBottomCollapsed(!S.layout.bottomCollapsed);
-
   /**
-   * Панель «Промпт» рядом с чатом. Ширина чат-колонки растёт, поэтому слот чата
-   * сохраняет свою ширину — но в зеркальной раскладке меняется его X, и bounds
-   * отправляются явно (ResizeObserver за позицией не следит, только за размером).
+   * Режим панели редактора: код / просмотр / «Промпт» — одно место на троих.
+   * «Промпт» открывается вместо редактора и закрывается крестиком или той же кнопкой
+   * в шапке; просмотр предложения важнее «Промпта», пока открыт.
    */
   async function setPromptOpen(v) {
     const next = !!v;
     if (S.layout.promptOpen === next) return;
     S.layout = { ...S.layout, promptOpen: next };
-    applyLayout();
-    renderTabs();
     if (next) {
       if (!P.loaded && !P.loading) {
         P.loading = true;
@@ -253,14 +236,9 @@
       }
       renderPromptPanel();
     }
-    requestAnimationFrame(() => {
-      sendChatBounds();
-      if (window.WhaleEditor.layout) window.WhaleEditor.layout();
-    });
+    render();
     await call('layout:save', { layout: S.layout });
   }
-
-  const togglePrompt = () => setPromptOpen(!S.layout.promptOpen);
 
   // ---------- вкладка «Предложения» ----------
   function renderProposals() {
@@ -273,11 +251,9 @@
         h('span', { class: 'grow' }),
         S.proposals.length > 0 && h('button', { class: 'btn', title: 'Убрать все карточки из списка (файлы не меняются)', onclick: onDismissAll }, 'Очистить список'),
         h('button', { class: 'btn', title: 'Если код не подхватился автоматически: скопируйте ответ ИИ и нажмите', onclick: onClipboard }, 'Взять из буфера'),
-        h('button', { class: 'btn', onclick: async () => { const r = await call('proposals:report'); if (r?.ok) toast('Отчёт скопирован. Вставьте его в чат.', 'ok'); else if (r) toast(r.error, 'err'); } }, 'Скопировать отчёт для чата'),
-        h('button', { class: 'btn', title: 'Составить промпт с правилами формата — панель «Промпт» рядом с чатом', onclick: () => setPromptOpen(true) }, 'Промпт для ИИ')));
+        h('button', { class: 'btn', onclick: async () => { const r = await call('proposals:report'); if (r?.ok) toast('Отчёт скопирован. Вставьте его в чат.', 'ok'); else if (r) toast(r.error, 'err'); } }, 'Скопировать отчёт для чата')));
 
     if (!S.chatId) {
-      // Про «слева» не пишем: сторону чата пользователь переключает сам (§6)
       box.append(h('div', { class: 'empty' }, 'Откройте чат DeepSeek или отправьте первое сообщение — предложения изменений появятся здесь.'));
       return box;
     }
@@ -287,7 +263,7 @@
     if (!S.proposals.length) {
       box.append(h('div', { class: 'empty' },
         h('div', {}, 'Пока нет предложений.'),
-        h('div', {}, 'Составьте промпт во вкладке «Промпт» и отправьте его ИИ: он научит модель маркерам # &путь, замене функций (REPLACE_BLOCK) и блокам SEARCH/REPLACE.')));
+        h('div', {}, 'Составьте промпт кнопкой «Промпт» вверху и отправьте его ИИ: он научит модель маркерам # &путь, замене функций (REPLACE_BLOCK) и блокам SEARCH/REPLACE.')));
       return box;
     }
     const versions = {};
@@ -335,7 +311,6 @@
   async function openProposal(id) {
     const data = await call('proposal:get', { id });
     if (!data) return;
-    await ensureBottomOpen();
     S.view = { kind: 'proposal', data };
     S.showFull = false;
     S.allowIncomplete = false;
@@ -504,7 +479,6 @@
     const d = await call('manual:view', { projectId: S.project.id, relPath });
     if (!d) return toast('Ручные изменения не найдены', 'err');
     if (d.error) return toast(d.error, 'err'); // например: точка отсчёта — откат, копии для сравнения нет
-    await ensureBottomOpen();
     S.view = { kind: 'manual', data: d }; render();
   }
   /** Что знает модель в текущем чате против того, что сейчас на диске. */
@@ -682,8 +656,12 @@
         onProposal: async (rel) => {
           const info = proposalsByPath().get(rel);
           if (!info) return;
-          S.tab = 'proposals'; // карточка предложения живёт в нижней панели
-          await ensureBottomOpen();
+          // просмотр откроется вместо редактора; список слева переключаем на предложения,
+          // чтобы после «← К списку» пользователь вернулся к карточкам
+          if (S.layout.leftTab !== 'proposals') {
+            S.layout = { ...S.layout, leftTab: 'proposals' };
+            call('layout:save', { layout: S.layout });
+          }
           await openProposal(info.firstId);
         },
         onReveal: (rel) => { if (S.project) call('file:open', { projectId: S.project.id, rel, mode: 'reveal' }); },
@@ -711,7 +689,6 @@
   async function openHistory(id) {
     const data = await call('history:view', { id });
     if (!data) return;
-    await ensureBottomOpen();
     S.view = { kind: 'history', data };
     render();
   }
@@ -1021,11 +998,6 @@
         if (!r) return;
         toast(r.ok ? `Промпт скопирован (${r.length.toLocaleString('ru-RU')} симв.). Вставьте его в чат.` : r.error, r.ok ? 'ok' : 'err');
       } }, 'Скопировать промпт'),
-      h('button', { class: 'btn', title: 'Скопировать короткую памятку о маркерах, Diff и формате кода', onclick: async () => {
-        const r = await call('prompt:copy-reminder');
-        if (!r) return;
-        toast(r.ok ? 'Памятка по формату скопирована. Вставьте её в чат.' : 'Не удалось скопировать памятку.', r.ok ? 'ok' : 'err');
-      } }, '⧗ Напомнить формат'),
       h('button', { class: 'btn', onclick: () => { P.preview = !P.preview; renderPromptPanel(); } }, P.preview ? 'Скрыть предпросмотр' : 'Предпросмотр'),
       h('span', { id: 'prompt-count', class: 'path' })));
     setTimeout(refreshPreview, 0);
@@ -1035,31 +1007,81 @@
   // ---------- отрисовка ----------
   /**
    * Monaco живёт в #ed-host постоянно и переживает любые перерисовки (ТЗ §7): этот render
-   * касается только нижней панели, заголовков и дерева. Дерево перерисовывает ui/editor.js —
-   * сюда приходят лишь данные для отметок (pushTreeExtras).
+   * переключает режимы панели редактора и перерисовывает левую панель. Дерево рисует
+   * ui/editor.js — сюда приходят лишь данные для отметок (pushTreeExtras).
    *
-   * Форму «Промпта» render() НЕ трогает намеренно: она живёт в своей панели, и любая
-   * пересборка по внешним событиям (поток ответов модели) выбивала бы фокус из полей.
-   * Её обновляет только renderPromptPanel() — по явным действиям пользователя.
+   * Форму «Промпта» render() НЕ трогает намеренно: любая пересборка по внешним событиям
+   * (поток ответов модели) выбивала бы фокус из полей. Её обновляет только
+   * renderPromptPanel() — по явным действиям пользователя.
    */
   function render() {
     renderHead();
     renderTabs();
     renderFilesHead();
     pushTreeExtras();
+    renderLeftPane();
+    renderEditorArea();
+  }
+
+  /**
+   * Левая панель: на вкладке «Файлы» показывается дерево (его рисует ui/editor.js),
+   * на «Предложениях» и «Истории» — списки в #body. Просмотр (Diff предложения, операция
+   * истории, «мои правки») открывается не здесь, а вместо редактора: в узкой колонке
+   * построчный diff не читается.
+   */
+  function renderLeftPane() {
+    const pane = $('#files-pane');
     const body = $('#body');
+    if (!pane || !body) return;
+    const isFiles = S.layout.leftTab === 'files';
+    pane.classList.toggle('hidden', !isFiles);
+    body.classList.toggle('hidden', isFiles);
+    if (isFiles) return;
     const scroll = body.scrollTop;
     body.replaceChildren();
-    if (S.view && S.view.kind === 'proposal') body.append(renderProposalView(S.view.data));
-    else if (S.view && S.view.kind === 'history') body.append(renderHistoryView(S.view.data));
-    else if (S.view && S.view.kind === 'manual') body.append(renderManualView(S.view.data));
-    else if (S.view && S.view.kind === 'merge') body.append(renderMergeView(S.view.data));
-    else if (S.tab === 'proposals') body.append(renderProposals());
-    else body.append(renderHistory());
+    body.append(S.layout.leftTab === 'proposals' ? renderProposals() : renderHistory());
     body.scrollTop = scroll;
   }
 
-  /** Содержимое панели «Промпт» (рядом с чатом). Пусто, пока панель закрыта. */
+  /**
+   * Панель редактора показывает ровно одно из четырёх: код, просмотр, «Промпт» или
+   * пустое состояние. Приоритет: просмотр > «Промпт» > код (открытый Diff важнее,
+   * иначе действие пользователя выгляделось бы проигнорированным).
+   */
+  let panelMode = null; // последний применённый режим панели редактора
+  function renderEditorArea() {
+    const mode = S.view ? 'view' : (S.layout.promptOpen ? 'prompt' : 'editor');
+    const show = (sel, on) => {
+      const el = $(sel);
+      if (el && el.classList) el.classList.toggle('hidden', !on);
+    };
+    show('#ed-tabs', mode === 'editor');
+    show('#ed-status', mode === 'editor');
+    show('#view-host', mode === 'view');
+    show('#prompt-host', mode === 'prompt');
+    if (mode !== 'editor') { show('#ed-host', false); show('#ed-empty', false); }
+    // Видимость редактора переключает сам ui/editor.js: он знает, показывать #ed-host
+    // или пустое состояние, и пересчитывает размеры Monaco (§7). Дёргаем setVisible
+    // только когда режим действительно сменился: render() вызывается на каждый чих
+    // потока ответов модели, а setVisible(true) тянет за собой refreshDisk (IPC).
+    if (window.WhaleEditor) {
+      if (mode !== panelMode) window.WhaleEditor.setVisible(mode === 'editor');
+      panelMode = mode;
+    }
+
+    const vh = $('#view-host');
+    if (!vh) return;
+    if (mode !== 'view') { vh.replaceChildren(); return; }
+    const scroll = vh.scrollTop;
+    vh.replaceChildren();
+    if (S.view.kind === 'proposal') vh.append(renderProposalView(S.view.data));
+    else if (S.view.kind === 'history') vh.append(renderHistoryView(S.view.data));
+    else if (S.view.kind === 'manual') vh.append(renderManualView(S.view.data));
+    else if (S.view.kind === 'merge') vh.append(renderMergeView(S.view.data));
+    vh.scrollTop = scroll;
+  }
+
+  /** Содержимое панели «Промпт». Пусто, пока панель закрыта. */
   function renderPromptPanel() {
     const root = $('#prompt-body');
     if (!root) return;
@@ -1069,11 +1091,15 @@
     root.scrollTop = scroll;
   }
 
-  // ---------- геометрия раскладки (этап B, ТЗ §4, §6, §28) ----------
+  // ---------- геометрия раскладки (этап B, ТЗ §4, §28) ----------
   // Раскладку определяет CSS: размеры панелей живут в CSS-переменных, а чат занимает
   // ровно прямоугольник #chat-slot. Renderer наблюдает за слотом через ResizeObserver
   // и отправляет измеренные bounds в main (chat:set-bounds, fire-and-forget), а main
   // просто кладёт туда WebContentsView. Никакого ratio в main больше нет.
+  //
+  // Чат ВСЕГДА справа: переключатель стороны существовал в 0012–0013 и удалён по итогам
+  // ручной проверки — перестановка колонок ломала рендер нативного слоя. Меньше
+  // подвижных частей: сторона фиксирована, остаётся только ширина.
 
   let chatHidden = false; // пока чат скрыт, bounds не шлём: геометрия применяется на отпускании
 
@@ -1081,8 +1107,6 @@
     chatHidden = !v;
     if (api.send) api.send('chat:set-visible', v);
   }
-
-  const winSize = () => ({ w: window.innerWidth, h: window.innerHeight });
 
   function sendChatBounds() {
     if (!api.send) return;
@@ -1096,43 +1120,17 @@
     if (rect) api.send('chat:set-bounds', rect);
   }
 
-  // Размер слота изменился (разделитель, resize окна, maximize, высота шапки, свёрнутая
-  // нижняя панель) → новые bounds. ResizeObserver сам приходит не чаще кадра, поэтому
-  // отдельный троттлинг не нужен — важно лишь не дёргать setBounds у скрытого чата.
+  // Размер слота изменился (разделитель, resize окна, maximize, высота шапки) → новые
+  // bounds. ResizeObserver сам приходит не чаще кадра, поэтому отдельный троттлинг не
+  // нужен — важно лишь не дёргать setBounds у скрытого чата.
   (function observeChatSlot() {
     const slot = $('#chat-slot');
     if (!slot || typeof ResizeObserver === 'undefined' || !api.send) return;
     new ResizeObserver(() => { if (!chatHidden) sendChatBounds(); }).observe(slot);
   })();
 
-  /**
-   * Перенос чата на другую сторону (§6).
-   *
-   * Прежняя реализация прятала чат и отправляла bounds из requestAnimationFrame — на
-   * практике это дало «интерфейс перестроился, а чат остался слева». Здесь три отличия:
-   *   1. bounds измеряются синхронно сразу после смены класса: getBoundingClientRect
-   *      принудительно пересчитывает раскладку, поэтому ждать кадр не нужно и работа
-   *      раскладки не зависит от того, дойдёт ли rAF;
-   *   2. чат не скрывается — прятать нечего, прямоугольник отправляется тем же тактом,
-   *      а скрытие как раз и теряло геометрию нативного слоя;
-   *   3. повторные отправки на следующем кадре и через 150 мс: setBounds идемпотентен,
-   *      зато залипший нативный слой получает своё место даже если первое сообщение
-   *      пришлось на пересборку композитора. Плюс main повторно применяет последний
-   *      rect при показе чата.
-   */
-  async function toggleChatSide() {
-    S.layout = { ...S.layout, chatSide: S.layout.chatSide === 'left' ? 'right' : 'left' };
-    applyLayout();
-    renderHead(); // подпись кнопки
-    sendChatBounds();
-    requestAnimationFrame(() => sendChatBounds());
-    setTimeout(sendChatBounds, 150);
-    if (window.WhaleEditor.layout) window.WhaleEditor.layout();
-    await call('layout:save', { layout: S.layout });
-  }
-
   (function initSplitters() {
-    let drag = null; // {which, startX, startY, startLayout}
+    let drag = null; // {which, startX, startLayout}
     let saveTimer = null;
     // Сохраняем размеры в config.json. После отпускания разделителя — сразу: отложенное
     // сохранение могло бы проиграть гонку внезапно пришедшему chat:changed, который
@@ -1144,40 +1142,34 @@
       saveTimer = setTimeout(() => call('layout:save', { layout: S.layout }), 400);
     };
 
-    // Чат скрывается на время перетаскивания тех разделителей, которые меняют размер его
-    // слота: WebContentsView проглатывает события мыши, а setBounds на каждый кадр дорог.
-    // 'prompt' не скрывает: слот чата сохраняет ширину, меняется только X колонки.
-    const hidesChat = (which) => which === 'chat' || which === 'bottom';
-
     function setup(which, sel) {
       const el = $(sel);
       if (!el || !el.addEventListener) return;
       el.addEventListener('pointerdown', (e) => {
         if (e.button != null && e.button !== 0) return;
-        drag = { which, startX: e.clientX, startY: e.clientY, startLayout: { ...S.layout } };
+        drag = { which, startX: e.clientX, startLayout: { ...S.layout } };
         // Захват указателя: движение мыши приходит самому разделителю, даже когда
         // курсор ушёл далеко в сторону (проверено практикой прежнего разделителя).
         if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
         el.classList.add('drag');
-        if (hidesChat(which)) setChatVisible(false);
+        // Только чатовый разделитель: WebContentsView проглатывает события мыши,
+        // поэтому на время перетаскивания чат скрываем, а геометрию применяем на
+        // отпускании. Разделитель левой панели чат не трогает — editor поглощает.
+        if (which === 'chat') setChatVisible(false);
         if (e.preventDefault) e.preventDefault();
       });
       el.addEventListener('pointermove', (e) => {
         if (!drag || drag.which !== which) return;
-        const delta = which === 'bottom' ? e.clientY - drag.startY : e.clientX - drag.startX;
-        S.layout = L.drag(drag.startLayout, which, delta, winSize());
+        S.layout = L.drag(drag.startLayout, which, e.clientX - drag.startX, window.innerWidth);
         applyLayout();
-        // «Промпт» двигает слот чата по X в зеркальной раскладке, а ResizeObserver за
-        // позицией не следит — отправляем прямоугольник сами.
-        if (which === 'prompt' && !chatHidden) sendChatBounds();
       });
       const end = () => {
         if (!drag || drag.which !== which) return;
         drag = null;
         el.classList.remove('drag');
-        if (hidesChat(which)) {
-          // Сначала bounds, потом показ: main запоминает rect и применяет его повторно
-          // при setVisible(true), поэтому чат появляется уже на новом месте.
+        if (which === 'chat') {
+          // Сначала bounds, потом показ: main запоминает rect и повторно применяет его
+          // при setVisible(true), поэтому чат появляется уже с новой шириной.
           sendChatBounds();
           setChatVisible(true);
           setTimeout(sendChatBounds, 150); // страховка от залипшего нативного слоя
@@ -1190,18 +1182,15 @@
       el.addEventListener('pointerup', end);
       el.addEventListener('pointercancel', end);
     }
+    setup('left', '#vsplit-left');
     setup('chat', '#vsplit-chat');
-    setup('files', '#vsplit-files');
-    setup('prompt', '#vsplit-prompt');
-    setup('bottom', '#hsplit-bottom');
 
-    // Окно изменилось: панели ужимаются в порядке prompt → files → chat, высота нижней
-    // панели ограничена так, чтобы рабочей области оставалось bottomKeep (ui/layout.js).
+    // Окно стало уже: панели ужимаются в порядке left → chat (ui/layout.js), ширина чата
+    // не превышает 60% окна. Сохраняем ширины с задержкой.
     if (window.addEventListener) {
       window.addEventListener('resize', () => {
-        const fitted = L.fitToWindow(S.layout, window.innerWidth, window.innerHeight);
-        const changed = ['chatW', 'filesW', 'promptW', 'bottomH'].some((k) => fitted[k] !== S.layout[k]);
-        if (changed) {
+        const fitted = L.fitToWindow(S.layout, window.innerWidth);
+        if (fitted.leftW !== S.layout.leftW || fitted.chatW !== S.layout.chatW) {
           S.layout = fitted;
           applyLayout();
           saveLayoutSoon();
@@ -1268,11 +1257,20 @@
       toast,
       // несохранённые правки видны и на вкладках вне редактора — обновляем счётчик/заголовки
       onDirtyChange: () => { renderTabs(); },
+      // Пользователь открыл файл (клик в дереве, Ctrl+P) — панель редактора должна
+      // показать код, даже если сейчас открыт «Промпт» или просмотр предложения.
+      onWantEditorMode: () => {
+        if (!S.view && !S.layout.promptOpen) return;
+        S.view = null;
+        if (S.layout.promptOpen) {
+          S.layout = { ...S.layout, promptOpen: false };
+          call('layout:save', { layout: S.layout });
+        }
+        render();
+      },
     });
-    // Этап B: редактор всегда на экране (отдельной вкладки «Редактор» больше нет),
-    // поэтому видимость включаем один раз при монтировании.
-    window.WhaleEditor.setVisible(true);
     pushTreeExtras();
+    renderEditorArea(); // начальный режим панели: редактор (или «Промпт», если был открыт)
   })();
 
   loadState();
