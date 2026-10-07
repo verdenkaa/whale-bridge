@@ -212,6 +212,13 @@ function handle(channel, fn) {
 // Этап B (ТЗ §4): геометрия чата приходит из renderer — ResizeObserver на #chat-slot
 // измеряет getBoundingClientRect() и присылает готовый прямоугольник. Fire-and-forget:
 // во время перетаскивания разделителя сообщения идут каждый кадр, ответ не нужен.
+//
+// Последний rect запоминается и повторно применяется при показе чата: на Windows
+// геометрия, заданная скрытому WebContentsView, может не пережить цикл hide/show
+// (нативный слой пересоздаётся) — без этого чат «залипал» на старом месте при
+// переносе на другую сторону окна.
+let lastChatBounds = null;
+
 ipcMain.on('chat:set-bounds', (event, rect) => {
   if (!chatView || !win || win.isDestroyed() || event.sender !== win.webContents) return;
   const r = layoutMath.normalizeRect(rect);
@@ -219,18 +226,23 @@ ipcMain.on('chat:set-bounds', (event, rect) => {
   const [maxW, maxH] = win.getContentSize();
   const x = Math.min(r.x, Math.max(0, maxW - 1));
   const y = Math.min(r.y, Math.max(0, maxH - 1));
-  chatView.setBounds({
+  lastChatBounds = {
     x, y,
     width: Math.max(1, Math.min(r.width, maxW - x)),
     height: Math.max(1, Math.min(r.height, maxH - y)),
-  });
+  };
+  chatView.setBounds(lastChatBounds);
 });
 
 // На время перетаскивания разделителя чат скрывается: WebContentsView — нативный слой,
 // он проглатывает события мыши, и без скрытия разделитель «терял» бы курсор.
 ipcMain.on('chat:set-visible', (event, visible) => {
   if (!chatView || !win || win.isDestroyed() || event.sender !== win.webContents) return;
-  chatView.setVisible(visible !== false);
+  const show = visible !== false;
+  chatView.setVisible(show);
+  // Показать ровно там, где договорились: повторное setBounds страхует от потери
+  // геометрии скрытым нативным слоем (порядок сообщений от renderer: bounds → visible).
+  if (show && lastChatBounds) chatView.setBounds(lastChatBounds);
 });
 
 // Блоки кода от наблюдателя (строгая проверка структуры)
@@ -535,8 +547,8 @@ function registerIpc() {
   // main не считает геометрию: renderer присылает готовые ширины панелей, а позицию чата
   // задаёт прямоугольником в chat:set-bounds (ниже, в ipcMain.on).
   handle('layout:save', async ({ layout }) => {
-    const winW = win && !win.isDestroyed() ? win.getContentSize()[0] : null;
-    store.config.layout = layoutMath.sanitize(layout, winW);
+    const [winW, winH] = win && !win.isDestroyed() ? win.getContentSize() : [null, null];
+    store.config.layout = layoutMath.sanitize(layout, winW, winH);
     await store.saveConfig();
     return store.config.layout;
   });

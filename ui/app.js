@@ -70,9 +70,10 @@
     const projectChanged = (S.project && S.project.id) !== (st.project && st.project.id);
     const chatChanged = S.chatId !== st.chatId;
     Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, pendingProjectId: st.pendingProjectId, lastProjectId: st.lastProjectId });
-    // Сохранённые ширины панелей (config.json) → CSS-переменные и сторона чата.
-    // sanitize защищает и от мусора в конфиге, и от окна, ставшего уже минимумов.
-    S.layout = L.sanitize(st.layout, window.innerWidth);
+    // Сохранённые размеры панелей (config.json) → CSS-переменные, сторона чата,
+    // видимость «Промпта» и свёрнутость нижней панели. sanitize защищает и от мусора
+    // в конфиге, и от окна, ставшего меньше минимумов.
+    S.layout = L.sanitize(st.layout, window.innerWidth, window.innerHeight);
     applyLayout();
     if (projectChanged) {
       P.loaded = false;
@@ -81,18 +82,31 @@
     }
     if (chatChanged) { S.view = null; S.allowIncomplete = false; }
     await loadProposals();
-    if (projectChanged && S.tab === 'prompt' && !S.view) { // дерево и исключения принадлежат проекту
+    if (projectChanged && S.layout.promptOpen) { // дерево и исключения принадлежат проекту
       await loadPrompt();
-      render();
+      renderPromptPanel();
+    } else if (S.layout.promptOpen && !P.loaded && !P.loading) {
+      // панель открыта с прошлого запуска: показать «Загрузка…» и запустить загрузку
+      renderPromptPanel();
     }
   }
 
-  /** CSS-переменные раскладки + класс стороны чата. Единственное место, где они ставятся. */
+  /**
+   * CSS-переменные раскладки + классы состояния. Единственное место, где они ставятся.
+   * Три независимых переключателя (§6 и просьба пользователя):
+   *   .chat-right       — чат справа вместо слева
+   *   .prompt-open      — панель «Промпт» рядом с чатом показана
+   *   .bottom-collapsed — нижняя панель свёрнута до строки вкладок
+   */
   function applyLayout() {
     const vars = L.cssVars(S.layout);
     for (const k of Object.keys(vars)) document.documentElement.style.setProperty(k, vars[k]);
     const ws = $('#workspace');
     if (ws && ws.classList) ws.classList.toggle('chat-right', S.layout.chatSide === 'right');
+    const cc = $('#chat-col');
+    if (cc && cc.classList) cc.classList.toggle('prompt-open', !!S.layout.promptOpen);
+    const app = $('#app');
+    if (app && app.classList) app.classList.toggle('bottom-collapsed', !!S.layout.bottomCollapsed);
   }
 
   async function closeView() {
@@ -104,9 +118,8 @@
   async function loadProposals() {
     S.proposals = (await call('proposals:list', { includeHistorical: S.showHistorical })) || [];
     await loadHistory();
-    // На вкладке «Промпт» форму не пересобираем (пропал бы фокус в текстовом поле) — обновляем только шапку и счётчики
-    if (S.tab === 'prompt' && !S.view) softRender();
-    else render();
+    // Форма «Промпта» живёт в своей панели и здесь не пересобирается — фокус в полях не теряется
+    render();
   }
 
   // ---------- шапка и вкладки ----------
@@ -170,22 +183,84 @@
     await loadState();
   }
 
+  /**
+   * Вкладки нижней панели. «Предложения» и «История» — содержимое #body; «Промпт»
+   * здесь не вкладка, а выключатель панели рядом с чатом (пользователь просил именно
+   * так: промпт и чат нужны по очереди и логически связаны). Справа — свернуть/развернуть.
+   */
   function renderTabs() {
     const pending = S.proposals.filter((p) => p.status === 'pending' && !p.historical).length;
-    // Этап B: «Редактор» и «Файлы» больше не вкладки — дерево живёт в панели файлов,
-    // редактор виден всегда. Вкладки остались у того, что показывает боковая панель.
-    const tabs = [['proposals', 'Предложения'], ['history', 'История'], ['prompt', 'Промпт']];
+    const tabs = [['proposals', 'Предложения'], ['history', 'История']];
     $('#tabs').replaceChildren(
       ...tabs.map(([id, label]) =>
         h('button', { class: 'tab' + (S.tab === id ? ' on' : ''), onclick: () => switchTab(id) },
-          label, id === 'proposals' && pending > 0 && h('span', { class: 'count' }, pending))));
+          label, id === 'proposals' && pending > 0 && h('span', { class: 'count' }, pending))),
+      h('span', { class: 'grow' }),
+      h('button', {
+        class: 'tab' + (S.layout.promptOpen ? ' on' : ''),
+        title: 'Конструктор промптов — панель рядом с чатом DeepSeek',
+        onclick: () => togglePrompt(),
+      }, 'Промпт'),
+      h('button', {
+        class: 'tab', title: S.layout.bottomCollapsed ? 'Развернуть панель' : 'Свернуть панель',
+        onclick: toggleBottom,
+      }, S.layout.bottomCollapsed ? '▴' : '▾'));
   }
+
   async function switchTab(id) {
     S.tab = id;
     S.view = null;
+    // В свёрнутой панели содержимое скрыто: выбор вкладки означает «покажи»
+    if (S.layout.bottomCollapsed) await setBottomCollapsed(false);
     if (id === 'history') await loadHistory();
     render();
   }
+
+  /** Открыть просмотр в нижней панели, даже если она свёрнута. */
+  async function ensureBottomOpen() {
+    if (S.layout.bottomCollapsed) await setBottomCollapsed(false);
+  }
+
+  async function setBottomCollapsed(v) {
+    const next = !!v;
+    if (S.layout.bottomCollapsed === next) return;
+    S.layout = { ...S.layout, bottomCollapsed: next };
+    applyLayout();
+    renderTabs();
+    // Высота рабочей области изменилась → ResizeObserver сам пришлёт новые bounds чата.
+    // Monaco пересчитываем явно: automaticLayout может не успеть за сменой строки Grid.
+    if (window.WhaleEditor.layout) window.WhaleEditor.layout();
+    await call('layout:save', { layout: S.layout });
+  }
+
+  const toggleBottom = () => setBottomCollapsed(!S.layout.bottomCollapsed);
+
+  /**
+   * Панель «Промпт» рядом с чатом. Ширина чат-колонки растёт, поэтому слот чата
+   * сохраняет свою ширину — но в зеркальной раскладке меняется его X, и bounds
+   * отправляются явно (ResizeObserver за позицией не следит, только за размером).
+   */
+  async function setPromptOpen(v) {
+    const next = !!v;
+    if (S.layout.promptOpen === next) return;
+    S.layout = { ...S.layout, promptOpen: next };
+    applyLayout();
+    renderTabs();
+    if (next) {
+      if (!P.loaded && !P.loading) {
+        P.loading = true;
+        loadPrompt().finally(() => { P.loading = false; renderPromptPanel(); });
+      }
+      renderPromptPanel();
+    }
+    requestAnimationFrame(() => {
+      sendChatBounds();
+      if (window.WhaleEditor.layout) window.WhaleEditor.layout();
+    });
+    await call('layout:save', { layout: S.layout });
+  }
+
+  const togglePrompt = () => setPromptOpen(!S.layout.promptOpen);
 
   // ---------- вкладка «Предложения» ----------
   function renderProposals() {
@@ -199,7 +274,7 @@
         S.proposals.length > 0 && h('button', { class: 'btn', title: 'Убрать все карточки из списка (файлы не меняются)', onclick: onDismissAll }, 'Очистить список'),
         h('button', { class: 'btn', title: 'Если код не подхватился автоматически: скопируйте ответ ИИ и нажмите', onclick: onClipboard }, 'Взять из буфера'),
         h('button', { class: 'btn', onclick: async () => { const r = await call('proposals:report'); if (r?.ok) toast('Отчёт скопирован. Вставьте его в чат.', 'ok'); else if (r) toast(r.error, 'err'); } }, 'Скопировать отчёт для чата'),
-        h('button', { class: 'btn', title: 'Составить промпт с правилами формата — вкладка «Промпт»', onclick: () => switchTab('prompt') }, 'Промпт для ИИ')));
+        h('button', { class: 'btn', title: 'Составить промпт с правилами формата — панель «Промпт» рядом с чатом', onclick: () => setPromptOpen(true) }, 'Промпт для ИИ')));
 
     if (!S.chatId) {
       // Про «слева» не пишем: сторону чата пользователь переключает сам (§6)
@@ -260,6 +335,7 @@
   async function openProposal(id) {
     const data = await call('proposal:get', { id });
     if (!data) return;
+    await ensureBottomOpen();
     S.view = { kind: 'proposal', data };
     S.showFull = false;
     S.allowIncomplete = false;
@@ -428,6 +504,7 @@
     const d = await call('manual:view', { projectId: S.project.id, relPath });
     if (!d) return toast('Ручные изменения не найдены', 'err');
     if (d.error) return toast(d.error, 'err'); // например: точка отсчёта — откат, копии для сравнения нет
+    await ensureBottomOpen();
     S.view = { kind: 'manual', data: d }; render();
   }
   /** Что знает модель в текущем чате против того, что сейчас на диске. */
@@ -605,7 +682,8 @@
         onProposal: async (rel) => {
           const info = proposalsByPath().get(rel);
           if (!info) return;
-          S.tab = 'proposals'; // карточка предложения живёт в боковой панели
+          S.tab = 'proposals'; // карточка предложения живёт в нижней панели
+          await ensureBottomOpen();
           await openProposal(info.firstId);
         },
         onReveal: (rel) => { if (S.project) call('file:open', { projectId: S.project.id, rel, mode: 'reveal' }); },
@@ -633,6 +711,7 @@
   async function openHistory(id) {
     const data = await call('history:view', { id });
     if (!data) return;
+    await ensureBottomOpen();
     S.view = { kind: 'history', data };
     render();
   }
@@ -748,7 +827,7 @@
     previewTimer = setTimeout(refreshPreview, 300);
   }
   async function refreshPreview() {
-    if (S.tab !== 'prompt') return;
+    if (!S.layout.promptOpen) return;
     const r = await call('prompt:build', { sections: P.sections, projectId: S.project ? S.project.id : null });
     if (!r) return;
     const c = $('#prompt-count');
@@ -767,12 +846,12 @@
     if (j < 0 || j >= P.sections.length) return;
     [P.sections[i], P.sections[j]] = [P.sections[j], P.sections[i]];
     touch();
-    render();
+    renderPromptPanel();
   }
   function removeSection(i) {
     P.sections.splice(i, 1);
     touch();
-    render();
+    renderPromptPanel();
   }
 
   // --- дерево проекта с переключателями ---
@@ -842,7 +921,7 @@
     const canReset = s.type === 'text' && s.key && P.defaults[s.key];
     const head = h('div', { class: 'sec-head' },
       h('input', { type: 'text', class: 'sec-title', value: s.title, 'aria-label': 'Название поля', oninput: (e) => { s.title = e.target.value; touch(); } }),
-      canReset && h('button', { class: 'btn ghost', title: 'Вернуть текст по умолчанию', onclick: () => { s.text = P.defaults[s.key]; touch(); render(); } }, 'Сбросить'),
+      canReset && h('button', { class: 'btn ghost', title: 'Вернуть текст по умолчанию', onclick: () => { s.text = P.defaults[s.key]; touch(); renderPromptPanel(); } }, 'Сбросить'),
       h('button', { class: 'btn ghost', title: 'Выше', 'aria-label': 'Переместить выше', disabled: i === 0, onclick: () => move(i, -1) }, '↑'),
       h('button', { class: 'btn ghost', title: 'Ниже', 'aria-label': 'Переместить ниже', disabled: i === P.sections.length - 1, onclick: () => move(i, 1) }, '↓'),
       h('button', { class: 'btn ghost danger', title: 'Удалить поле', 'aria-label': 'Удалить поле', onclick: () => removeSection(i) }, '✕'));
@@ -881,13 +960,13 @@
     const loadBtn = h('button', { class: 'btn', disabled: !P.presetId, onclick: async () => {
       if (!confirm('Заменить текущие поля содержимым пресета?')) return;
       const secs = await call('prompt:preset-load', { id: P.presetId });
-      if (secs) { P.sections = secs; render(); toast('Пресет загружен', 'ok'); }
+      if (secs) { P.sections = secs; renderPromptPanel(); toast('Пресет загружен', 'ok'); }
     } }, 'Загрузить');
     const delBtn = h('button', { class: 'btn danger', disabled: !P.presetId, onclick: async () => {
       const pr = P.presets.find((x) => x.id === P.presetId);
       if (!pr || !confirm(`Удалить пресет «${pr.name}»?`)) return;
       const list = await call('prompt:preset-delete', { id: P.presetId });
-      if (list) { P.presets = list; P.presetId = ''; P.presetName = ''; render(); }
+      if (list) { P.presets = list; P.presetId = ''; P.presetName = ''; renderPromptPanel(); }
     } }, 'Удалить');
     const saveBtn = h('button', { class: 'btn', title: 'Если пресет с таким названием есть, он будет перезаписан', onclick: async () => {
       const name = P.presetName.trim();
@@ -901,7 +980,7 @@
       P.presets = list;
       const saved = list.find((x) => x.name.toLowerCase() === name.toLowerCase());
       P.presetId = saved ? saved.id : '';
-      render();
+      renderPromptPanel();
       toast('Пресет сохранён', 'ok');
     } }, 'Сохранить пресет');
 
@@ -914,7 +993,7 @@
     if (!P.loaded) {
       if (!P.loading) {
         P.loading = true;
-        loadPrompt().finally(() => { P.loading = false; if (S.tab === 'prompt' && !S.view) render(); });
+        loadPrompt().finally(() => { P.loading = false; renderPromptPanel(); });
       }
       return h('div', { class: 'empty' }, 'Загрузка…');
     }
@@ -926,13 +1005,13 @@
 
     const hasTree = P.sections.some((s) => s.type === 'tree');
     box.append(h('div', { class: 'toolbar' },
-      h('button', { class: 'btn', onclick: () => { P.sections.push({ id: uid(), key: null, title: 'НОВОЕ ПОЛЕ', text: '', type: 'text' }); touch(); render(); $('#body').scrollTop = 1e6; } }, '＋ Добавить поле'),
-      !hasTree && h('button', { class: 'btn', onclick: () => { P.sections.push({ id: uid(), key: 'tree', title: 'СТРУКТУРА ПРОЕКТА', text: '', type: 'tree' }); touch(); render(); } }, '＋ Структура проекта'),
+      h('button', { class: 'btn', onclick: () => { P.sections.push({ id: uid(), key: null, title: 'НОВОЕ ПОЛЕ', text: '', type: 'text' }); touch(); renderPromptPanel(); const pb = $('#prompt-body'); if (pb) pb.scrollTop = 1e6; } }, '＋ Добавить поле'),
+      !hasTree && h('button', { class: 'btn', onclick: () => { P.sections.push({ id: uid(), key: 'tree', title: 'СТРУКТУРА ПРОЕКТА', text: '', type: 'tree' }); touch(); renderPromptPanel(); } }, '＋ Структура проекта'),
       h('span', { class: 'grow' }),
       h('button', { class: 'btn ghost danger', title: 'Вернуть стандартный набор полей и текстов', onclick: async () => {
         if (!confirm('Сбросить все поля к стандартным? Введённые тексты будут потеряны (пресеты останутся).')) return;
         const secs = await call('prompt:reset');
-        if (secs) { P.sections = secs; render(); }
+        if (secs) { P.sections = secs; renderPromptPanel(); }
       } }, 'Стандартные поля')));
 
     if (P.preview) box.append(h('pre', { id: 'prompt-preview', class: 'code' }, ''));
@@ -947,24 +1026,21 @@
         if (!r) return;
         toast(r.ok ? 'Памятка по формату скопирована. Вставьте её в чат.' : 'Не удалось скопировать памятку.', r.ok ? 'ok' : 'err');
       } }, '⧗ Напомнить формат'),
-      h('button', { class: 'btn', onclick: () => { P.preview = !P.preview; render(); } }, P.preview ? 'Скрыть предпросмотр' : 'Предпросмотр'),
+      h('button', { class: 'btn', onclick: () => { P.preview = !P.preview; renderPromptPanel(); } }, P.preview ? 'Скрыть предпросмотр' : 'Предпросмотр'),
       h('span', { id: 'prompt-count', class: 'path' })));
     setTimeout(refreshPreview, 0);
     return box;
   }
 
   // ---------- отрисовка ----------
-  function softRender() {
-    renderHead();
-    renderTabs();
-    renderFilesHead();
-    pushTreeExtras();
-  }
-
   /**
    * Monaco живёт в #ed-host постоянно и переживает любые перерисовки (ТЗ §7): этот render
-   * касается только боковой панели, заголовков и дерева. Дерево перерисовывает ui/editor.js —
+   * касается только нижней панели, заголовков и дерева. Дерево перерисовывает ui/editor.js —
    * сюда приходят лишь данные для отметок (pushTreeExtras).
+   *
+   * Форму «Промпта» render() НЕ трогает намеренно: она живёт в своей панели, и любая
+   * пересборка по внешним событиям (поток ответов модели) выбивала бы фокус из полей.
+   * Её обновляет только renderPromptPanel() — по явным действиям пользователя.
    */
   function render() {
     renderHead();
@@ -979,23 +1055,34 @@
     else if (S.view && S.view.kind === 'manual') body.append(renderManualView(S.view.data));
     else if (S.view && S.view.kind === 'merge') body.append(renderMergeView(S.view.data));
     else if (S.tab === 'proposals') body.append(renderProposals());
-    else if (S.tab === 'prompt') body.append(renderPrompt());
     else body.append(renderHistory());
     body.scrollTop = scroll;
   }
 
+  /** Содержимое панели «Промпт» (рядом с чатом). Пусто, пока панель закрыта. */
+  function renderPromptPanel() {
+    const root = $('#prompt-body');
+    if (!root) return;
+    if (!S.layout.promptOpen) { root.replaceChildren(); return; }
+    const scroll = root.scrollTop;
+    root.replaceChildren(renderPrompt());
+    root.scrollTop = scroll;
+  }
+
   // ---------- геометрия раскладки (этап B, ТЗ §4, §6, §28) ----------
-  // Раскладку определяет CSS: ширины панелей живут в CSS-переменных, а чат занимает
+  // Раскладку определяет CSS: размеры панелей живут в CSS-переменных, а чат занимает
   // ровно прямоугольник #chat-slot. Renderer наблюдает за слотом через ResizeObserver
   // и отправляет измеренные bounds в main (chat:set-bounds, fire-and-forget), а main
   // просто кладёт туда WebContentsView. Никакого ratio в main больше нет.
 
-  let chatHidden = false; // пока чат скрыт, bounds не шлём: во время перетаскивания геометрия применяется в конце
+  let chatHidden = false; // пока чат скрыт, bounds не шлём: геометрия применяется на отпускании
 
   function setChatVisible(v) {
     chatHidden = !v;
     if (api.send) api.send('chat:set-visible', v);
   }
+
+  const winSize = () => ({ w: window.innerWidth, h: window.innerHeight });
 
   function sendChatBounds() {
     if (!api.send) return;
@@ -1009,39 +1096,45 @@
     if (rect) api.send('chat:set-bounds', rect);
   }
 
-  // Размер слота изменился (разделитель, resize окна, maximize, высота шапки) → новые
-  // bounds. Троттлинг до кадра: ResizeObserver может срабатывать чаще, а setBounds
-  // на каждое движение — дорого на Windows.
+  // Размер слота изменился (разделитель, resize окна, maximize, высота шапки, свёрнутая
+  // нижняя панель) → новые bounds. ResizeObserver сам приходит не чаще кадра, поэтому
+  // отдельный троттлинг не нужен — важно лишь не дёргать setBounds у скрытого чата.
   (function observeChatSlot() {
     const slot = $('#chat-slot');
     if (!slot || typeof ResizeObserver === 'undefined' || !api.send) return;
-    let pending = false;
-    const ro = new ResizeObserver(() => {
-      if (pending || chatHidden) return;
-      pending = true;
-      requestAnimationFrame(() => { pending = false; if (!chatHidden) sendChatBounds(); });
-    });
-    ro.observe(slot);
+    new ResizeObserver(() => { if (!chatHidden) sendChatBounds(); }).observe(slot);
   })();
 
-  /** §6: чат слева/справа — перестановка колонок CSS; main получает только новый rect. */
+  /**
+   * Перенос чата на другую сторону (§6).
+   *
+   * Прежняя реализация прятала чат и отправляла bounds из requestAnimationFrame — на
+   * практике это дало «интерфейс перестроился, а чат остался слева». Здесь три отличия:
+   *   1. bounds измеряются синхронно сразу после смены класса: getBoundingClientRect
+   *      принудительно пересчитывает раскладку, поэтому ждать кадр не нужно и работа
+   *      раскладки не зависит от того, дойдёт ли rAF;
+   *   2. чат не скрывается — прятать нечего, прямоугольник отправляется тем же тактом,
+   *      а скрытие как раз и теряло геометрию нативного слоя;
+   *   3. повторные отправки на следующем кадре и через 150 мс: setBounds идемпотентен,
+   *      зато залипший нативный слой получает своё место даже если первое сообщение
+   *      пришлось на пересборку композитора. Плюс main повторно применяет последний
+   *      rect при показе чата.
+   */
   async function toggleChatSide() {
-    setChatVisible(false); // сначала прячем нативный слой, чтобы он не висел кадр над панелями
     S.layout = { ...S.layout, chatSide: S.layout.chatSide === 'left' ? 'right' : 'left' };
     applyLayout();
     renderHead(); // подпись кнопки
-    requestAnimationFrame(() => {
-      sendChatBounds(); // прямоугольник слота уже на новом месте
-      setChatVisible(true);
-      if (window.WhaleEditor.layout) window.WhaleEditor.layout();
-    });
+    sendChatBounds();
+    requestAnimationFrame(() => sendChatBounds());
+    setTimeout(sendChatBounds, 150);
+    if (window.WhaleEditor.layout) window.WhaleEditor.layout();
     await call('layout:save', { layout: S.layout });
   }
 
   (function initSplitters() {
-    let drag = null; // {which, startX, startLayout}
+    let drag = null; // {which, startX, startY, startLayout}
     let saveTimer = null;
-    // Сохраняем ширины в config.json. После отпускания разделителя — сразу: отложенное
+    // Сохраняем размеры в config.json. После отпускания разделителя — сразу: отложенное
     // сохранение могло бы проиграть гонку внезапно пришедшему chat:changed, который
     // перечитывает сохранённую раскладку и вернул бы панели на старое место.
     const saveLayout = () => { clearTimeout(saveTimer); call('layout:save', { layout: S.layout }); };
@@ -1051,31 +1144,44 @@
       saveTimer = setTimeout(() => call('layout:save', { layout: S.layout }), 400);
     };
 
+    // Чат скрывается на время перетаскивания тех разделителей, которые меняют размер его
+    // слота: WebContentsView проглатывает события мыши, а setBounds на каждый кадр дорог.
+    // 'prompt' не скрывает: слот чата сохраняет ширину, меняется только X колонки.
+    const hidesChat = (which) => which === 'chat' || which === 'bottom';
+
     function setup(which, sel) {
       const el = $(sel);
       if (!el || !el.addEventListener) return;
       el.addEventListener('pointerdown', (e) => {
         if (e.button != null && e.button !== 0) return;
-        drag = { which, startX: e.clientX, startLayout: { ...S.layout } };
+        drag = { which, startX: e.clientX, startY: e.clientY, startLayout: { ...S.layout } };
         // Захват указателя: движение мыши приходит самому разделителю, даже когда
         // курсор ушёл далеко в сторону (проверено практикой прежнего разделителя).
         if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
         el.classList.add('drag');
-        // Только чатовый разделитель: WebContentsView проглатывает события мыши,
-        // поэтому на время перетаскивания чат скрываем, а геометрию применяем на отпускании.
-        if (which === 'chat') setChatVisible(false);
+        if (hidesChat(which)) setChatVisible(false);
         if (e.preventDefault) e.preventDefault();
       });
       el.addEventListener('pointermove', (e) => {
         if (!drag || drag.which !== which) return;
-        S.layout = L.drag(drag.startLayout, which, e.clientX - drag.startX, window.innerWidth);
+        const delta = which === 'bottom' ? e.clientY - drag.startY : e.clientX - drag.startX;
+        S.layout = L.drag(drag.startLayout, which, delta, winSize());
         applyLayout();
+        // «Промпт» двигает слот чата по X в зеркальной раскладке, а ResizeObserver за
+        // позицией не следит — отправляем прямоугольник сами.
+        if (which === 'prompt' && !chatHidden) sendChatBounds();
       });
       const end = () => {
         if (!drag || drag.which !== which) return;
         drag = null;
         el.classList.remove('drag');
-        if (which === 'chat') { sendChatBounds(); setChatVisible(true); }
+        if (hidesChat(which)) {
+          // Сначала bounds, потом показ: main запоминает rect и применяет его повторно
+          // при setVisible(true), поэтому чат появляется уже на новом месте.
+          sendChatBounds();
+          setChatVisible(true);
+          setTimeout(sendChatBounds, 150); // страховка от залипшего нативного слоя
+        }
         // Monaco пересчитывает размеры сам (automaticLayout), но явный layout() после
         // перетаскивания — дешёвая страховка: spike показал, что в Grid он иногда «залипает».
         if (window.WhaleEditor.layout) window.WhaleEditor.layout();
@@ -1086,14 +1192,16 @@
     }
     setup('chat', '#vsplit-chat');
     setup('files', '#vsplit-files');
-    setup('side', '#vsplit-side');
+    setup('prompt', '#vsplit-prompt');
+    setup('bottom', '#hsplit-bottom');
 
-    // Окно стало уже: панели ужимаются в порядке side → files → chat (ui/layout.js),
-    // ширина чата не превышает 60% окна. Сохраняем ширины с задержкой.
+    // Окно изменилось: панели ужимаются в порядке prompt → files → chat, высота нижней
+    // панели ограничена так, чтобы рабочей области оставалось bottomKeep (ui/layout.js).
     if (window.addEventListener) {
       window.addEventListener('resize', () => {
-        const fitted = L.fitToWindow(S.layout, window.innerWidth);
-        if (fitted.chatW !== S.layout.chatW || fitted.filesW !== S.layout.filesW || fitted.sideW !== S.layout.sideW) {
+        const fitted = L.fitToWindow(S.layout, window.innerWidth, window.innerHeight);
+        const changed = ['chatW', 'filesW', 'promptW', 'bottomH'].some((k) => fitted[k] !== S.layout[k]);
+        if (changed) {
           S.layout = fitted;
           applyLayout();
           saveLayoutSoon();
@@ -1102,6 +1210,11 @@
     }
   })();
 
+  // Крестик панели «Промпт» — статичный узел разметки, привязываем один раз
+  (function bindPromptClose() {
+    const btn = $('#prompt-close');
+    if (btn && btn.addEventListener) btn.addEventListener('click', () => setPromptOpen(false));
+  })();
 
   // ---------- события от главного процесса ----------
   api.on('chat:changed', loadState);
@@ -1129,10 +1242,8 @@
       const d = await call('proposal:get', { id: v.data.id });
       if (d && S.view && S.view.data.id === d.id) S.view.data = d;
     }
-    // Форму промпта не пересобираем — иначе теряется фокус в поле ввода. Для неё
-    // обновляем только дерево промпта (выше) и данные панели файлов.
-    if (S.tab === 'prompt' && !S.view) { renderFilesHead(); pushTreeExtras(); }
-    else render();
+    // Форма «Промпта» живёт в своей панели и render() не пересобирается — фокус не теряется
+    render();
   });
   api.on('proposals:changed', async () => {
     if (S.view) { // открытый Diff не перерисовываем, но данные списка, счётчик и дерево обновляем
