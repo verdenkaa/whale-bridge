@@ -17,6 +17,7 @@
   const fmtTime = (ts) => new Date(ts).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
 
   let toastTimer;
+  let panelInit = false; // первый state:get переносит сохранённый «Промпт» в режим панели
   function toast(msg, kind) {
     const t = $('#toast');
     t.textContent = msg;
@@ -58,6 +59,13 @@
     projects: [], chatId: null, project: null, pendingProjectId: null, lastProjectId: null,
     proposals: [], showHistorical: false,
     view: null, // {kind:'proposal'|'history'|'manual'|'merge', data} — показывается вместо редактора
+    // Режим центральной панели: 'editor' | 'prompt' | 'view'. Все три занимают одно место
+    // и взаимоисключающие. Кнопка «Промпт» запоминает, откуда пользователь пришёл
+    // (panelBeforePrompt), и возвращает туда же: редактор или просмотр — явное требование.
+    panel: 'editor',
+    panelBeforePrompt: 'editor',
+    viewPane: 'diff',    // внутри режима view: Monaco-дифф или 'details' — подробный HTML-отчёт
+    diffBase: 'current', // база сравнения предложения: 'current' (диск) | 'ai' (версия модели)
     history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
     context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
@@ -83,6 +91,10 @@
     // уже минимумов, и мигрирует прежние схемы раскладки (см. ui/layout.js).
     S.layout = L.sanitize(st.layout, window.innerWidth);
     applyLayout();
+    if (!panelInit) { // только первый запуск: дальше режимом владеют действия пользователя
+      panelInit = true;
+      if (S.layout.promptOpen) { S.panel = 'prompt'; renderPromptPanel(); }
+    }
     if (projectChanged) {
       P.loaded = false;
       // Открытые файлы не закрываем: у каждого свой projectId, сохранение идёт в свой проект.
@@ -107,6 +119,9 @@
 
   async function closeView() {
     S.view = null;
+    // Панель возвращается туда, где была до просмотра: «Промпт», если он открыт,
+    // иначе редактор. renderEditorArea() делает то же как страховку.
+    if (S.panel === 'view') S.panel = S.layout.promptOpen ? 'prompt' : 'editor';
     if (S.layout.leftTab === 'history') await loadHistory();
     await loadProposals();
   }
@@ -139,15 +154,16 @@
         h('button', { class: 'btn', title: 'Добавить папку проекта', onclick: onAddProject }, 'Добавить папку'),
         S.project && h('button', { class: 'btn ghost danger', title: 'Убрать проект из списка (файлы не удаляются)', onclick: onRemoveProject }, 'Убрать')),
       h('span', { class: 'grow' }),
-      // Переключатель режима панели редактора: «Промпт» заменяет код, повторное нажатие
-      // возвращает редактор. Подпись кнопки — то, что будет показано по клику.
+      // Переключатель режима центральной панели: «Промпт» занимает место редактора.
+      // Подпись кнопки — то, что будет показано по клику: из «Промпта» она возвращает
+      // в прежнее окно (просмотр предложения/истории или редактор).
       h('button', {
-        class: 'btn mode' + (S.layout.promptOpen ? ' on' : ''), type: 'button',
-        title: S.layout.promptOpen
-          ? 'Вернуться к редактору кода'
+        class: 'btn mode' + (S.panel === 'prompt' ? ' on' : ''), type: 'button',
+        title: S.panel === 'prompt'
+          ? (S.view ? 'Вернуться к просмотру' : 'Вернуться к редактору кода')
           : 'Открыть конструктор промптов вместо редактора кода',
-        onclick: () => setPromptOpen(!S.layout.promptOpen),
-      }, S.layout.promptOpen ? 'Редактор кода' : 'Промпт'),
+        onclick: () => (S.panel === 'prompt' ? leavePrompt() : openPrompt()),
+      }, S.panel === 'prompt' ? (S.view ? '← Просмотр' : 'Редактор кода') : 'Промпт'),
       // Памятка о маркерах и формате кода нужна в любой момент, а не только внутри
       // конструктора промптов — поэтому живёт в шапке.
       h('button', {
@@ -221,21 +237,48 @@
   }
 
   /**
-   * Режим панели редактора: код / просмотр / «Промпт» — одно место на троих.
-   * «Промпт» открывается вместо редактора и закрывается крестиком или той же кнопкой
-   * в шапке; просмотр предложения важнее «Промпта», пока открыт.
+   * «Промпт» занимает центральную панель вместо редактора. Кнопка работает как
+   * переключатель и помнит, откуда пользователь пришёл: закрытие возвращает в прежнее
+   * окно — редактор или просмотр предложения (явное требование к раскладке).
+   * Просмотр, открытый поверх «Промпта», сам возвращает в него после «← К списку»:
+   * promptOpen остаётся включённым, пока пользователь не закроет промпт явно (✕ или кнопка).
    */
-  async function setPromptOpen(v) {
-    const next = !!v;
-    if (S.layout.promptOpen === next) return;
-    S.layout = { ...S.layout, promptOpen: next };
-    if (next) {
-      if (!P.loaded && !P.loading) {
-        P.loading = true;
-        loadPrompt().finally(() => { P.loading = false; renderPromptPanel(); });
-      }
-      renderPromptPanel();
+  async function openPrompt() {
+    if (S.panel === 'prompt') return;
+    S.panelBeforePrompt = S.panel === 'view' && S.view ? 'view' : 'editor';
+    S.panel = 'prompt';
+    S.layout = { ...S.layout, promptOpen: true };
+    if (!P.loaded && !P.loading) {
+      P.loading = true;
+      loadPrompt().finally(() => { P.loading = false; renderPromptPanel(); });
     }
+    renderPromptPanel();
+    render();
+    await call('layout:save', { layout: S.layout });
+  }
+
+  /**
+   * Кнопка в шапке — временный уход из «Промпта» в прежнее окно (редактор или просмотр).
+   * Если уходим в просмотр, «Промпт» остаётся открытым под ним: закроете просмотр —
+   * форма вернётся, набранный текст на месте.
+   */
+  async function leavePrompt() {
+    if (S.panel !== 'prompt') return;
+    const back = S.panelBeforePrompt === 'view' && S.view ? 'view' : 'editor';
+    S.panel = back;
+    if (back === 'editor') {
+      S.layout = { ...S.layout, promptOpen: false };
+      render();
+      await call('layout:save', { layout: S.layout });
+      return;
+    }
+    render(); // promptOpen остаётся true — «Промпт» спрятан под просмотром
+  }
+
+  /** Крестик ✕ в панели «Промпт» — закрыть совсем (в отличие от переключателя в шапке). */
+  async function closePrompt() {
+    S.layout = { ...S.layout, promptOpen: false };
+    if (S.panel === 'prompt') S.panel = S.view ? 'view' : 'editor';
     render();
     await call('layout:save', { layout: S.layout });
   }
@@ -312,6 +355,9 @@
     const data = await call('proposal:get', { id });
     if (!data) return;
     S.view = { kind: 'proposal', data };
+    S.viewPane = diffCapable('proposal', data) ? 'diff' : 'details';
+    S.diffBase = 'current';
+    S.panel = 'view';
     S.showFull = false;
     S.allowIncomplete = false;
     render();
@@ -356,7 +402,9 @@
     const title = d.op === 'create' ? `➕ Create ${base(d.relPath)}` : d.op === 'delete' ? `🗑 Delete ${base(d.relPath)}` : d.op === 'move' ? `↪ Move ${base(d.relPath)}` : `🔍 Diff & Update ${base(d.relPath)}`;
     box.append(
       h('div', { class: 'view-head' },
-        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К списку'),
+        h('div', { class: 'actions', style: 'margin:0' },
+          h('button', { class: 'btn ghost', onclick: closeView }, '← К списку'),
+          diffCapable('proposal', d) && h('button', { class: 'btn ghost', title: 'Monaco DiffEditor', onclick: backToDiff }, '◧ Diff')),
         h('div', { class: 'view-title' }, title),
         h('div', { class: 'path' }, d.op === 'move' ? `${d.relPath} → ${d.newRelPath}` : d.relPath),
         h('div', { class: 'card-meta' },
@@ -479,7 +527,10 @@
     const d = await call('manual:view', { projectId: S.project.id, relPath });
     if (!d) return toast('Ручные изменения не найдены', 'err');
     if (d.error) return toast(d.error, 'err'); // например: точка отсчёта — откат, копии для сравнения нет
-    S.view = { kind: 'manual', data: d }; render();
+    S.view = { kind: 'manual', data: d };
+    S.viewPane = diffCapable('manual', d) ? 'diff' : 'details';
+    S.panel = 'view';
+    render();
   }
   /** Что знает модель в текущем чате против того, что сейчас на диске. */
   async function loadContext() {
@@ -539,7 +590,13 @@
     const r = await call('proposal:merge', { id: d.id });
     if (!r) return;
     if (r.ok) { toast('Изменения слиты с ручными правками', 'ok'); S.view = null; await loadProposals(); return; }
-    if (r.code === 'merge-conflict') { S.view = { kind: 'merge', data: { ...d, mergedText: r.mergedText, conflicts: r.conflicts } }; render(); return; }
+    if (r.code === 'merge-conflict') {
+      S.view = { kind: 'merge', data: { ...d, mergedText: r.mergedText, conflicts: r.conflicts } };
+      S.viewPane = 'details'; // разметка конфликтов — текстовый отчёт, не дифф
+      S.panel = 'view';
+      render();
+      return;
+    }
     toast(r.error, 'err');
   }
 
@@ -690,6 +747,8 @@
     const data = await call('history:view', { id });
     if (!data) return;
     S.view = { kind: 'history', data };
+    S.viewPane = diffCapable('history', data) ? 'diff' : 'details';
+    S.panel = 'view';
     render();
   }
 
@@ -719,7 +778,9 @@
   function renderManualView(d) {
     return h('div', {},
       h('div', { class: 'view-head' },
-        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← Закрыть'),
+        h('div', { class: 'actions', style: 'margin:0' },
+          h('button', { class: 'btn ghost', onclick: closeView }, '← Закрыть'),
+          diffCapable('manual', d) && h('button', { class: 'btn ghost', title: 'Monaco DiffEditor', onclick: backToDiff }, '◧ Diff')),
         h('div', { class: 'view-title' }, 'Мои правки'),
         h('div', { class: 'path' }, d.relPath)),
       h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
@@ -757,7 +818,9 @@
   function renderHistoryView(d) {
     return h('div', {},
       h('div', { class: 'view-head' },
-        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К истории'),
+        h('div', { class: 'actions', style: 'margin:0' },
+          h('button', { class: 'btn ghost', onclick: closeView }, '← К истории'),
+          diffCapable('history', d) && h('button', { class: 'btn ghost', title: 'Monaco DiffEditor', onclick: backToDiff }, '◧ Diff')),
         h('div', { class: 'view-title' }, (d.op === 'create' ? '➕ ' : d.op === 'delete' ? '🗑 ' : d.op === 'move' ? '↪ ' : '🔍 ') + base(d.relPath)),
         h('div', { class: 'path' }, d.relPath),
         h('div', { class: 'card-meta' },
@@ -1048,17 +1111,32 @@
    * пустое состояние. Приоритет: просмотр > «Промпт» > код (открытый Diff важнее,
    * иначе действие пользователя выгляделось бы проигнорированным).
    */
-  let panelMode = null; // последний применённый режим панели редактора
+  let panelMode = null;  // последний применённый режим центральной панели
+  let lastDiffSig = null; // сигнатура показанного в Monaco диффа (защита от лишнего setModel)
+  /**
+   * Режимы центральной панели: редактор / просмотр / «Промпт» — взаимоисключающие,
+   * активный хранится в S.panel. Просмотр внутри себя делится на две панели:
+   * Monaco-дифф (#diff-host) и подробный HTML-отчёт (#view-host, viewPane='details').
+   *
+   * Память переходов (явное требование к раскладке): «Промпт» запоминает прежнее окно
+   * и возвращает в него; просмотр, открытый поверх «Промпта», после закрытия возвращает
+   * в «Промпт», если тот не был закрыт явно.
+   */
   function renderEditorArea() {
-    const mode = S.view ? 'view' : (S.layout.promptOpen ? 'prompt' : 'editor');
+    // Самоочистка: просмотр закрыли в другом месте (предложение принято/отклонено,
+    // откат) — панель возвращается к «Промпту», если он открыт, иначе к редактору.
+    if (S.panel === 'view' && !S.view) S.panel = S.layout.promptOpen ? 'prompt' : 'editor';
+    const mode = S.panel;
+    const isDiff = mode === 'view' && S.viewPane === 'diff';
     const show = (sel, on) => {
       const el = $(sel);
       if (el && el.classList) el.classList.toggle('hidden', !on);
     };
     show('#ed-tabs', mode === 'editor');
     show('#ed-status', mode === 'editor');
-    show('#view-host', mode === 'view');
     show('#prompt-host', mode === 'prompt');
+    show('#diff-host', isDiff);
+    show('#view-host', mode === 'view' && !isDiff);
     if (mode !== 'editor') { show('#ed-host', false); show('#ed-empty', false); }
     // Видимость редактора переключает сам ui/editor.js: он знает, показывать #ed-host
     // или пустое состояние, и пересчитывает размеры Monaco (§7). Дёргаем setVisible
@@ -1067,18 +1145,188 @@
     if (window.WhaleEditor) {
       if (mode !== panelMode) window.WhaleEditor.setVisible(mode === 'editor');
       panelMode = mode;
+      if (!isDiff && window.WhaleEditor.hideDiff) { window.WhaleEditor.hideDiff(); lastDiffSig = null; }
     }
 
     const vh = $('#view-host');
-    if (!vh) return;
-    if (mode !== 'view') { vh.replaceChildren(); return; }
-    const scroll = vh.scrollTop;
-    vh.replaceChildren();
-    if (S.view.kind === 'proposal') vh.append(renderProposalView(S.view.data));
-    else if (S.view.kind === 'history') vh.append(renderHistoryView(S.view.data));
-    else if (S.view.kind === 'manual') vh.append(renderManualView(S.view.data));
-    else if (S.view.kind === 'merge') vh.append(renderMergeView(S.view.data));
-    vh.scrollTop = scroll;
+    if (vh) {
+      if (mode === 'view' && !isDiff) {
+        const scroll = vh.scrollTop;
+        vh.replaceChildren();
+        if (S.view.kind === 'proposal') vh.append(renderProposalView(S.view.data));
+        else if (S.view.kind === 'history') vh.append(renderHistoryView(S.view.data));
+        else if (S.view.kind === 'manual') vh.append(renderManualView(S.view.data));
+        else if (S.view.kind === 'merge') vh.append(renderMergeView(S.view.data));
+        vh.scrollTop = scroll;
+      } else {
+        vh.replaceChildren();
+      }
+    }
+    if (isDiff) renderDiffPane();
+  }
+
+  // ---------- просмотр в Monaco DiffEditor (этап C, §19) ----------
+  // Разделение ответственности: ui/editor.js владеет экземпляром DiffEditor и моделями
+  // (showDiff/hideDiff), app.js — данными и действиями (что сравниваем, какие кнопки).
+  // Авторитетный дифф для решений о записи — src/diff.js в main; Monaco здесь только
+  // отрисовка, поэтому сбой DiffEditor деградирует в HTML-отчёт, а не в потерю данных.
+
+  /** Можно ли показать просмотр Monaco-диффом: нужны оба текста целиком. */
+  function diffCapable(kind, d) {
+    if (!d) return false;
+    if (kind === 'proposal') {
+      if (d.op !== 'update' && d.op !== 'create') return false; // delete/move — отчёт с пояснениями
+      if (typeof d.newText !== 'string') return false;          // patch-failed/open — сравнивать нечего
+      return d.op === 'create' || typeof d.baseText === 'string';
+    }
+    if (kind === 'manual') return d.diverged === true && typeof d.baseText === 'string' && typeof d.currentText === 'string';
+    if (kind === 'history') return !d.missingBackup && typeof d.beforeText === 'string' && typeof d.afterText === 'string';
+    return false; // merge — разметка конфликтов, всегда «Подробности»
+  }
+
+  /** Обе стороны диффа + подписи. null — пары нет, просмотр уходит в «Подробности». */
+  function diffPair(kind, d) {
+    const lang = (rel) => (window.WhaleMonaco ? window.WhaleMonaco.languageForPath(rel) : 'plaintext');
+    if (kind === 'proposal') {
+      const useAi = S.diffBase === 'ai' && typeof d.aiBaseText === 'string';
+      const original = d.op === 'create' ? '' : (useAi ? d.aiBaseText : d.baseText);
+      if (typeof original !== 'string' || typeof d.newText !== 'string') return null;
+      return {
+        original, modified: d.newText, language: lang(d.relPath),
+        leftLabel: d.op === 'create' ? 'Файла ещё нет' : (useAi ? 'Версия, которую видела модель' : 'Текущий файл на диске'),
+        rightLabel: 'Предложение модели',
+      };
+    }
+    if (kind === 'manual') {
+      if (typeof d.baseText !== 'string' || typeof d.currentText !== 'string') return null;
+      return {
+        original: d.baseText, modified: d.currentText, language: lang(d.relPath),
+        leftLabel: d.base === 'backup' ? 'Версия после последней операции (приближение)' : 'Версия, которую знает модель',
+        rightLabel: 'Текущий файл на диске',
+      };
+    }
+    if (kind === 'history') {
+      if (typeof d.beforeText !== 'string' || typeof d.afterText !== 'string') return null;
+      return {
+        original: d.beforeText, modified: d.afterText, language: lang(d.relPath),
+        leftLabel: 'До операции', rightLabel: 'После операции',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Нарисовать панель диффа и показать тексты в Monaco. Сигнатура содержимого
+   * защищает от лишней перестановки моделей: render() вызывается на каждое внешнее
+   * событие, а setModel сбрасывает прокрутку диффа.
+   */
+  async function renderDiffPane() {
+    if (!S.view) return;
+    const kind = S.view.kind;
+    const d = S.view.data;
+    const pair = diffPair(kind, d);
+    renderDiffBar(kind, d, pair);
+    if (!pair) { S.viewPane = 'details'; render(); return; }
+    const sig = [kind, d.id || d.relPath, S.diffBase,
+      pair.original.length, pair.modified.length,
+      pair.original.slice(0, 64), pair.modified.slice(0, 64),
+      pair.original.slice(-64), pair.modified.slice(-64)].join('::');
+    if (sig === lastDiffSig) return;
+    lastDiffSig = sig;
+    const ok = window.WhaleEditor && window.WhaleEditor.showDiff ? await window.WhaleEditor.showDiff(pair) : false;
+    if (!ok && S.view && S.viewPane === 'diff') {
+      // Monaco не поднялся или разметка старая — показываем подробный отчёт с текстовым диффом
+      lastDiffSig = null;
+      S.viewPane = 'details';
+      render();
+    }
+  }
+
+  /** Шапка диффа: заголовок, бейджи, легенда, переключатель базы и действия. */
+  function renderDiffBar(kind, d, pair) {
+    const bar = $('#diff-bar');
+    if (!bar) return;
+    const toDetails = () => { S.viewPane = 'details'; lastDiffSig = null; render(); };
+    const icon = kind === 'proposal' ? (d.op === 'create' ? '➕' : '🔍') : kind === 'manual' ? '✎' : '🕘';
+    const title = kind === 'proposal'
+      ? (d.op === 'create' ? 'Создание файла' : 'Предложение модели')
+      : kind === 'manual' ? 'Мои правки' : 'Операция истории';
+
+    const head = h('div', { class: 'diff-bar-row' },
+      h('div', { class: 'diff-title' }, `${icon} ${title}`, h('span', { class: 'path', title: d.relPath || '' }, d.relPath || '')),
+      d.stats && h('span', { class: 'badge add' }, '+' + (d.stats.added ?? 0)),
+      d.stats && h('span', { class: 'badge del' }, '−' + (d.stats.removed ?? 0)),
+      kind === 'proposal' && h('span', { class: 'badge' + (STATE_BAD.has(d.state) ? ' bad' : '') }, STATE_LABEL[d.state] || d.state),
+      kind === 'proposal' && d.mode === 'patch' && d.patchBlocks > 0 && h('span', { class: 'badge' }, `частичная правка · ${d.patchBlocks}`),
+      kind === 'proposal' && d.warnings > 0 && h('span', { class: 'badge warn' }, 'возможно неполный код'),
+      kind === 'proposal' && d.manualChanged && h('span', { class: 'badge warn', title: 'Файл на диске изменился после того, как модель его видела' }, 'изменён вручную'),
+      kind === 'manual' && d.base === 'backup' && h('span', { class: 'badge warn', title: d.notice || '' }, 'база — приближение'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn ghost tiny', title: 'Закрыть просмотр', onclick: closeView }, '✕'));
+
+    const legend = pair && h('div', { class: 'diff-bar-row' },
+      h('div', { class: 'diff-legend' },
+        h('span', { class: 'side' }, h('span', { class: 'swatch old' }), pair.leftLabel),
+        h('span', { class: 'side' }, h('span', { class: 'swatch new' }), pair.rightLabel),
+        h('span', { class: 'grow' }),
+        kind === 'proposal' && d.op === 'update' && (typeof d.aiBaseText === 'string'
+          ? h('button', {
+            class: 'btn tiny', title: 'Что считать левой стороной сравнения',
+            onclick: () => { S.diffBase = S.diffBase === 'current' ? 'ai' : 'current'; lastDiffSig = null; render(); },
+          }, S.diffBase === 'current' ? 'База: файл на диске' : 'База: версия модели')
+          : h('span', {
+            class: 'path',
+            title: 'Снимок содержимого не сохранён: версия появилась до журнала снимков или больше 1 МБ',
+          }, 'точная версия модели не сохранена'))));
+
+    const actions = h('div', { class: 'diff-bar-row' });
+    if (kind === 'proposal') {
+      // как в подробном отчёте: применять можно только валидное update/create предложение
+      const canApply = d.status === 'pending' && (d.state === 'update' || d.state === 'create');
+      const risky = (d.incomplete && d.incomplete.length > 0) || !!d.shrink;
+      if (canApply) {
+        actions.append(h('button', {
+          class: 'btn primary',
+          title: risky && !S.allowIncomplete ? 'Ответ похож на неполный — применение нужно подтвердить в «Подробностях»' : null,
+          onclick: () => {
+            // Неполный ответ блокируется до явного подтверждения (§29 этап C): чекбокс
+            // «я проверил» живёт в подробном отчёте, поэтому уводим туда.
+            if (risky && !S.allowIncomplete) { toDetails(); return; }
+            onApply(d);
+          },
+        }, d.needsDirs ? 'Создать папки и файл' : 'Принять изменения'));
+        if (d.manualChanged) actions.append(h('button', { class: 'btn', onclick: () => onMerge(d) }, 'Применить и слить мои правки'));
+        actions.append(h('button', { class: 'btn', title: 'Закрыть предложение и убрать из списка', onclick: () => onReject(d) }, 'Отклонить'));
+      }
+      if (d.status === 'applied' && d.historyId) {
+        actions.append(h('button', { class: 'btn', onclick: () => onRevert(d.historyId) }, 'Восстановить предыдущую версию'));
+      }
+    } else if (kind === 'manual') {
+      actions.append(
+        h('button', { class: 'btn', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать изменения для модели'),
+        d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
+        S.project && h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл'));
+    } else if (kind === 'history') {
+      if (d.status === 'applied' && d.revertible !== false && !(d.pruned && d.op !== 'create')) {
+        actions.append(h('button', { class: 'btn', onclick: () => onRevert(d.id) }, 'Восстановить предыдущую версию'));
+      }
+    }
+    actions.append(h('span', { class: 'grow' }),
+      h('button', {
+        class: 'btn', title: 'Подробный отчёт: предупреждения, блоки правки, полный текст',
+        onclick: toDetails,
+      }, 'Подробности'));
+
+    // filter(Boolean): legend может отсутствовать (нет пары текстов) — реальный DOM
+    // превратил бы null в текстовый узел «null»
+    bar.replaceChildren(...[head, legend, actions].filter(Boolean));
+  }
+
+  /** Из подробного отчёта — обратно в Monaco-дифф (кнопка «◧ Diff»). */
+  function backToDiff() {
+    S.viewPane = 'diff';
+    lastDiffSig = null;
+    render();
   }
 
   /** Содержимое панели «Промпт». Пусто, пока панель закрыта. */
@@ -1199,10 +1447,11 @@
     }
   })();
 
-  // Крестик панели «Промпт» — статичный узел разметки, привязываем один раз
+  // Крестик панели «Промпт» — статичный узел разметки, привязываем один раз.
+  // В отличие от переключателя в шапке, крестик закрывает «Промпт» совсем.
   (function bindPromptClose() {
     const btn = $('#prompt-close');
-    if (btn && btn.addEventListener) btn.addEventListener('click', () => setPromptOpen(false));
+    if (btn && btn.addEventListener) btn.addEventListener('click', () => closePrompt());
   })();
 
   // ---------- события от главного процесса ----------
@@ -1251,6 +1500,9 @@
     const edEls = {
       tree: $('#ed-tree'), tabs: $('#ed-tabs'), host: $('#ed-host'),
       empty: $('#ed-empty'), status: $('#ed-status'), overlay: $('#ed-overlay'),
+      // узлы Monaco DiffEditor (этап C): необязательные — без них showDiff вернёт false
+      // и просмотр деградирует в подробный отчёт с текстовым диффом
+      diffBar: $('#diff-bar'), diffEditor: $('#diff-editor'),
     };
     for (const k of Object.keys(edEls)) if (!edEls[k]) return;
     window.WhaleEditor.mount(edEls, {
@@ -1260,8 +1512,9 @@
       // Пользователь открыл файл (клик в дереве, Ctrl+P) — панель редактора должна
       // показать код, даже если сейчас открыт «Промпт» или просмотр предложения.
       onWantEditorMode: () => {
-        if (!S.view && !S.layout.promptOpen) return;
+        if (S.panel === 'editor' && !S.view) return;
         S.view = null;
+        S.panel = 'editor';
         if (S.layout.promptOpen) {
           S.layout = { ...S.layout, promptOpen: false };
           call('layout:save', { layout: S.layout });

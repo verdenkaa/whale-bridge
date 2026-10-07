@@ -146,6 +146,13 @@ test('patch: полный цикл через предложение — Diff, �
   const written = (await fs.readFile(file, 'utf8')).split('\r\n');
   assert.equal(written.length, 301); // 300 строк + пустой хвост
   assert.equal(written[150], 'var v150 = 999');
+
+  // операция истории отдаёт оба текста целиком — их показывает Monaco DiffEditor (этап C).
+  // CRLF нормализуется так же, как в построчном Diff: иначе стороны не совпали бы.
+  const hv = await pm.historyView(res.historyId);
+  assert.equal(hv.missingBackup, undefined);
+  assert.equal(hv.beforeText.split('\r\n')[150], 'var v150 = 150');
+  assert.equal(hv.afterText.split('\r\n')[150], 'var v150 = 999');
   assert.equal((await pm.historyRevert(res.historyId, false)).ok, true);
   assert.equal((await fs.readFile(file, 'utf8')).split('\r\n')[150], 'var v150 = 150');
 });

@@ -252,8 +252,21 @@ button.ed-mark.ctx:hover { background: rgba(217, 164, 0, .18); }
 .ed-tab-close:hover { background: #3a3a3a; color: var(--text); }
 
 .ed-host { flex: 1; min-height: 0; min-width: 0; }
-/* Ячейка Monaco DiffEditor (этап C): proposals, «мои правки», конфликт сохранения */
-.diff-host { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+/* Ячейка Monaco DiffEditor (этап C): предложение модели, «мои правки», операция истории.
+   Занимает место редактора — они взаимоисключающие. #diff-bar (заголовок, бейджи,
+   действия) рисует ui/app.js, в #diff-editor живёт постоянный экземпляр DiffEditor. */
+.diff-host { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+.diff-bar { flex: none; display: grid; gap: 7px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.diff-bar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.diff-bar-row .grow { flex: 1; min-width: 0; }
+.diff-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; min-width: 0; }
+.diff-title .path { font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+.diff-legend { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; color: var(--dim); font-size: 11.5px; }
+.diff-legend .side { display: inline-flex; align-items: center; gap: 5px; }
+.diff-legend .swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.diff-legend .swatch.old { background: var(--del-bg); border: 1px solid var(--del); }
+.diff-legend .swatch.new { background: var(--add-bg); border: 1px solid var(--add); }
+.diff-editor { flex: 1 1 auto; min-height: 0; min-width: 0; }
 .ed-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); }
 .ed-status { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 10px;
   border-top: 1px solid var(--line); background: var(--panel); font-size: 11.5px; color: var(--dim); }

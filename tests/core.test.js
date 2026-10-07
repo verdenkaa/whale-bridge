@@ -139,6 +139,9 @@ test('apply: обновление с бэкапом, сохранением CRLF
   const [item] = await pm.list(chat, true);
   assert.equal(item.state, 'update');
   const v = await pm.view(item.id);
+  // обе стороны текста для Monaco DiffEditor (этап C): что на диске и что предлагает модель
+  assert.equal(v.baseText, 'extends Node\r\n\r\nfunc a():\r\n\tpass\r\n');
+  assert.equal(v.newText, 'extends Node\n\nfunc a():\n\tprint(1)\n');
   const res = await pm.apply(item.id, { baseHash: v.baseHash, contentHash: v.contentHash });
   assert.equal(res.ok, true, res.error);
 
@@ -187,6 +190,8 @@ test('create: новый файл, защита от перезаписи, па�
   assert.equal(item.state, 'create');
   let v = await pm.view(item.id);
   assert.equal(v.needsDirs, true);
+  // у нового файла нет стороны «на диске» — интерфейс рисует дифф от пустого текста
+  assert.equal(v.baseText, null);
   const noDir = await pm.apply(item.id, { baseHash: v.baseHash, contentHash: v.contentHash });
   assert.equal(noDir.code, 'no-dir');
   const ok = await pm.apply(item.id, { baseHash: v.baseHash, contentHash: v.contentHash, createDirs: true });

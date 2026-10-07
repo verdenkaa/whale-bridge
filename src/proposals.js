@@ -451,12 +451,30 @@ class ProposalManager {
     const ev = await this.evaluate(p);
     const rows = ev.ops ? toRows(ev.ops, 3) : [];
     delete ev.ops;
+    // Тексты для Monaco DiffEditor (этап C). Читаются только здесь, а не в evaluate:
+    // список предложений ходит в IPC часто, а полное содержимое файлов нужно лишь
+    // открытому просмотру. baseText — что на диске сейчас; aiBaseText — снимок версии,
+    // которую видела модель (null, если снимка нет: интерфейс обязан это оговорить).
+    let baseText = null;
+    if (ev.projectId && ev.op === 'update' && ev.state === 'update') {
+      const project = this.store.getProject(ev.projectId);
+      if (project) {
+        const r = await resolveInProject(project.path, ev.relPath);
+        if (r.ok && r.exists && r.isFile) {
+          const cur = await fileops.readTextFile(r.abs);
+          if (!cur.error) baseText = cur.text;
+        }
+      }
+    }
+    const aiBaseText = p.aiBaseHash ? await this.store.readContextSnapshot(p.aiBaseHash) : null;
     return {
       ...ev,
       rows: rows.slice(0, MAX_ROWS),
       truncated: rows.length > MAX_ROWS,
       newText: ev.newText ?? null, // итоговый файл (для патча — после применения блоков)
       rawText: p.content, // как прислал ИИ
+      baseText,
+      aiBaseText: aiBaseText ?? null,
     };
   }
 
@@ -587,7 +605,8 @@ class ProposalManager {
     const after = await read('.after');
     if (before == null || after == null) return { ...h, rows: [], stats: { added: 0, removed: 0 }, missingBackup: true };
     const ops = diffLines(before, after);
-    return { ...h, rows: toRows(ops, 3).slice(0, MAX_ROWS), stats: diffStats(ops) };
+    // beforeText/afterText — обе стороны для Monaco DiffEditor (этап C)
+    return { ...h, rows: toRows(ops, 3).slice(0, MAX_ROWS), stats: diffStats(ops), beforeText: before, afterText: after };
   }
 
 
@@ -659,6 +678,8 @@ class ProposalManager {
       return {
         relPath, diverged: true, knownVersion, base: 'context',
         currentHash: current.hash, currentText: current.text,
+        // baseText — вторая сторона для Monaco DiffEditor (этап C): точная версия модели
+        baseText: knownText,
         stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS,
       };
     }
@@ -675,6 +696,7 @@ class ProposalManager {
         return {
           relPath, diverged: true, knownVersion, base: 'backup', historyId: manual.history.id,
           afterHash: manual.history.afterHash, currentHash: current.hash, currentText: current.text,
+          baseText, // приближение: версия после последней операции Whale Bridge, не обязательно та, что видела модель
           stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS,
           notice: 'Точной версии, которую видела модель, нет — показано сравнение с последней операцией Whale Bridge.',
         };

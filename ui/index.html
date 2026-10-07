@@ -56,8 +56,14 @@
           <!-- Monaco создаётся один раз и живёт в #ed-host постоянно (§7): режимы панели
                переключаются классом hidden, DOM-контейнер редактора не пересоздаётся. -->
           <div id="ed-host" class="ed-host hidden"></div>
-          <!-- ячейка Monaco DiffEditor (этап C) -->
-          <div id="diff-host" class="diff-host hidden"></div>
+          <!-- ячейка Monaco DiffEditor (этап C): просмотр предложения / «моих правок» /
+               операции истории занимает место редактора. #diff-bar рисует ui/app.js
+               (заголовок, бейджи, действия), в #diff-editor живёт экземпляр DiffEditor
+               из ui/editor.js — он создаётся один раз и переживает перерисовки (§7). -->
+          <div id="diff-host" class="diff-host hidden">
+            <div id="diff-bar" class="diff-bar"></div>
+            <div id="diff-editor" class="diff-editor"></div>
+          </div>
           <!-- просмотр предложения / операции истории / «моих правок» / конфликта merge -->
           <div id="view-host" class="view-host hidden"></div>
           <!-- конструктор промптов: открывается вместо редактора кнопкой в topbar -->

@@ -54,7 +54,7 @@ test('UI: левая панель, режимы редактора, геомет
   const roots = {};
   for (const id of ['head', 'left-tabs', 'files-pane', 'body', 'toast', 'workspace', 'chat-slot',
     'vsplit-left', 'vsplit-chat', 'files-head', 'files-banner', 'prompt-close',
-    'view-host', 'prompt-host', 'prompt-body',
+    'view-host', 'diff-host', 'diff-bar', 'diff-editor', 'prompt-host', 'prompt-body',
     'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
@@ -81,10 +81,16 @@ test('UI: левая панель, режимы редактора, геомет
     'state:get': { projects: [PROJECT], chatId: CHAT, project: PROJECT, lastProjectId: 'p1', layout: { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' } },
     'proposals:list': proposals,
     'proposal:get': {
-      id: 'a', status: 'pending', state: 'update', op: 'update', relPath: 'big.gd', mode: 'patch', projectId: 'p1', incomplete: [], shrink: null, suggestions: [],
+      id: 'a', status: 'pending', state: 'update', op: 'update', relPath: 'big.gd', mode: 'patch', patchBlocks: 2, projectId: 'p1', incomplete: [], shrink: null, suggestions: [],
       stats: { added: 1, removed: 1 }, baseHash: 'h', contentHash: 'c', rows: [{ type: 'del', oldNo: 1, text: 'a' }, { type: 'add', newNo: 1, text: 'b' }],
       patchResults: [{ status: 'ok', method: 'block', line: 5, endLine: 8 }, { status: 'ok', method: 'trim', line: 9 }, { status: 'ok', method: 'exact', line: 1, wholeFile: true }], newText: 'b\n', rawText: 'raw',
       pathFixed: { from: 'proj/big.gd', to: 'big.gd' },
+      baseText: 'a\n', aiBaseText: 'a0\n',
+    },
+    'history:view': {
+      id: 'h2', ts: Date.now(), op: 'update', relPath: 'a.gd', status: 'applied',
+      stats: { added: 1, removed: 1 }, beforeText: 'a\n', afterText: 'b\n',
+      rows: [{ type: 'del', oldNo: 1, text: 'a' }, { type: 'add', newNo: 1, text: 'b' }],
     },
     'history:list': [
       { id: 'h1', ts: Date.now(), op: 'update', relPath: 'a.gd', status: 'applied', pruned: true },
@@ -112,6 +118,7 @@ test('UI: левая панель, режимы редактора, геомет
       relPath: 'a.gd', historyId: 'h9', diverged: true, currentHash: 'c', afterHash: 'a',
       knownVersion: { hash: 'a', source: 'applied', ts: Date.now(), label: 'модель сама предложила это содержимое' },
       stats: { added: 1, removed: 1 }, truncated: false, currentText: 'b\n',
+      baseText: 'a\n', base: 'context',
       rows: [{ type: 'del', oldNo: 1, text: 'a' }, { type: 'add', newNo: 1, text: 'b' }],
     },
     'fs:list': { items: [{ name: 'a.gd', rel: 'a.gd', isDir: false }, { name: 'n.gd', rel: 'n.gd', isDir: false }] },
@@ -134,7 +141,7 @@ test('UI: левая панель, режимы редактора, геомет
   global.requestAnimationFrame = (f) => setTimeout(f, 0);
 
   // заглушка редактора: smoke-тест проверяет СВЯЗИ в app.js, а не внутренности editor.js
-  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null, layoutCalls: 0 };
+  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null, layoutCalls: 0, diffs: [], hideDiff: 0, diffOk: true };
   global.window.WhaleEditor = {
     mount: (els, hooks) => { ed.mount++; ed.els = els; ed.hooks = hooks; },
     setProject: (p) => ed.setProject.push(p ? p.id : null),
@@ -143,6 +150,8 @@ test('UI: левая панель, режимы редактора, геомет
     refreshTree: async () => { ed.refreshTree++; },
     setTreeExtras: (x) => { ed.extras = x; },
     layout: () => { ed.layoutCalls++; },
+    showDiff: async (pair) => { ed.diffs.push(pair); return ed.diffOk; },
+    hideDiff: () => { ed.hideDiff++; },
     hasUnsaved: () => false,
     dirtyPaths: () => [],
   };
@@ -200,27 +209,49 @@ test('UI: левая панель, режимы редактора, геомет
   assert.equal(ed.extras.proposals.get('big.gd').firstId, 'a');
   assert.equal(ed.extras.proposals.get('n.gd').count, 1);
 
-  // клик по ◆ в дереве открывает сравнение «мои правки» ВМЕСТО редактора
+  // клик по ◆ в дереве открывает «мои правки» в Monaco DiffEditor ВМЕСТО редактора
   await ed.extras.callbacks.onManual('a.gd');
-  await tick(30);
+  await tick(40);
   assert.ok(log.some(([ch, a]) => ch === 'manual:view' && a.relPath === 'a.gd'));
-  assert.equal(hidden(roots['view-host']), false, 'просмотр занял место редактора');
-  assert.match(text(roots['view-host']), /Мои правки/);
-  assert.match(text(roots['view-host']), /Модель в чате не знает об этом изменении/);
-  await click(btn(roots['view-host'], '✓ Модель проинформирована'));
+  assert.equal(hidden(roots['diff-host']), false, 'дифф занял место редактора');
+  assert.equal(hidden(roots['view-host']), true, 'подробный отчёт скрыт');
+  assert.equal(hidden(roots['ed-tabs']), true, 'вкладки редактора скрыты');
+  const manualDiff = ed.diffs[ed.diffs.length - 1];
+  assert.deepEqual({ o: manualDiff.original, m: manualDiff.modified }, { o: 'a\n', m: 'b\n' });
+  assert.match(text(roots['diff-bar']), /Мои правки/);
+  assert.match(text(roots['diff-bar']), /Версия, которую знает модель/);
+  // действия продублированы в шапке диффа — идти в отчёт за ними не нужно
+  await click(btn(roots['diff-bar'], '✓ Модель проинформирована'));
   assert.ok(log.some(([ch, a]) => ch === 'context:ack' && a.relPath === 'a.gd'));
+  await tick(40);
+  // «Подробности» переключают на HTML-отчёт, «◧ Diff» возвращает в Monaco
+  await click(btn(roots['diff-bar'], 'Подробности'));
   await tick(30);
+  assert.equal(hidden(roots['view-host']), false);
+  assert.match(text(roots['view-host']), /Модель в чате не знает об этом изменении/);
   await click(btn(roots['view-host'], '← Закрыть'));
   await tick(40);
-  assert.equal(hidden(roots['view-host']), true, 'просмотр закрыт — снова редактор');
+  assert.equal(hidden(roots['view-host']), true, 'просмотр закрыт');
+  assert.equal(hidden(roots['ed-tabs']), false, 'редактор вернулся');
 
-  // клик по синей точке открывает карточку предложения и переключает левую панель
+  // клик по синей точке открывает предложение в Monaco-диффе и переключает левую панель
+  const diffsBefore = ed.diffs.length;
   await ed.extras.callbacks.onProposal('big.gd');
   await tick(40);
-  assert.match(text(roots['view-host']), /Частичная правка: блоков 3/);
+  assert.equal(hidden(roots['diff-host']), false);
+  const propDiff = ed.diffs[ed.diffs.length - 1];
+  assert.deepEqual({ o: propDiff.original, m: propDiff.modified }, { o: 'a\n', m: 'b\n' });
+  assert.equal(propDiff.leftLabel, 'Текущий файл на диске');
   assert.equal(log.filter(([ch]) => ch === 'layout:save').pop()[1].layout.leftTab, 'proposals');
-  await click(btn(roots['view-host'], '← К списку'));
+  // база сравнения переключается на версию, которую видела модель
+  await click(btn(roots['diff-bar'], 'База: файл на диске'));
   await tick(40);
+  assert.equal(ed.diffs.length, diffsBefore + 2, 'дифф перерисован');
+  assert.equal(ed.diffs[ed.diffs.length - 1].original, 'a0\n');
+  assert.equal(ed.diffs[ed.diffs.length - 1].leftLabel, 'Версия, которую видела модель');
+  await click(btn(roots['diff-bar'], '← К списку') || btn(roots['diff-bar'], '✕'));
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), true);
 
   // откат из дерева — тот же обработчик, что был во вкладке «Файлы»
   await ed.extras.callbacks.onUndo({ id: 'h2', op: 'update', ts: Date.now() });
@@ -241,15 +272,56 @@ test('UI: левая панель, режимы редактора, геомет
   // дубля кнопки открытия промпта в списке нет — переключатель живёт в шапке
   assert.ok(!btn(roots.body, 'Промпт для ИИ'), 'кнопка «Промпт для ИИ» удалена (дубль)');
 
-  // открыть патч-предложение — просмотр вместо редактора
+  // открыть патч-предложение из списка — Monaco-дифф вместо редактора
   await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), false);
+  assert.match(text(roots['diff-bar']), /Предложение модели/);
+  assert.match(text(roots['diff-bar']), /частичная правка · 2/);
+  await click(btn(roots['diff-bar'], 'Подробности'));
+  await tick(30);
   assert.equal(hidden(roots['view-host']), false);
   assert.match(text(roots['view-host']), /Частичная правка: блоков 3/);
   assert.match(text(roots['view-host']), /функция\/класс заменены целиком, строки 5–8/);
   assert.match(text(roots['view-host']), /Путь исправлен автоматически: «proj\/big\.gd» → «big\.gd»/);
   assert.match(text(roots['view-host']), /Просмотреть итоговый файл/);
-  await click(btn(roots['view-host'], '← К списку'));
+  await click(btn(roots['view-host'], '◧ Diff'));
   await tick(30);
+  assert.equal(hidden(roots['diff-host']), false, 'из отчёта можно вернуться в Monaco-дифф');
+  await click(btn(roots['diff-bar'], '✕'));
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), true);
+  assert.ok(ed.hideDiff > 0, 'модели диффа освобождены при закрытии');
+
+  // операция истории — тоже в Monaco-диффе
+  await click(leftTab('История'));
+  await tick(30);
+  await click(btn(roots.body, 'Diff'));
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), false);
+  const histDiff = ed.diffs[ed.diffs.length - 1];
+  assert.deepEqual({ o: histDiff.original, m: histDiff.modified }, { o: 'a\n', m: 'b\n' });
+  assert.equal(histDiff.leftLabel, 'До операции');
+  await click(btn(roots['diff-bar'], '✕'));
+  await tick(40);
+
+  // Monaco недоступен — просмотр деградирует в подробный отчёт, а не в пустоту
+  await click(leftTab('Предложения'));
+  await tick(30);
+  ed.diffOk = false;
+  await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(40);
+  assert.equal(hidden(roots['view-host']), false, 'фолбэк на HTML-отчёт');
+  assert.equal(hidden(roots['diff-host']), true);
+  // кнопка «◧ Diff» остаётся (тексты на месте), но повторная попытка снова деградирует
+  await click(btn(roots['view-host'], '◧ Diff'));
+  await tick(40);
+  assert.equal(hidden(roots['view-host']), false, 'без Monaco просмотр остаётся отчётом');
+  ed.diffOk = true;
+  await click(btn(roots['view-host'], '← К списку'));
+  await tick(40);
+  await click(leftTab('Файлы'));
+  await tick(20);
 
   // крестик карточки
   await click(findAll(roots.body, (e) => e.className === 'dismiss')[0]);
@@ -272,7 +344,7 @@ test('UI: левая панель, режимы редактора, геомет
   assert.equal(hidden(roots['files-pane']), false);
   assert.equal(hidden(roots.body), true);
 
-  // ---------- «Промпт» вместо редактора ----------
+  // ---------- «Промпт» вместо редактора, с возвратом в прежнее окно ----------
   const promptBtn = btn(roots.head, 'Промпт');
   assert.ok(promptBtn, 'кнопка «Промпт» в шапке');
   await click(promptBtn);
@@ -283,6 +355,26 @@ test('UI: левая панель, режимы редактора, геомет
   assert.ok(btn(roots.head, 'Редактор кода'), 'кнопка сменила подпись');
   let save = log.filter(([ch]) => ch === 'layout:save').pop();
   assert.equal(save[1].layout.promptOpen, true);
+
+  // открытый поверх «Промпта» просмотр по кнопке возвращает в «Промпт»
+  await click(leftTab('Предложения'));
+  await tick(30);
+  await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), false, 'просмотр важнее промпта, пока открыт');
+  assert.ok(btn(roots.head, 'Промпт'), 'кнопка снова предлагает «Промпт»');
+  await click(btn(roots.head, 'Промпт'));
+  await tick(60);
+  assert.equal(hidden(roots['prompt-host']), false);
+  assert.ok(btn(roots.head, '← Просмотр'), 'подпись обещает возврат к просмотру');
+  await click(btn(roots.head, '← Просмотр'));
+  await tick(40);
+  assert.equal(hidden(roots['diff-host']), false, 'вернулись в тот же просмотр');
+  await click(btn(roots['diff-bar'], '✕'));
+  await tick(40);
+  assert.equal(hidden(roots['prompt-host']), false, 'закрыли просмотр — под ним снова «Промпт»');
+  await click(leftTab('Файлы'));
+  await tick(20);
 
   const pb = roots['prompt-body'];
   const titles = findAll(pb, (e) => e.className === 'sec-title').map((e) => e.attrs.value);
@@ -327,7 +419,17 @@ test('UI: левая панель, режимы редактора, геомет
   // «Напомнить формат» переехал в шапку — в форме его больше нет
   assert.ok(!btn(pb, '⧗ Напомнить формат'), 'памятка формата больше не в форме промпта');
 
+  // крестик ✕ закрывает «Промпт» полностью (в отличие от переключателя в шапке)
+  await click(roots['prompt-close']);
+  await tick(40);
+  assert.equal(hidden(roots['prompt-host']), true);
+  assert.equal(hidden(roots['ed-tabs']), false, 'редактор вернулся');
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.promptOpen, false);
+
   // «files:changed» не пересобирает форму (фокус в поле не теряется)
+  await click(btn(roots.head, 'Промпт'));
+  await tick(60);
   const areaBefore = findAll(pb, (e) => e.tag === 'textarea')[0];
   const refreshBefore = ed.refreshDisk;
   const treeBefore = ed.refreshTree;
@@ -337,12 +439,14 @@ test('UI: левая панель, режимы редактора, геомет
   assert.ok(ed.refreshTree > treeBefore, 'files:changed перечитал дерево');
   assert.equal(findAll(pb, (e) => e.tag === 'textarea')[0], areaBefore);
 
-  // открытие файла из дерева возвращает панель в режим редактора
+  // открытие файла из дерева возвращает панель в режим редактора и закрывает «Промпт»
   await ed.hooks.onWantEditorMode();
   await tick(30);
   assert.equal(hidden(roots['prompt-host']), true);
   assert.equal(hidden(roots['ed-tabs']), false);
   assert.equal(ed.setVisible[ed.setVisible.length - 1], true);
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.promptOpen, false);
 
   // ---------- шапка: памятка формата ----------
   await click(btn(roots.head, '⧗ Напомнить формат'));

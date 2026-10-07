@@ -615,9 +615,75 @@
     renderTree();
   }
 
-  /** Явный пересчёт размеров Monaco — страховка после разделителей и смены стороны чата. */
+  // ---------- diff-host: постоянный экземпляр DiffEditor (этап C, §19) ----------
+  // Тот же принцип, что и с основным редактором (§7): экземпляр создаётся один раз и
+  // переживает перерисовки, при смене просмотра подменяются только модели. Модели —
+  // расходный материал: старые dispose'ятся, иначе они текут в хранилище Monaco.
+  let diffEditor = null;
+  let diffModels = null; // {orig, mod}
+
+  /**
+   * Показать две версии текста в #diff-host.
+   * @returns {Promise<boolean>} true — Monaco принял дифф; false — caller показывает
+   * текстовый фолбэк (app.js переключает просмотр в режим «Подробности»).
+   */
+  async function showDiff(opts) {
+    if (!els || !els.diffEditor || !opts) return false;
+    try {
+      // Только инициализация Monaco, БЕЗ ensureMonaco(): основной редактор создавать
+      // рано — панель может быть в режиме просмотра, а Monaco в скрытом контейнере
+      // нулевого размера — плохая примета (проверено spike).
+      if (!monaco) monaco = await window.WhaleMonaco.init();
+      if (!diffEditor) {
+        diffEditor = monaco.editor.createDiffEditor(els.diffEditor, {
+          theme: 'vs-dark', readOnly: true,
+          renderSideBySide: true, useInlineViewWhenSpaceIsLimited: true,
+          automaticLayout: true, minimap: { enabled: false },
+          scrollBeyondLastLine: false, diffWordWrap: 'on',
+          // Пробелы значимы: для кода «изменился отступ» — содержательное изменение
+          ignoreTrimWhitespace: false,
+        });
+      }
+      // Порядок: сначала отцепить старые модели, потом удалять — dispose прикреплённой
+      // модели оставил бы DiffEditor в подвешенном состоянии.
+      if (diffEditor.getModel()) diffEditor.setModel(null);
+      if (diffModels) { diffModels.orig.dispose(); diffModels.mod.dispose(); diffModels = null; }
+      const language = opts.language || 'plaintext';
+      const orig = monaco.editor.createModel(typeof opts.original === 'string' ? opts.original : '', language);
+      const mod = monaco.editor.createModel(typeof opts.modified === 'string' ? opts.modified : '', language);
+      diffEditor.setModel({ original: orig, modified: mod });
+      diffModels = { orig, mod };
+      // Панель могла быть только что показана: пересчитываем раскладку на следующем кадре
+      // и ещё раз с задержкой (урок showConflictDiff — иначе половина диффа за границей).
+      const relayout = () => { if (diffEditor) { try { diffEditor.layout(); } catch { /* уже закрыт */ } } };
+      requestAnimationFrame(relayout);
+      setTimeout(relayout, 80);
+      return true;
+    } catch (e) {
+      console.error('[editor:diff]', e);
+      if (diffModels) {
+        try { diffModels.orig.dispose(); diffModels.mod.dispose(); } catch { /* уже удалены */ }
+        diffModels = null;
+      }
+      return false;
+    }
+  }
+
+  /** Убрать содержимое диффа (модели освободить), экземпляр оставить до следующего просмотра. */
+  function hideDiff() {
+    // Порядок важен: сначала отцепить модели от редактора, потом удалять —
+    // dispose прикреплённой модели оставляет DiffEditor в подвешенном состоянии.
+    if (diffEditor) { try { diffEditor.setModel(null); } catch { /* ignore */ } }
+    if (diffModels) {
+      try { diffModels.orig.dispose(); diffModels.mod.dispose(); } catch { /* уже удалены */ }
+      diffModels = null;
+    }
+  }
+
+  /** Явный пересчёт размеров Monaco — страховка после разделителей и смены режимов панели. */
   function layoutEditors() {
     if (editor) { try { editor.layout(); } catch { /* редактор ещё не поднят */ } }
+    if (diffEditor) { try { diffEditor.layout(); } catch { /* уже закрыт */ } }
   }
 
   // ---------- вкладки и статус ----------
@@ -841,6 +907,8 @@
       return;
     }
     els = elements;
+    // els.diffEditor/els.diffBar необязательны: на старой разметке (или в тестовом стенде)
+    // их может не быть — showDiff тогда честно вернёт false, и caller покажет фолбэк.
     toast = (hooks && hooks.toast) || (() => {});
     onDirtyChange = (hooks && hooks.onDirtyChange) || (() => {});
     onWantEditorMode = (hooks && hooks.onWantEditorMode) || (() => {});
@@ -852,7 +920,7 @@
   window.WhaleEditor = {
     mount, setProject, setVisible, openPath, activate, closePath, closeActive,
     nextTab, saveActive, showQuickOpen, refreshDisk, handleKey, ackCurrent,
-    setTreeExtras, refreshTree, layout: layoutEditors,
+    setTreeExtras, refreshTree, layout: layoutEditors, showDiff, hideDiff,
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),
     isVisible: () => visible,

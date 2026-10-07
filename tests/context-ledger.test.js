@@ -310,6 +310,9 @@ test('снимки: сравнение строится от версии, ко�
   assert.equal(v.error, undefined);
   const texts = v.rows.filter((r) => r.type === 'del' || r.type === 'add').map((r) => [r.type, r.text]);
   assert.deepEqual(texts, [['del', 'line2'], ['add', 'CHANGED'], ['add', 'line3']]);
+  // обе стороны текста для Monaco DiffEditor (этап C)
+  assert.equal(v.baseText, 'line1\nline2\n');
+  assert.equal(v.currentText, 'line1\nCHANGED\nline3\n');
 });
 
 test('снимки: возврат файла к известной модели версии снимает расхождение сам', async (t) => {
