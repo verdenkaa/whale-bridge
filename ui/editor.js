@@ -38,6 +38,10 @@
   let state = ES.createState();
   const models = new Map();          // path -> ITextModel
   const tree = { dirs: new Map(), expanded: new Set() };
+  // «Внешние» данные дерева (этап B): их передаёт app.js из журналов — расхождения
+  // контекста, последние откатимые операции, предложения модели + колбэки кнопок.
+  // Правила соединения с состоянием редактора — чистая ES.treeRowMarks (тестируется в Node).
+  let extras = { manual: new Set(), undo: new Map(), proposals: new Map(), callbacks: {} };
   let projectId = null;
   let visible = false;
   let toast = () => {};
@@ -483,7 +487,7 @@
     input.focus();
   }
 
-  // ---------- дерево файлов (§13) ----------
+  // ---------- дерево файлов (§13, этап B: единственное дерево, отдельной вкладки нет) ----------
 
   async function loadDir(rel) {
     if (tree.dirs.has(rel)) return tree.dirs.get(rel);
@@ -495,10 +499,7 @@
     return tree.dirs.get(rel);
   }
 
-  function marks(f) {
-    const d = ES.describe(state, f.path) || {};
-    return { dirty: ES.isDirty(f), drift: ES.isDrifted(f), diverged: !!d.modelDiverged };
-  }
+  const fmtTs = (ts) => new Date(ts).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
 
   function nodes(rel, depth, out) {
     const dir = tree.dirs.get(rel);
@@ -506,12 +507,15 @@
     if (dir.error) { out.push(h('div', { class: 'ed-tree-err', style: `padding-left:${depth * 14 + 4}px` }, dir.error)); return; }
     for (const it of dir.items || []) {
       const open = tree.expanded.has(it.rel);
-      const f = ES.get(state, it.rel);
-      const m = f ? marks(f) : { dirty: false, drift: false, diverged: false };
+      const cb = extras.callbacks || {};
+      // Отметки файла считаем одной чистой функцией: состояние буфера + журналы app.js
+      const m = it.isDir ? null : ES.treeRowMarks(state, it.rel, extras);
       out.push(h('div', {
-        class: 'ed-node' + (state.active === it.rel ? ' on' : '') + (m.dirty ? ' dirty' : '') + (m.drift ? ' drift' : '') + (m.diverged ? ' diverged' : ''),
+        class: 'ed-node' + (state.active === it.rel ? ' on' : '')
+          + (m && m.dirty ? ' dirty' : '') + (m && m.drift ? ' drift' : '')
+          + (m && m.diverged ? ' diverged' : '') + (m && m.proposal ? ' has-proposal' : ''),
         style: `padding-left:${depth * 14 + 4}px`,
-        title: it.isDir ? it.rel : (m.drift ? 'Файл изменён вне редактора' : it.rel),
+        title: it.isDir ? it.rel : (m && m.drift ? 'Файл изменён вне редактора' : it.rel),
         onclick: async () => {
           if (it.isDir) {
             if (open) tree.expanded.delete(it.rel);
@@ -524,9 +528,33 @@
       },
       h('span', { class: 'ed-twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
       h('span', { class: 'ed-name' }, it.name),
-      m.dirty && h('span', { class: 'ed-mark', title: 'Несохранённые изменения' }, '●'),
-      m.drift && h('span', { class: 'ed-mark warn', title: 'Файл изменён вне редактора' }, '⚠'),
-      m.diverged && h('span', { class: 'ed-mark ctx', title: 'Модель в чате не знает текущую версию файла' }, '◆')));
+      m && m.dirty && h('span', { class: 'ed-mark dirty', title: 'Несохранённые изменения' }, '●'),
+      m && m.drift && h('span', { class: 'ed-mark drift', title: 'Файл изменён вне редактора' }, '⚠'),
+      // ◆ — модель в чате не знает текущую версию: клик ведёт в сравнение, где есть
+      // «Скопировать изменения для модели» и «✓ Модель проинформирована»
+      m && m.diverged && h('button', {
+        class: 'ed-mark ctx', type: 'button',
+        title: 'Модель в чате не знает текущую версию файла — показать отличия',
+        onclick: (e) => { e.stopPropagation(); if (cb.onManual) cb.onManual(it.rel); },
+      }, '◆'),
+      // синяя точка — есть предложение модели по этому файлу: клик открывает предложение
+      m && m.proposal && h('button', {
+        class: 'ed-mark prop', type: 'button',
+        title: `Предложение модели: +${m.proposal.added}${m.proposal.removed ? ' / −' + m.proposal.removed : ''} — открыть`,
+        onclick: (e) => { e.stopPropagation(); if (cb.onProposal) cb.onProposal(it.rel); },
+      }),
+      // действия строки видны при наведении: откат последней операции и проводник
+      !it.isDir && h('span', { class: 'ed-acts' },
+        m && m.undo && h('button', {
+          class: 'ed-act undo', type: 'button',
+          title: (m.undo.op === 'create' ? 'Удалить файл, созданный приложением' : 'Вернуть версию до последнего изменения')
+            + ' (' + fmtTs(m.undo.ts) + ')',
+          onclick: (e) => { e.stopPropagation(); if (cb.onUndo) cb.onUndo(m.undo); },
+        }, '↩'),
+        h('button', {
+          class: 'ed-act', type: 'button', title: 'Показать в проводнике',
+          onclick: (e) => { e.stopPropagation(); if (cb.onReveal) cb.onReveal(it.rel); },
+        }, '↗'))));
       if (it.isDir && open) nodes(it.rel, depth + 1, out);
     }
   }
@@ -540,10 +568,46 @@
     const out = [];
     nodes('', 0, out);
     if (!out.length) out.push(h('div', { class: 'ed-tree-empty' }, 'Загрузка…'));
-    els.tree.replaceChildren(h('div', { class: 'ed-tree-head' },
-      h('span', {}, 'ФАЙЛЫ'),
-      h('button', { class: 'btn ghost tiny', title: 'Обновить дерево', onclick: async () => { tree.dirs.clear(); await loadDir(''); renderTree(); } }, '⟳')),
-    h('div', { class: 'ed-tree-body' }, out));
+    els.tree.replaceChildren(...out);
+  }
+
+  /**
+   * files:changed / внешние изменения: перечитать корень и раскрытые папки, сохранив
+   * раскрытие. Ошибки не бросаем — loadDir кладёт в кэш {error}, дерево его показывает.
+   */
+  async function refreshTree() {
+    if (!els) return;
+    if (!projectId) { renderTree(); return; }
+    const expanded = [...tree.expanded];
+    tree.dirs.clear();
+    await loadDir('');
+    for (const rel of expanded) {
+      // eslint-disable-next-line no-await-in-loop — раскрытых папок единицы, порядок не важен
+      await loadDir(rel);
+      const d = tree.dirs.get(rel);
+      if (d && d.error) tree.expanded.delete(rel); // папку удалили
+    }
+    renderTree();
+  }
+
+  /**
+   * app.js передаёт данные журналов для отметок дерева (контекст, история, предложения)
+   * и колбэки кнопок. Разделение такое: правила — ES.treeRowMarks (чистые, в тестах),
+   * данные — app.js, отрисовка — здесь.
+   */
+  function setTreeExtras(next) {
+    extras = {
+      manual: (next && next.manual) || new Set(),
+      undo: (next && next.undo) || new Map(),
+      proposals: (next && next.proposals) || new Map(),
+      callbacks: (next && next.callbacks) || {},
+    };
+    renderTree();
+  }
+
+  /** Явный пересчёт размеров Monaco — страховка после разделителей и смены стороны чата. */
+  function layoutEditors() {
+    if (editor) { try { editor.layout(); } catch { /* редактор ещё не поднят */ } }
   }
 
   // ---------- вкладки и статус ----------
@@ -559,9 +623,9 @@
         onclick: () => activate(f.path),
       },
       h('span', {}, f.name),
-      d.diskDrift && h('span', { class: 'ed-mark warn', title: 'Файл изменён вне редактора' }, '⚠'),
+      d.diskDrift && h('span', { class: 'ed-mark drift', title: 'Файл изменён вне редактора' }, '⚠'),
       d.modelDiverged && h('span', { class: 'ed-mark ctx', title: 'Модель в чате не знает текущую версию файла' }, '◆'),
-      d.dirty && h('span', { class: 'ed-mark', title: 'Несохранённые изменения' }, '●'),
+      d.dirty && h('span', { class: 'ed-mark dirty', title: 'Несохранённые изменения' }, '●'),
       h('button', {
         class: 'ed-tab-close', title: 'Закрыть вкладку (Ctrl+W)', 'aria-label': `Закрыть ${f.name}`,
         onclick: (e) => { e.stopPropagation(); closePath(f.path); },
@@ -777,6 +841,7 @@
   window.WhaleEditor = {
     mount, setProject, setVisible, openPath, activate, closePath, closeActive,
     nextTab, saveActive, showQuickOpen, refreshDisk, handleKey, ackCurrent,
+    setTreeExtras, refreshTree, layout: layoutEditors,
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),
     isVisible: () => visible,

@@ -7,6 +7,9 @@
   // сотни вызовов; семантика прежняя, плюс разворачиваются вложенные массивы любой глубины
   // (так и работает настоящий ParentNode.append()).
   const h = window.WhaleDom.h;
+  // Математика раскладки (ui/layout.js, UMD): правила одни для renderer и main —
+  // clamp, минимумы и сторону чата тесты проверяют как чистые функции.
+  const L = window.WhaleLayout;
   const $ = (s) => document.querySelector(s);
   const base = (p) => p.split('/').pop();
   const fmtBytes = (n) => (n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ');
@@ -46,10 +49,13 @@
   const S = {
     projects: [], chatId: null, project: null, pendingProjectId: null, lastProjectId: null,
     tab: 'proposals', proposals: [], showHistorical: false,
-    view: null, // {kind:'proposal'|'history', data}
-    tree: {}, expanded: new Set(), history: [], showFull: false, allowIncomplete: false,
+    view: null, // {kind:'proposal'|'history'|'manual'|'merge', data}
+    history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
     context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
+    // Раскладка (этап B, §5): ширины панелей в px и сторона чата. Состояние UI,
+    // main его только хранит (layout:save) — геометрию чата задаёт #chat-slot (§4).
+    layout: { ...L.DEFAULTS },
     prompt: {
       loaded: false, loading: false, sections: [], presets: [], excluded: new Set(), defaults: {}, tree: null,
       treeOpen: new Set(['']), preview: false, presetId: '', presetName: '',
@@ -64,9 +70,12 @@
     const projectChanged = (S.project && S.project.id) !== (st.project && st.project.id);
     const chatChanged = S.chatId !== st.chatId;
     Object.assign(S, { projects: st.projects, chatId: st.chatId, project: st.project, pendingProjectId: st.pendingProjectId, lastProjectId: st.lastProjectId });
-    document.documentElement.style.setProperty('--chat-w', st.ratio * 100 + '%');
+    // Сохранённые ширины панелей (config.json) → CSS-переменные и сторона чата.
+    // sanitize защищает и от мусора в конфиге, и от окна, ставшего уже минимумов.
+    S.layout = L.sanitize(st.layout, window.innerWidth);
+    applyLayout();
     if (projectChanged) {
-      S.tree = {}; S.expanded = new Set(); P.loaded = false;
+      P.loaded = false;
       // Открытые файлы не закрываем: у каждого свой projectId, сохранение идёт в свой проект.
       if (window.WhaleEditor) window.WhaleEditor.setProject(S.project);
     }
@@ -76,6 +85,14 @@
       await loadPrompt();
       render();
     }
+  }
+
+  /** CSS-переменные раскладки + класс стороны чата. Единственное место, где они ставятся. */
+  function applyLayout() {
+    const vars = L.cssVars(S.layout);
+    for (const k of Object.keys(vars)) document.documentElement.style.setProperty(k, vars[k]);
+    const ws = $('#workspace');
+    if (ws && ws.classList) ws.classList.toggle('chat-right', S.layout.chatSide === 'right');
   }
 
   async function closeView() {
@@ -112,6 +129,13 @@
         sel,
         h('button', { class: 'btn', title: 'Добавить папку проекта', onclick: onAddProject }, 'Добавить папку'),
         S.project && h('button', { class: 'btn ghost danger', title: 'Убрать проект из списка (файлы не удаляются)', onclick: onRemoveProject }, 'Убрать')),
+      // §6: чат слева/справа — чисто CSS-перестановка колонок. main про сторону не знает:
+      // он получает только новый прямоугольник #chat-slot.
+      h('button', {
+        class: 'btn side-toggle', type: 'button',
+        title: 'Перенести чат DeepSeek на другую сторону окна',
+        onclick: toggleChatSide,
+      }, S.layout.chatSide === 'left' ? 'Чат справа ⇄' : 'Чат слева ⇄'),
     );
     const pending = S.projects.find((p) => p.id === S.pendingProjectId);
     if (!S.chatId && pending) head.append(h('div', { class: 'hint' }, `Выбран «${pending.name}». Он будет автоматически привязан после первого сообщения.`));
@@ -148,7 +172,9 @@
 
   function renderTabs() {
     const pending = S.proposals.filter((p) => p.status === 'pending' && !p.historical).length;
-    const tabs = [['editor', 'Редактор'], ['proposals', 'Предложения'], ['files', 'Файлы'], ['history', 'История'], ['prompt', 'Промпт']];
+    // Этап B: «Редактор» и «Файлы» больше не вкладки — дерево живёт в панели файлов,
+    // редактор виден всегда. Вкладки остались у того, что показывает боковая панель.
+    const tabs = [['proposals', 'Предложения'], ['history', 'История'], ['prompt', 'Промпт']];
     $('#tabs').replaceChildren(
       ...tabs.map(([id, label]) =>
         h('button', { class: 'tab' + (S.tab === id ? ' on' : ''), onclick: () => switchTab(id) },
@@ -158,7 +184,6 @@
     S.tab = id;
     S.view = null;
     if (id === 'history') await loadHistory();
-    if (id === 'files') await loadContext();
     render();
   }
 
@@ -177,7 +202,8 @@
         h('button', { class: 'btn', title: 'Составить промпт с правилами формата — вкладка «Промпт»', onclick: () => switchTab('prompt') }, 'Промпт для ИИ')));
 
     if (!S.chatId) {
-      box.append(h('div', { class: 'empty' }, 'Откройте чат слева или отправьте первое сообщение — предложения изменений появятся здесь.'));
+      // Про «слева» не пишем: сторону чата пользователь переключает сам (§6)
+      box.append(h('div', { class: 'empty' }, 'Откройте чат DeepSeek или отправьте первое сообщение — предложения изменений появятся здесь.'));
       return box;
     }
     if (!S.project) {
@@ -499,105 +525,94 @@
     await loadProposals();
   }
 
-  // ---------- вкладка «Файлы» ----------
-  async function loadDir(rel) {
-    if (!S.project || S.tree[rel] !== undefined) return;
-    S.tree[rel] = (await call('fs:list', { projectId: S.project.id, rel })) || { error: 'Ошибка' };
+  // ---------- панель файлов: заголовок, плашка расхождений, отметки в дереве ----------
+  // Отдельной вкладки «Файлы» больше нет (этап B): дерево живёт в своей панели постоянно,
+  // а всё, что вкладка умела — откат, «модель не знает версию», предложения, проводник —
+  // переехало в строки того же дерева. Данные для отметок собираются здесь и передаются
+  // в ui/editor.js, который их рисует (правила соединения — ES.treeRowMarks, чистые).
+  function divergedPaths() {
+    return S.context.items.map((x) => x.relPath);
   }
 
-  function treeNodes(rel, depth, out, marks, undo, manual = new Set()) {
-    const dir = S.tree[rel];
-    if (!dir) return;
-    if (dir.error) { out.push(h('div', { class: 'path', style: `padding-left:${depth * 14}px` }, dir.error)); return; }
-    for (const it of dir.items) {
-      const open = S.expanded.has(it.rel);
-      out.push(
-        h('div', {
-          class: 'node' + (marks.has(it.rel) ? ' has-proposal' : '') + (manual.has(it.rel) ? ' manual-changed' : ''), style: `padding-left:${depth * 14 + 4}px`,
-          title: it.isDir ? '' : 'Показать в проводнике',
-          onclick: async () => {
-            if (it.isDir) {
-              if (open) S.expanded.delete(it.rel); else { S.expanded.add(it.rel); await loadDir(it.rel); }
-              render();
-            } else call('file:open', { projectId: S.project.id, rel: it.rel, mode: 'reveal' });
-          },
-        },
-        h('span', { class: 'twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
-        h('span', {}, it.name),
-        // Клик по отметке открывает сравнение и кнопку «модель проинформирована».
-        // stopPropagation обязателен: иначе вместе с этим сработает клик по строке дерева
-        // (показать файл в проводнике) и откроется окно проводника.
-        manual.has(it.rel) && h('button', {
-          class: 'manual-warning', type: 'button',
-          title: 'Модель не знает текущую версию файла — посмотреть отличия и отметить, что она проинформирована',
-          onclick: (e) => { e.stopPropagation(); openManual(it.rel); },
-        }, '⚠ изменён'),
-        marks.has(it.rel) && h('span', { class: 'dot', title: 'Есть предложение изменений' }),
-        undo.has(it.rel) && undoButton(undo.get(it.rel))));
-      if (it.isDir && open) treeNodes(it.rel, depth + 1, out, marks, undo, manual);
+  function undoByPath() {
+    // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
+    const undo = new Map();
+    for (const e of S.history) {
+      if (e.status === 'applied' && e.revertible !== false && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
     }
+    return undo;
   }
 
-  function undoButton(entry) {
-    const created = entry.op === 'create';
-    return h('button', {
-      class: 'btn undo',
-      title: (created ? 'Удалить файл, созданный приложением' : 'Вернуть версию до последнего изменения') + ' (' + fmtTime(entry.ts) + ')',
-      onclick: async (e) => {
-        e.stopPropagation();
-        if (created && !confirm('Файл был создан приложением. Откат удалит его. Продолжить?')) return;
-        await onRevert(entry.id);
-      },
-    }, '↩ Откатить');
-  }
-
-  async function refreshTree() {
-    if (!S.project) return;
-    const keys = ['', ...S.expanded];
-    S.tree = {};
-    for (const k of keys) {
-      await loadDir(k);
-      if (k && S.tree[k] && S.tree[k].error) S.expanded.delete(k); // папку удалили
+  function proposalsByPath() {
+    const out = new Map();
+    for (const p of S.proposals) {
+      if (p.status !== 'pending' || p.historical || p.state === 'missing') continue;
+      const cur = out.get(p.relPath) || { count: 0, added: 0, removed: 0, firstId: p.id };
+      cur.count += 1;
+      if (p.stats) { cur.added += p.stats.added || 0; cur.removed += p.stats.removed || 0; }
+      out.set(p.relPath, cur);
     }
-    if (S.tab === 'files' && !S.view) render();
+    return out;
   }
 
-  function renderFiles() {
-    if (!S.project) return h('div', { class: 'empty' }, 'Выберите проект вверху, чтобы увидеть его файлы.');
-    const marks = new Set(S.proposals.filter((p) => p.status === 'pending' && !p.historical && p.state !== 'missing').map((p) => p.relPath));
-    const manual = new Set(S.context.items.map((x) => x.relPath));
-    const undo = new Map(); // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
-    for (const e of S.history) if (e.status === 'applied' && e.revertible !== false && !(e.pruned && e.op !== 'create') && !undo.has(e.relPath)) undo.set(e.relPath, e);
-    const box = h('div', { class: 'stack' },
-      h('div', { class: 'toolbar' },
-        h('span', { class: 'path grow' }, S.project.path),
-        h('button', { class: 'btn', title: 'Дерево обновляется само; кнопка — на всякий случай', onclick: refreshTree }, 'Обновить'),
-        manual.size > 0 && h('button', {
-          class: 'btn',
-          title: COPY_TITLE,
-          onclick: copyManualVersions,
-        }, 'Скопировать изменения для модели'),
-        manual.size > 0 && h('button', {
-          class: 'btn', title: `Отметить все ${manual.size} файл(ов) как известные модели`,
-          onclick: ackAllManual,
-        }, '✓ Модель знает все')),
-      manual.size > 0 && h('div', { class: 'notice warn' },
-        `Модель не знает текущую версию: ${manual.size} файл(ов). Она может предлагать правки от устаревшего кода.`,
-        // Имена перечисляем явно: файл может лежать в свёрнутой папке, и тогда отметка
-        // в дереве не видна — без списка плашка выглядит необъяснимой.
-        h('div', { class: 'path' }, [...manual].slice(0, 8).join(', ') + (manual.size > 8 ? ` … ещё ${manual.size - 8}` : ''))),
-      S.context.truncated && h('div', { class: 'notice' },
+  function renderFilesHead() {
+    const head = $('#files-head');
+    if (!head) return;
+    const manual = divergedPaths();
+    head.replaceChildren(
+      h('span', { class: 'files-title' }, 'ФАЙЛЫ'),
+      h('span', { class: 'path grow', title: S.project ? S.project.path : '' }, S.project ? S.project.name : 'Проект не выбран'),
+      manual.length > 0 && h('button', { class: 'btn tiny', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать для модели'),
+      manual.length > 0 && h('button', {
+        class: 'btn tiny', title: `Отметить все ${manual.length} файл(ов) как известные модели`,
+        onclick: ackAllManual,
+      }, '✓ Модель знает все'),
+      h('button', {
+        class: 'btn ghost tiny', title: 'Обновить дерево (обычно оно обновляется само)',
+        onclick: () => window.WhaleEditor && window.WhaleEditor.refreshTree(),
+      }, '⟳'));
+
+    const banner = $('#files-banner');
+    if (!banner) return;
+    banner.replaceChildren();
+    if (manual.length > 0) {
+      // Имена перечисляем явно: файл может лежать в свёрнутой папке, и тогда отметка
+      // в дереве не видна — без списка плашка выглядит необъяснимой.
+      banner.append(h('div', { class: 'notice warn' },
+        `Модель не знает текущую версию: ${manual.length} файл(ов). Она может предлагать правки от устаревшего кода.`,
+        h('div', { class: 'path' }, manual.slice(0, 8).join(', ') + (manual.length > 8 ? ` … ещё ${manual.length - 8}` : ''))));
+    }
+    if (S.context.truncated) {
+      banner.append(h('div', { class: 'notice' },
         `Проверено ${S.context.checked} файлов из журнала — остальные не поместились в лимит одного запроса.`));
-    if (S.tree[''] === undefined) {
-      loadDir('').then(render);
-      box.append(h('div', { class: 'empty' }, 'Загрузка…'));
-      return box;
     }
-    const nodes = [];
-    treeNodes('', 0, nodes, marks, undo, manual);
-    box.append(h('div', { class: 'tree' }, nodes));
-    return box;
   }
+
+  /** Передать в дерево отметки и действия. Порядок: сначала данные, потом перерисовка. */
+  function pushTreeExtras() {
+    const ed = window.WhaleEditor;
+    if (!ed || !ed.setTreeExtras) return;
+    ed.setTreeExtras({
+      manual: new Set(divergedPaths()),
+      undo: undoByPath(),
+      proposals: proposalsByPath(),
+      callbacks: {
+        onManual: (rel) => openManual(rel),
+        onUndo: async (entry) => {
+          if (entry.op === 'create' && !confirm('Файл был создан приложением. Откат удалит его. Продолжить?')) return;
+          await onRevert(entry.id);
+        },
+        onProposal: async (rel) => {
+          const info = proposalsByPath().get(rel);
+          if (!info) return;
+          S.tab = 'proposals'; // карточка предложения живёт в боковой панели
+          await openProposal(info.firstId);
+        },
+        onReveal: (rel) => { if (S.project) call('file:open', { projectId: S.project.id, rel, mode: 'reveal' }); },
+      },
+    });
+  }
+
 
   // ---------- вкладка «История» ----------
   async function loadHistory() {
@@ -648,7 +663,7 @@
   function renderManualView(d) {
     return h('div', {},
       h('div', { class: 'view-head' },
-        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К файлам'),
+        h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← Закрыть'),
         h('div', { class: 'view-title' }, 'Мои правки'),
         h('div', { class: 'path' }, d.relPath)),
       h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
@@ -942,27 +957,20 @@
   function softRender() {
     renderHead();
     renderTabs();
+    renderFilesHead();
+    pushTreeExtras();
   }
 
   /**
-   * Редактор живёт в #editor-root ОТДЕЛЬНО от #body: перерисовка вкладок не должна
-   * уничтожать Monaco (ТЗ §7). Поэтому панели переключаем классом, а не пересоздаём.
-   * Если открыт просмотр (Diff предложения/истории), он важнее — показываем #body.
+   * Monaco живёт в #ed-host постоянно и переживает любые перерисовки (ТЗ §7): этот render
+   * касается только боковой панели, заголовков и дерева. Дерево перерисовывает ui/editor.js —
+   * сюда приходят лишь данные для отметок (pushTreeExtras).
    */
-  function applyTabVisibility() {
-    const useEditor = S.tab === 'editor' && !S.view;
-    const body = $('#body');
-    const root = $('#editor-root');
-    if (body) { if (useEditor) body.classList.add('hidden'); else body.classList.remove('hidden'); }
-    if (root) { if (useEditor) root.classList.remove('hidden'); else root.classList.add('hidden'); }
-    if (window.WhaleEditor) window.WhaleEditor.setVisible(useEditor);
-    return useEditor;
-  }
-
   function render() {
     renderHead();
     renderTabs();
-    if (applyTabVisibility()) return; // содержимое вкладки «Редактор» рисует ui/editor.js
+    renderFilesHead();
+    pushTreeExtras();
     const body = $('#body');
     const scroll = body.scrollTop;
     body.replaceChildren();
@@ -971,53 +979,146 @@
     else if (S.view && S.view.kind === 'manual') body.append(renderManualView(S.view.data));
     else if (S.view && S.view.kind === 'merge') body.append(renderMergeView(S.view.data));
     else if (S.tab === 'proposals') body.append(renderProposals());
-    else if (S.tab === 'files') body.append(renderFiles());
     else if (S.tab === 'prompt') body.append(renderPrompt());
     else body.append(renderHistory());
     body.scrollTop = scroll;
   }
 
-  // ---------- разделитель панелей ----------
-  (function initSplitter() {
-    const sp = $('#splitter');
-    let active = false;
-    let ratio = 0.5;
-    sp.addEventListener('pointerdown', async (e) => {
-      active = true;
-      sp.setPointerCapture(e.pointerId);
-      sp.classList.add('drag');
-      await call('layout:drag-start');
+  // ---------- геометрия раскладки (этап B, ТЗ §4, §6, §28) ----------
+  // Раскладку определяет CSS: ширины панелей живут в CSS-переменных, а чат занимает
+  // ровно прямоугольник #chat-slot. Renderer наблюдает за слотом через ResizeObserver
+  // и отправляет измеренные bounds в main (chat:set-bounds, fire-and-forget), а main
+  // просто кладёт туда WebContentsView. Никакого ratio в main больше нет.
+
+  let chatHidden = false; // пока чат скрыт, bounds не шлём: во время перетаскивания геометрия применяется в конце
+
+  function setChatVisible(v) {
+    chatHidden = !v;
+    if (api.send) api.send('chat:set-visible', v);
+  }
+
+  function sendChatBounds() {
+    if (!api.send) return;
+    const slot = $('#chat-slot');
+    if (!slot || typeof slot.getBoundingClientRect !== 'function') return;
+    // getBoundingClientRect отдаёт CSS-пиксели, а setBounds работает в DIP: при zoom ≠ 1
+    // делим на коэффициент (штатно zoom не меняется, но в меню «Вид» он есть)
+    const zoom = (typeof api.zoomFactor === 'function' && api.zoomFactor()) || 1;
+    const r = slot.getBoundingClientRect();
+    const rect = L.normalizeRect({ x: r.x / zoom, y: r.y / zoom, width: r.width / zoom, height: r.height / zoom });
+    if (rect) api.send('chat:set-bounds', rect);
+  }
+
+  // Размер слота изменился (разделитель, resize окна, maximize, высота шапки) → новые
+  // bounds. Троттлинг до кадра: ResizeObserver может срабатывать чаще, а setBounds
+  // на каждое движение — дорого на Windows.
+  (function observeChatSlot() {
+    const slot = $('#chat-slot');
+    if (!slot || typeof ResizeObserver === 'undefined' || !api.send) return;
+    let pending = false;
+    const ro = new ResizeObserver(() => {
+      if (pending || chatHidden) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; if (!chatHidden) sendChatBounds(); });
     });
-    sp.addEventListener('pointermove', (e) => {
-      if (!active) return;
-      ratio = Math.min(0.8, Math.max(0.2, e.clientX / window.innerWidth));
-      document.documentElement.style.setProperty('--chat-w', ratio * 100 + '%');
-      call('layout:set', { ratio });
-    });
-    const end = async () => {
-      if (!active) return;
-      active = false;
-      sp.classList.remove('drag');
-      await call('layout:drag-end');
-    };
-    sp.addEventListener('pointerup', end);
-    sp.addEventListener('pointercancel', end);
+    ro.observe(slot);
   })();
+
+  /** §6: чат слева/справа — перестановка колонок CSS; main получает только новый rect. */
+  async function toggleChatSide() {
+    setChatVisible(false); // сначала прячем нативный слой, чтобы он не висел кадр над панелями
+    S.layout = { ...S.layout, chatSide: S.layout.chatSide === 'left' ? 'right' : 'left' };
+    applyLayout();
+    renderHead(); // подпись кнопки
+    requestAnimationFrame(() => {
+      sendChatBounds(); // прямоугольник слота уже на новом месте
+      setChatVisible(true);
+      if (window.WhaleEditor.layout) window.WhaleEditor.layout();
+    });
+    await call('layout:save', { layout: S.layout });
+  }
+
+  (function initSplitters() {
+    let drag = null; // {which, startX, startLayout}
+    let saveTimer = null;
+    // Сохраняем ширины в config.json. После отпускания разделителя — сразу: отложенное
+    // сохранение могло бы проиграть гонку внезапно пришедшему chat:changed, который
+    // перечитывает сохранённую раскладку и вернул бы панели на старое место.
+    const saveLayout = () => { clearTimeout(saveTimer); call('layout:save', { layout: S.layout }); };
+    // Для непрерывных событий (resize окна) — с задержкой, чтобы не писать конфиг каждый кадр
+    const saveLayoutSoon = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => call('layout:save', { layout: S.layout }), 400);
+    };
+
+    function setup(which, sel) {
+      const el = $(sel);
+      if (!el || !el.addEventListener) return;
+      el.addEventListener('pointerdown', (e) => {
+        if (e.button != null && e.button !== 0) return;
+        drag = { which, startX: e.clientX, startLayout: { ...S.layout } };
+        // Захват указателя: движение мыши приходит самому разделителю, даже когда
+        // курсор ушёл далеко в сторону (проверено практикой прежнего разделителя).
+        if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
+        el.classList.add('drag');
+        // Только чатовый разделитель: WebContentsView проглатывает события мыши,
+        // поэтому на время перетаскивания чат скрываем, а геометрию применяем на отпускании.
+        if (which === 'chat') setChatVisible(false);
+        if (e.preventDefault) e.preventDefault();
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (!drag || drag.which !== which) return;
+        S.layout = L.drag(drag.startLayout, which, e.clientX - drag.startX, window.innerWidth);
+        applyLayout();
+      });
+      const end = () => {
+        if (!drag || drag.which !== which) return;
+        drag = null;
+        el.classList.remove('drag');
+        if (which === 'chat') { sendChatBounds(); setChatVisible(true); }
+        // Monaco пересчитывает размеры сам (automaticLayout), но явный layout() после
+        // перетаскивания — дешёвая страховка: spike показал, что в Grid он иногда «залипает».
+        if (window.WhaleEditor.layout) window.WhaleEditor.layout();
+        saveLayout();
+      };
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', end);
+    }
+    setup('chat', '#vsplit-chat');
+    setup('files', '#vsplit-files');
+    setup('side', '#vsplit-side');
+
+    // Окно стало уже: панели ужимаются в порядке side → files → chat (ui/layout.js),
+    // ширина чата не превышает 60% окна. Сохраняем ширины с задержкой.
+    if (window.addEventListener) {
+      window.addEventListener('resize', () => {
+        const fitted = L.fitToWindow(S.layout, window.innerWidth);
+        if (fitted.chatW !== S.layout.chatW || fitted.filesW !== S.layout.filesW || fitted.sideW !== S.layout.sideW) {
+          S.layout = fitted;
+          applyLayout();
+          saveLayoutSoon();
+        }
+      });
+    }
+  })();
+
 
   // ---------- события от главного процесса ----------
   api.on('chat:changed', loadState);
   api.on('projects:changed', loadState);
   api.on('project:auto-bound', async ({ project }) => { toast(`Привязан ${project.name} · Изменить`, 'ok'); await loadState(); });
   api.on('files:changed', async () => {
-    // Порядок важен: refreshTree() внутри вызывает render(), поэтому журнал контекста
-    // должен быть обновлён ДО него. Иначе отметки рисуются по прежним данным и залипают
-    // до следующей перерисовки — возвращение файла к версии модели выглядело так,
-    // будто предупреждение не снимается.
-    await loadContext();
-    await refreshTree();
-    // Файл мог измениться под открытым буфером: обновляем diskHash, чтобы Ctrl+S
-    // вовремя показал конфликт (§11), а не перезаписал чужие правки.
-    if (window.WhaleEditor) await window.WhaleEditor.refreshDisk();
+    // Порядок важен: сначала данные, потом перерисовка. Журнал контекста и история
+    // обновляются ДО отрисовки дерева — иначе отметки рисуются по прежним данным и
+    // залипают до следующей перерисовки (так уже было: снятие предупреждения не видно).
+    await loadHistory(); // внутри вызывает loadContext()
+    const ed = window.WhaleEditor;
+    if (ed) {
+      if (ed.refreshTree) await ed.refreshTree(); // дерево переехало в редактор (этап B)
+      // Файл мог измениться под открытым буфером: обновляем diskHash, чтобы Ctrl+S
+      // вовремя показал конфликт (§11), а не перезаписал чужие правки.
+      await ed.refreshDisk();
+    }
     if (P.loaded && S.project) { // дерево в генераторе промпта обновляем «на месте», не трогая поля ввода
       P.tree = await call('prompt:tree', { projectId: S.project.id });
       paintPromptTree();
@@ -1026,13 +1127,18 @@
     const v = S.view;
     if (v && v.kind === 'proposal' && v.data.status === 'pending') { // открытый Diff пересчитываем по свежему файлу
       const d = await call('proposal:get', { id: v.data.id });
-      if (d && S.view && S.view.data.id === d.id) { S.view.data = d; render(); }
+      if (d && S.view && S.view.data.id === d.id) S.view.data = d;
     }
+    // Форму промпта не пересобираем — иначе теряется фокус в поле ввода. Для неё
+    // обновляем только дерево промпта (выше) и данные панели файлов.
+    if (S.tab === 'prompt' && !S.view) { renderFilesHead(); pushTreeExtras(); }
+    else render();
   });
   api.on('proposals:changed', async () => {
-    if (S.view) { // открытый Diff не перерисовываем, но данные списка и счётчик обновляем
+    if (S.view) { // открытый Diff не перерисовываем, но данные списка, счётчик и дерево обновляем
       S.proposals = (await call('proposals:list', { includeHistorical: S.showHistorical })) || [];
       renderTabs();
+      pushTreeExtras();
       return;
     }
     await loadProposals();
@@ -1052,6 +1158,10 @@
       // несохранённые правки видны и на вкладках вне редактора — обновляем счётчик/заголовки
       onDirtyChange: () => { renderTabs(); },
     });
+    // Этап B: редактор всегда на экране (отдельной вкладки «Редактор» больше нет),
+    // поэтому видимость включаем один раз при монтировании.
+    window.WhaleEditor.setVisible(true);
+    pushTreeExtras();
   })();
 
   loadState();

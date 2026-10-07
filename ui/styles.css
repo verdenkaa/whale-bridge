@@ -14,26 +14,61 @@
   --warn: #f0a24a;
   --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
-  --chat-w: 50%;
+  /* Раскладка этапа B (ТЗ §5): ширины колонок в px задаёт renderer (ui/layout.js),
+     здесь — только стартовые значения до state:get. --split-w обязан совпадать
+     с L.SPLITTER в ui/layout.js: математику разделителей тесты считают по нему. */
+  --chat-w: 420px;
+  --files-w: 220px;
+  --side-w: 380px;
+  --split-w: 5px;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 var(--ui); letter-spacing: -0.005em; }
+body { overflow: hidden; }
 button, select, input { font: inherit; color: inherit; }
 ::selection { background: rgba(232, 176, 75, 0.3); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-#app { display: grid; grid-template-columns: var(--chat-w) 1px minmax(0, 1fr); height: 100vh; }
-#chat-slot { background: var(--bg); }
-#splitter { cursor: col-resize; background: #303030; transition: background 0.15s; }
-#splitter:hover, #splitter.drag { background: #4d8dff; }
-#panel { display: flex; flex-direction: column; min-width: 0; background: var(--panel); position: relative; color: var(--text); }
+/* ---------- сетка IDE (§5): topbar / workspace ---------- */
+.app { height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr); }
 
-/* шапка */
-#head { padding: 11px 14px 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
-.chat-line { display: flex; align-items: baseline; gap: 8px; color: var(--dim); font-size: 12px; }
+.topbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand { font-weight: 700; white-space: nowrap; }
+
+/* Колонки: чат | разделитель | IDE. Чат справа — тот же набор, зеркально (§6):
+   переключение стороны — чисто CSS, main знает только прямоугольник #chat-slot. */
+.workspace { min-height: 0; display: grid; grid-template-columns: var(--chat-w) var(--split-w) minmax(0, 1fr); }
+.workspace > #chat-slot { grid-column: 1; }
+.workspace > #vsplit-chat { grid-column: 2; }
+.workspace > .ide { grid-column: 3; }
+.workspace.chat-right { grid-template-columns: minmax(0, 1fr) var(--split-w) var(--chat-w); }
+.workspace.chat-right > #chat-slot { grid-column: 3; }
+.workspace.chat-right > #vsplit-chat { grid-column: 2; }
+.workspace.chat-right > .ide { grid-column: 1; }
+
+/* Сюда main физически кладёт WebContentsView с DeepSeek. Элемент пустой: его задача —
+   задать геометрию, которую ResizeObserver отправляет в main (chat:set-bounds, §4). */
+#chat-slot { min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
+
+/* IDE-область: файлы | разделитель | редактор | разделитель | боковая панель.
+   position:relative — якорь для оверлеев и тоста: они не должны вылезать над чатом (§24). */
+.ide { position: relative; min-width: 0; min-height: 0; display: grid;
+  grid-template-columns: var(--files-w) var(--split-w) minmax(0, 1fr) var(--split-w) var(--side-w); }
+
+.vsplit { cursor: col-resize; background: var(--line); transition: background 0.15s; touch-action: none; }
+.vsplit:hover, .vsplit.drag { background: var(--accent); }
+
+.files-panel, .side-panel { min-width: 0; min-height: 0; overflow: hidden;
+  background: var(--panel); display: flex; flex-direction: column; }
+.editor-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
+
+/* ---------- шапка ---------- */
+#head { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.chat-line { display: flex; align-items: baseline; gap: 8px; color: var(--dim); font-size: 12px; white-space: nowrap; }
 .chat-line b { color: var(--text); font-weight: 600; font-family: var(--mono); font-size: 12px; }
-.proj-row { display: flex; gap: 6px; }
-.proj-row select { flex: 1; min-width: 0; }
+.proj-row { display: flex; gap: 6px; min-width: 0; }
+.proj-row select { flex: 1; min-width: 140px; max-width: 420px; }
 select, .btn, input[type="text"] {
   background: #242424; border: 1px solid #353535; border-radius: 7px; padding: 6px 10px;
 }
@@ -46,11 +81,11 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .btn.primary:hover:not(:disabled) { background: #5a96ff; border-color: #5a96ff; filter: none; }
 .btn.danger:hover:not(:disabled) { border-color: var(--del); color: var(--del); }
 .btn.ghost { background: transparent; border-color: transparent; }
-.hint { background: var(--raised); border-left: 3px solid var(--accent); padding: 7px 10px; border-radius: 0 5px 5px 0;
+.hint { background: var(--raised); border-left: 3px solid var(--accent); padding: 5px 10px; border-radius: 0 5px 5px 0;
   display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
-/* вкладки */
-#tabs { display: flex; gap: 1px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+/* ---------- боковая панель: вкладки и содержимое ---------- */
+#tabs { display: flex; gap: 1px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
 .tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 9px 9px 8px; cursor: pointer; color: #969696; font-size: 13px; }
 .tab:hover { color: var(--text); }
 .tab.on { color: #e7e7e7; border-bottom-color: #4d8dff; }
@@ -103,21 +138,14 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .dl.skip { color: #566074; padding: 2px 12px; background: var(--panel); border-block: 1px solid var(--line); font-style: italic; min-width: 0; }
 .code { white-space: pre; font: 12px/1.5 var(--mono); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; background: var(--bg); max-height: calc(100vh - 330px); margin: 0; }
 
-/* файлы */
-.tree { font-family: var(--ui); font-size: 13px; }
-.node { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-.node:hover { background: #242424; }
-.node .twisty { width: 12px; color: var(--dim); }
-.node.has-proposal { color: var(--accent); }
-.node .undo { margin-left: auto; padding: 2px 7px; font: 11px var(--ui); }
-.node .undo:hover { border-color: var(--accent); color: var(--accent); }
-.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-
 /* история */
 .row { display: flex; align-items: center; gap: 8px; padding: 9px 11px; background: #222; border: 1px solid #303030; border-radius: 8px; }
 .row .grow { flex: 1; min-width: 0; }
 
-#toast { position: absolute; left: 12px; right: 12px; bottom: 12px; padding: 9px 12px; border-radius: 6px; background: var(--raised);
+/* Тост — внутри IDE-области (§24): над чатом он всё равно не нарисуется,
+   WebContentsView перекрывает любые CSS-слои. */
+#toast { position: absolute; right: 12px; bottom: 12px; z-index: 40; width: min(420px, calc(100% - 24px));
+  padding: 9px 12px; border-radius: 6px; background: var(--raised);
   border: 1px solid var(--line); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); opacity: 0; transform: translateY(8px); pointer-events: none;
   transition: opacity 0.18s, transform 0.18s; }
 #toast.show { opacity: 1; transform: none; }
@@ -142,43 +170,58 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .promptbar { position: sticky; bottom: -12px; margin: 4px -12px -12px; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-
-.node.manual-changed { background: #fff8d8; border-left: 3px solid #d9a400; }
-/* Кнопка, а не span: открывает сравнение и подтверждение «модель проинформирована» */
-.manual-warning { margin-left: 8px; color: #9a7300; font-weight: 600; background: none; border: 0;
-  padding: 0 2px; cursor: pointer; font-size: inherit; border-radius: 3px; }
-.manual-warning:hover { background: rgba(217, 164, 0, .22); color: #6b5200; }
-
-/* ---------- редактор (Stage A) ---------- */
-.hidden { display: none !important; }
+/* ---------- панель файлов (этап B: дерево живёт здесь, отдельной вкладки нет) ---------- */
 .btn.tiny { padding: 1px 7px; font-size: 11px; }
-/* «Сохранить поверх» (§11): заметная, но не основная — она уничтожает чужие правки */
-.btn.danger-subtle { border-color: var(--line); color: var(--dim); }
-.btn.danger-subtle:hover:not(:disabled) { border-color: var(--del); color: var(--del); background: var(--del-bg); }
 
-#editor-root { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(140px, 24%) minmax(0, 1fr); position: relative; }
+.files-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 8px;
+  border-bottom: 1px solid var(--line); font-size: 11px; color: var(--dim); flex-wrap: wrap; }
+.files-title { font-size: 10px; letter-spacing: .09em; }
+.files-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; }
+#files-banner:empty { display: none; }
+#files-banner .notice { margin: 6px 8px; padding: 6px 9px; font-size: 11.5px; gap: 3px; }
 
-.ed-tree { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--panel); }
-.ed-tree-head { display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-bottom: 1px solid var(--line);
-  font-size: 10px; letter-spacing: .09em; color: var(--dim); }
-.ed-tree-head .grow, .ed-tree-head span:first-child { flex: 1; }
-.ed-tree-body { overflow: auto; padding: 4px 0 10px; scrollbar-width: thin; scrollbar-color: #3b3b3b transparent; }
+.ed-tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 10px;
+  scrollbar-width: thin; scrollbar-color: #3b3b3b transparent; }
 .ed-tree-empty, .ed-tree-err { padding: 10px 12px; color: var(--dim); font-size: 12px; }
 .ed-node { display: flex; align-items: center; gap: 5px; padding: 2px 8px 2px 4px; cursor: pointer;
   white-space: nowrap; overflow: hidden; font-size: 12.5px; border-left: 3px solid transparent; }
 .ed-node:hover { background: var(--raised); }
 .ed-node.on { background: var(--raised); border-left-color: var(--accent); }
-.ed-node.dirty .ed-name { color: var(--warn); }
-.ed-node.drift .ed-name { color: var(--del); }
 .ed-twisty { width: 12px; flex: none; color: var(--dim); font-size: 10px; }
 .ed-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.ed-mark { flex: none; font-size: 11px; line-height: 1; }
-.ed-mark.warn { color: var(--warn); }
-/* ◆ — модель в чате не знает текущую версию файла (расхождение контекста) */
-.ed-mark.ctx { color: #d9a400; }
-.ed-node.diverged .ed-name { box-shadow: inset 0 -1px 0 rgba(217, 164, 0, .55); }
 
-.ed-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #1e1e1e; }
+/* Цветовая схема состояний файла (одна на дерево, вкладки и статус):
+     ● оранжевый (--warn)   — несохранённые изменения в редакторе
+     ⚠ красный   (--del)    — файл изменён вне редактора (сохранение потребует решения)
+     ◆ янтарный  (#d9a400)  — модель в чате не знает текущую версию (клик: сравнение)
+     ● синий     (--accent) — есть предложение модели (клик: открыть предложение)
+     ↩ кнопка               — откат последней операции файла (видна при наведении)
+     ↗ кнопка               — показать файл в проводнике (видна при наведении) */
+.ed-node.dirty .ed-name { color: var(--warn); }
+.ed-node.drift .ed-name { color: var(--del); }
+.ed-node.diverged .ed-name { box-shadow: inset 0 -1px 0 rgba(217, 164, 0, .55); }
+.ed-node.has-proposal .ed-name { color: var(--accent); }
+.ed-mark { flex: none; font-size: 11px; line-height: 1; }
+.ed-mark.dirty { color: var(--warn); }
+.ed-mark.drift { color: var(--del); }
+.ed-mark.ctx { color: #d9a400; }
+/* во вкладке ◆ — просто значок, в дереве — кнопка в сравнение «мои правки» */
+button.ed-mark.ctx { background: none; border: 0; cursor: pointer; padding: 0 1px; font-size: 11px; line-height: 1; }
+button.ed-mark.ctx:hover { background: rgba(217, 164, 0, .18); }
+.ed-mark.prop { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); border: 0; cursor: pointer; padding: 0; flex: none; }
+.ed-mark.prop:hover { box-shadow: 0 0 0 3px rgba(77, 141, 255, .25); }
+.ed-acts { margin-left: auto; display: flex; gap: 2px; visibility: hidden; flex: none; }
+.ed-node:hover .ed-acts, .ed-node:focus-within .ed-acts { visibility: visible; }
+.ed-act { background: none; border: 0; color: var(--dim); cursor: pointer; padding: 0 3px; border-radius: 3px; font-size: 11px; line-height: 1.4; }
+.ed-act:hover { background: var(--raised); color: var(--text); }
+.ed-act.undo:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- редактор ---------- */
+.hidden { display: none !important; }
+/* «Сохранить поверх» (§11): заметная, но не основная — она уничтожает чужие правки */
+.btn.danger-subtle { border-color: var(--line); color: var(--dim); }
+.btn.danger-subtle:hover:not(:disabled) { border-color: var(--del); color: var(--del); background: var(--del-bg); }
+
 .ed-tabs { display: flex; gap: 1px; overflow-x: auto; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
 .ed-tab { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; cursor: pointer;
   border-right: 1px solid var(--line); color: var(--dim); font-size: 12.5px; white-space: nowrap; max-width: 220px; }
@@ -190,12 +233,14 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .ed-tab-close:hover { background: #3a3a3a; color: var(--text); }
 
 .ed-host { flex: 1; min-height: 0; min-width: 0; }
+/* Ячейка Monaco DiffEditor (этап C): proposals, «мои правки», конфликт сохранения */
+.diff-host { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .ed-empty { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); }
 .ed-status { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 10px;
   border-top: 1px solid var(--line); background: var(--panel); font-size: 11.5px; color: var(--dim); }
 .ed-status .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Оверлеи — внутри области редактора: WebContentsView с DeepSeek CSS-слоями не перекрывается (§24) */
+/* Оверлеи — внутри IDE-области: WebContentsView с DeepSeek CSS-слоями не перекрывается (§24) */
 .ed-overlay { position: absolute; inset: 0; z-index: 30; background: rgba(10, 10, 10, .62);
   display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px; overflow: auto; }
 /* min-width:0 обязателен: у flex-элемента min-width:auto не даёт сжаться до контейнера,

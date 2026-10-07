@@ -253,6 +253,41 @@
   const dirtyPaths = (state) => state.order.filter((p) => isDirty(get(state, p)));
   const driftedPaths = (state) => state.order.filter((p) => isDrifted(get(state, p)));
 
+  /**
+   * Полный набор отметок строки дерева файлов (этап B).
+   *
+   * Дерево стало единственным: отдельной вкладки «Файлы» больше нет, поэтому в одной
+   * строке сходятся данные из двух миров — состояние редактора (открытый буфер) и
+   * «внешние» сведения, которые app.js получает из журналов (context:list, history:list,
+   * proposals:list) и передаёт сюда как extras. Правила одни и покрыты node-тестами;
+   * ui/editor.js только рисует результат.
+   *
+   * @param state  состояние редактора
+   * @param rel    относительный путь строки
+   * @param extras {manual:Set|Map, undo:Map, proposals:Map} — external-данные app.js
+   * @returns {{dirty:boolean, drift:boolean, missing:boolean, diverged:boolean,
+   *            hasManual:boolean, undo:object|null, proposal:object|null}}
+   */
+  function treeRowMarks(state, rel, extras) {
+    const f = get(state, rel);
+    const d = f ? describe(state, rel) : null;
+    const ex = extras || {};
+    const has = (coll) => !!(coll && typeof coll.has === 'function' && coll.has(rel));
+    const take = (coll) => (coll && typeof coll.get === 'function' ? coll.get(rel) || null : null);
+    const manual = has(ex.manual);
+    return {
+      dirty: d ? d.dirty : false,
+      drift: d ? d.diskDrift : false,
+      missing: d ? d.missing : false,
+      // Расхождение с версией модели видно и по открытому буферу (knownHash из журнала),
+      // и по context:list для всех файлов проекта — достаточно любого источника.
+      diverged: (d ? d.modelDiverged : false) || manual,
+      hasManual: manual,
+      undo: take(ex.undo),
+      proposal: take(ex.proposals),
+    };
+  }
+
   return {
     createState, open, get, active, list,
     setText, setSaved, reload, forceSaveBase,
@@ -261,5 +296,6 @@
     isDirty, isDrifted, isMissing, needsReload, modelDiverged, describe,
     close, activate, activateRelative,
     hasUnsaved, dirtyPaths, driftedPaths, baseName,
+    treeRowMarks,
   };
 });

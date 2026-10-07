@@ -32,11 +32,16 @@ const all = (source, re) => [...source.matchAll(re)].map((m) => m[1]);
 
 const INVOKE = setFrom(preload, 'INVOKE');
 const EVENTS = setFrom(preload, 'EVENTS');
+const SEND = setFrom(preload, 'SEND');
 
 // main: handle('channel', ...)
 const handled = new Set(all(main, /handle\('([^']+)'/g));
+// main: ipcMain.on('channel', ...) — fire-and-forget приём
+const received = new Set(all(main, /ipcMain\.on\('([^']+)'/g));
 // renderer: call('channel' | api.invoke('channel'
 const invoked = new Set([...all(app, /(?:call|api\.invoke)\('([^']+)'/g), ...all(editor, /(?:call|api\.invoke)\('([^']+)'/g)]);
+// renderer: api.send('channel' — геометрия чата (этап B, без ответа)
+const sentByUi = new Set([...all(app, /api\.send\('([^']+)'/g), ...all(editor, /api\.send\('([^']+)'/g)]);
 // renderer: api.on('channel'
 const listened = new Set(all(app, /api\.on\('([^']+)'/g));
 // main: send('channel'
@@ -80,4 +85,36 @@ test('ipc: каналы редактора Stage A на месте и разре
 test('ipc: каналы не пересекаются между invoke и событиями', () => {
   const both = [...INVOKE].filter((c) => EVENTS.has(c));
   assert.deepEqual(both, [], 'одно имя используется и как запрос, и как событие: ' + both.join(', '));
+});
+
+// ---- этап B: fire-and-forget каналы геометрии (§4, §28) ----
+
+test('ipc: send-каналы renderer разрешены в preload и принимаются в main', () => {
+  assert.ok(sentByUi.size > 0, 'renderer не отправляет ни одного send-канала — проверка ничего не стоит');
+  const forbidden = [...sentByUi].filter((c) => !SEND.has(c));
+  assert.deepEqual(forbidden, [], 'preload бросит Unknown channel для: ' + forbidden.join(', '));
+  const missing = [...SEND].filter((c) => !received.has(c));
+  assert.deepEqual(missing, [], 'в main.js нет ipcMain.on() для: ' + missing.join(', '));
+});
+
+test('ipc: каналы геометрии чата на месте, старая схема layout:drag-* удалена', () => {
+  for (const c of ['chat:set-bounds', 'chat:set-visible']) {
+    assert.ok(SEND.has(c), `${c} не в белом списке SEND preload`);
+    assert.ok(received.has(c), `${c} не принимается в main`);
+    assert.ok(sentByUi.has(c), `${c} разрешён, но renderer его не использует`);
+  }
+  // main больше не считает геометрию (§28): прежних каналов разделителя быть не должно
+  for (const c of ['layout:drag-start', 'layout:set', 'layout:drag-end']) {
+    assert.ok(!INVOKE.has(c), `${c} остался в белом списке preload`);
+    assert.ok(!handled.has(c), `${c} остался в main`);
+  }
+  // сохранение раскладки — обычный invoke с ответом
+  assert.ok(INVOKE.has('layout:save') && handled.has('layout:save') && invoked.has('layout:save'));
+});
+
+test('ipc: send-каналы не пересекаются с invoke и событиями', () => {
+  const asInvoke = [...SEND].filter((c) => INVOKE.has(c));
+  const asEvent = [...SEND].filter((c) => EVENTS.has(c));
+  assert.deepEqual(asInvoke, [], 'send-канал одновременно в INVOKE: ' + asInvoke.join(', '));
+  assert.deepEqual(asEvent, [], 'send-канал одновременно в EVENTS: ' + asEvent.join(', '));
 });

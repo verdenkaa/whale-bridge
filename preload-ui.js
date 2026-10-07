@@ -1,5 +1,5 @@
 'use strict';
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 const INVOKE = new Set([
   'state:get', 'project:add', 'project:remove', 'project:bind', 'project:pending',
@@ -10,9 +10,13 @@ const INVOKE = new Set([
   'backups:stats', 'backups:clear',
   'prompt:get', 'prompt:tree', 'prompt:save-draft', 'prompt:set-excluded', 'prompt:build', 'prompt:copy', 'prompt:copy-reminder', 'prompt:copy-files',
   'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset', 'proposals:report', 'manual:view', 'manual:copy', 'context:list', 'context:ack', 'context:ack-all', 'context:known', 'proposal:merge',
-  'layout:drag-start', 'layout:set', 'layout:drag-end',
+  'layout:save',
 ]);
 const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound']);
+// Fire-and-forget (ipcRenderer.send): геометрия чата меняется каждый кадр перетаскивания
+// разделителя, и invoke с его round-trip только бы отставал (ТЗ §4). Ответ не нужен —
+// main просто применяет прямоугольник к WebContentsView.
+const SEND = new Set(['chat:set-bounds', 'chat:set-visible']);
 
 // В sandbox-преалоде доступен только process.argv: так main передаёт то, что требует fs
 // (например, абсолютный путь к AMD-сборке Monaco в dev и в app.asar.unpacked).
@@ -24,6 +28,10 @@ const argvValue = (name) => {
 
 contextBridge.exposeInMainWorld('api', {
   monacoVs: argvValue('monaco-vs'),
+  // getBoundingClientRect отдаёт CSS-пиксели, а setBounds работает в DIP: при zoom ≠ 1
+  // их надо делить на коэффициент. В приложении zoom штатно не меняется, но меню
+  // «Вид» содержит zoomIn/zoomOut, поэтому страховка дешёвая и осознанная.
+  zoomFactor: () => webFrame.getZoomFactor(),
   invoke(channel, arg) {
     if (!INVOKE.has(channel)) return Promise.reject(new Error('Unknown channel: ' + channel));
     return ipcRenderer.invoke(channel, arg);
@@ -33,5 +41,9 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_e, data) => cb(data);
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
+  },
+  send(channel, arg) {
+    if (!SEND.has(channel)) throw new Error('Unknown channel: ' + channel);
+    ipcRenderer.send(channel, arg);
   },
 });

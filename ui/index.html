@@ -18,43 +18,71 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="app">
-    <div id="chat-slot"></div>
-    <div id="splitter" title="Потяните, чтобы изменить ширину панелей"></div>
-    <aside id="panel">
-      <header id="head"></header>
-      <nav id="tabs"></nav>
-      <main id="body"></main>
+  <!-- Раскладка этапа B (ТЗ §5): CSS Grid, геометрией владеет renderer (§4, §28).
+       .app       — строки: topbar / workspace (нижняя панель появится в этапе D)
+       .workspace — колонки: chat-slot / разделитель / .ide
+       .ide       — колонки: файлы / разделитель / редактор / разделитель / боковая панель
+       Чат слева или справа — класс .chat-right на .workspace: main про сторону не знает,
+       он получает только прямоугольник #chat-slot. -->
+  <div class="app">
+    <header class="topbar">
+      <div class="brand" aria-label="Whale Bridge">🐋 Whale Bridge</div>
+      <!-- содержимое рисует ui/app.js: чат, проект, подсказки, переключатель стороны чата -->
+      <div id="head"></div>
+    </header>
 
-      <!-- Редактор живёт ОТДЕЛЬНО от #body: перерисовка вкладок не должна уничтожать
-           Monaco (ТЗ §7). Переключается классом hidden, содержимое не пересоздаётся. -->
-      <main id="editor-root" class="hidden">
-        <div id="ed-tree" class="ed-tree"></div>
-        <div class="ed-main">
+    <main class="workspace" id="workspace">
+      <!-- Пустой контейнер: задаёт геометрию, которую ResizeObserver отправляет в main
+           (chat:set-bounds), и main физически кладёт сюда WebContentsView с DeepSeek. -->
+      <div id="chat-slot"></div>
+      <div class="vsplit" id="vsplit-chat" title="Ширина чата" role="separator" aria-orientation="vertical"></div>
+
+      <div class="ide" id="ide">
+        <section class="files-panel" aria-label="Файлы проекта">
+          <!-- заголовок и плашка расхождений — ui/app.js; само дерево — ui/editor.js -->
+          <div id="files-head" class="files-head"></div>
+          <div id="files-banner"></div>
+          <div id="ed-tree" class="ed-tree"></div>
+        </section>
+        <div class="vsplit" id="vsplit-files" title="Ширина панели файлов" role="separator" aria-orientation="vertical"></div>
+
+        <section class="editor-panel" aria-label="Редактор">
           <div id="ed-tabs" class="ed-tabs"></div>
+          <!-- Monaco создаётся один раз и живёт в #ed-host постоянно (§7): вкладки и
+               панели переключаются классом hidden, DOM-контейнер не пересоздаётся. -->
           <div id="ed-host" class="ed-host hidden"></div>
+          <!-- ячейка Monaco DiffEditor (этап C) -->
+          <div id="diff-host" class="diff-host hidden"></div>
           <div id="ed-empty" class="ed-empty">
             <div>Файл не открыт.</div>
             <div class="path">Выберите файл в дереве слева или нажмите Ctrl+P.</div>
           </div>
           <div id="ed-status" class="ed-status"></div>
-        </div>
-        <!-- Модальные окна редактора — только внутри IDE-области: WebContentsView с
-             DeepSeek перекрывается CSS-слоями (ТЗ §24) -->
-        <div id="ed-overlay" class="ed-overlay hidden"></div>
-      </main>
+        </section>
+        <div class="vsplit" id="vsplit-side" title="Ширина боковой панели" role="separator" aria-orientation="vertical"></div>
 
-      <div id="toast" role="status" aria-live="polite"></div>
-    </aside>
+        <aside class="side-panel" aria-label="Предложения, история, промпт">
+          <nav id="tabs"></nav>
+          <main id="body"></main>
+        </aside>
+
+        <!-- Оверлеи и тосты — только внутри IDE-области: WebContentsView с DeepSeek
+             перекрывает любые CSS-слои, поверх чата не нарисуется ничего (§24). -->
+        <div id="ed-overlay" class="ed-overlay hidden"></div>
+        <div id="toast" role="status" aria-live="polite"></div>
+      </div>
+    </main>
   </div>
 
   <!-- Порядок важен: каждый следующий модуль использует предыдущий.
        src/versions.js и src/context.js общие для main и renderer: правила классификации
        версий и правило расхождения контекста должны быть в одном экземпляре, иначе
-       main и интерфейс начнут расходиться в том, знает ли модель файл. -->
+       main и интерфейс начнут расходиться в том, знает ли модель файл.
+       ui/layout.js — та же UMD-схема: математика раскладки общая для renderer и main. -->
   <script src="../src/versions.js"></script>
   <script src="../src/context.js"></script>
   <script src="dom.js"></script>
+  <script src="layout.js"></script>
   <script src="editor-state.js"></script>
   <script src="languages/gdscript.js"></script>
   <script src="monaco.js"></script>

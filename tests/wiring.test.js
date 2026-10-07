@@ -17,6 +17,7 @@ const editorfs = require('../src/editorfs');
 const fileops = require('../src/fileops');
 const Context = require('../src/context');
 const pg = require('../src/promptgen');
+const layoutMath = require('../ui/layout');
 
 const ROOT = path.join(__dirname, '..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
@@ -57,10 +58,15 @@ function whitelist(src, constName) {
 
 test('обвязка: каждый канал renderer разрешён преолодом и обработан в main', () => {
   const invoke = whitelist(preloadUi, 'INVOKE');
+  const sendWl = whitelist(preloadUi, 'SEND');
   const handled = new Set(channels(mainSrc, 'handle'));
+  // fire-and-forget приём (геометрия чата, блоки из страницы DeepSeek)
+  const received = new Set(channels(mainSrc.replace(/ipcMain\.on/g, 'ipcOn'), 'ipcOn'));
 
   const usedByUi = new Set();
   for (const src of uiSources) for (const c of channels(src, 'call')) usedByUi.add(c);
+  const sentByUi = new Set();
+  for (const src of uiSources) for (const c of channels(src, 'send')) sentByUi.add(c);
 
   assert.ok(usedByUi.size > 20, `renderer вызывает подозрительно мало каналов: ${usedByUi.size}`);
 
@@ -75,6 +81,16 @@ test('обвязка: каждый канал renderer разрешён прео
   const unused = [...handled].filter((c) => !invoke.has(c)).sort();
   assert.deepEqual(unused, [],
     'в main есть обработчик, не разрешённый преалом: до него не добраться, скорее всего опечатка');
+
+  // send-каналы (этап B): свой белый список, свой приём в main. Молчаливая потеря
+  // geometry-сообщения не роняет ничего — чат просто останется в старых границах,
+  // поэтому сверка здесь важнее, чем для invoke.
+  const sentForbidden = [...sentByUi].filter((c) => !sendWl.has(c)).sort();
+  assert.deepEqual(sentForbidden, [],
+    'renderer отправляет send-каналы вне белого списка SEND — preload бросит исключение');
+  const sentNotReceived = [...sendWl].filter((c) => !received.has(c)).sort();
+  assert.deepEqual(sentNotReceived, [],
+    'send-канал разрешён преолодом, но main его не слушает — сообщения уходят в никуда');
 });
 
 test('обвязка: события, которые слушает renderer, действительно рассылаются', () => {
@@ -107,6 +123,8 @@ test('обвязка: main не вызывает несуществующих м
     { obj: 'editorfs', api: new Set(Object.keys(editorfs)), what: 'src/editorfs' },
     { obj: 'fileops', api: new Set(Object.keys(fileops)), what: 'src/fileops' },
     { obj: 'pg', api: new Set(Object.keys(pg)), what: 'src/promptgen' },
+    // ui/layout.js общий для двух процессов (UMD): main вызывает sanitize/normalizeRect
+    { obj: 'layoutMath', api: new Set(Object.keys(layoutMath)), what: 'ui/layout' },
   ];
 
   for (const { obj, api, what } of targets) {

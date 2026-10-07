@@ -4,7 +4,13 @@ const path = require('path');
 const crypto = require('crypto');
 
 const DEFAULTS = () => ({
-  version: 1, projects: [], sessions: {}, lastProjectId: null, layoutRatio: 0.5,
+  version: 1, projects: [], sessions: {}, lastProjectId: null,
+  // layoutRatio — наследие прежней раскладки (долю ширины чата считал main).
+  // Поле больше не используется, но и не удаляется: чужие данные из config.json не выбрасываем.
+  layoutRatio: 0.5,
+  // Этап B (ТЗ §5, §28): ширины панелей в px и сторона чата. Геометрию считает renderer
+  // (ui/layout.js), main только хранит последнее сохранённое значение. null — первый запуск.
+  layout: null,
   promptDraft: null, // текущие поля генератора промптов
   promptPresets: [], // [{id, name, sections}]
   promptTreeOff: {}, // projectId -> [относительные пути, исключённые из структуры]
@@ -54,6 +60,9 @@ class Store {
     this.config = { ...DEFAULTS(), ...(await readJson(this.configPath, {})) };
     if (!this.config.contextKnown || typeof this.config.contextKnown !== 'object') this.config.contextKnown = {};
     if (!this.config.contextSeen || typeof this.config.contextSeen !== 'object') this.config.contextSeen = {};
+    // layout приводится к допустимому виду там, где живут правила раскладки (ui/layout.js), —
+    // здесь только грубая защита от мусора в config.json
+    if (this.config.layout !== null && (typeof this.config.layout !== 'object' || Array.isArray(this.config.layout))) this.config.layout = null;
     const h = await readJson(this.historyPath, []);
     // Прежние отметки «модель знает версию» переносим в журнал контекста — и сразу
     // сохраняем, иначе устаревшее поле modelSynced навсегда осталось бы в config.json.
@@ -288,7 +297,7 @@ class Store {
   async pruneAll(keep = 2) {
     const seen = new Set();
     for (const h of this.history) {
-      const k = h.projectId + ' ' + h.relPath;
+      const k = h.projectId + '\u0000' + h.relPath;
       if (seen.has(k)) continue;
       seen.add(k);
       await this.pruneFile(h.projectId, h.relPath, keep);

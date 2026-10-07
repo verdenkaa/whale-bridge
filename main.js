@@ -12,6 +12,9 @@ const { resolveInProject } = require('./src/paths');
 const { extractFencedBlocks } = require('./src/parser');
 const pg = require('./src/promptgen');
 const { pathToFileURL } = require('url');
+// Правила раскладки общие с renderer (UMD): sanitize сохранённых ширин и нормализация
+// прямоугольника чата должны совпадать с тем, что считает ui/layout.js в интерфейсе.
+const layoutMath = require('./ui/layout');
 
 const CHAT_URL = 'https://chat.deepseek.com';
 const PARTITION = 'persist:deepseek'; // сессия (cookies) сохраняется между запусками
@@ -45,8 +48,6 @@ let store = null;
 let proposals = null;
 let currentChatId = null;
 let pendingProjectId = null;
-let ratio = 0.5;
-let dragging = false;
 let watcher = null;
 let watchedPath = null;
 let watchTimer = null;
@@ -63,12 +64,9 @@ const sealAiBase = (chatId) => {
   proposals.sealAiBase(chatId).catch((e) => console.warn('[aiBase]', e.message));
 };
 
-function layout() {
-  if (!win || !chatView) return;
-  const [w, h] = win.getContentSize();
-  const cw = dragging ? 0 : Math.round(w * ratio);
-  chatView.setBounds({ x: 0, y: 0, width: cw, height: h });
-}
+// Этап B (ТЗ §4, §28): main НЕ считает геометрию. Раскладку определяет CSS в renderer,
+// а renderer отдаёт готовый прямоугольник #chat-slot через chat:set-bounds.
+// Здесь — только физическое размещение WebContentsView.
 
 // Слежение за папкой проекта: файлы, созданные/изменённые вне приложения, сразу попадают в дерево и в проверку путей
 function syncWatcher() {
@@ -116,8 +114,6 @@ async function updateChatFromUrl() {
 }
 
 function createWindow() {
-  ratio = store.config.layoutRatio || 0.5;
-
   win = new BrowserWindow({
     width: 1500,
     height: 920,
@@ -176,14 +172,14 @@ function createWindow() {
   wc.on('did-finish-load', updateChatFromUrl);
   wc.loadURL(CHAT_URL);
 
-  win.on('resize', layout);
+  // Геометрию чата отдаёт renderer (chat:set-bounds), поэтому win.on('resize') не нужен:
+  // ResizeObserver на #chat-slot срабатывает и при resize, и при maximize, и при смене масштаба.
   win.on('focus', () => { // файлы могли измениться, пока окно было в фоне
     fileops.invalidateIndex();
     send('files:changed');
     proposals.onChange();
   });
   win.on('closed', () => { win = null; chatView = null; });
-  layout();
 }
 
 function buildMenu() {
@@ -212,6 +208,30 @@ function handle(channel, fn) {
     return fn(arg || {});
   });
 }
+
+// Этап B (ТЗ §4): геометрия чата приходит из renderer — ResizeObserver на #chat-slot
+// измеряет getBoundingClientRect() и присылает готовый прямоугольник. Fire-and-forget:
+// во время перетаскивания разделителя сообщения идут каждый кадр, ответ не нужен.
+ipcMain.on('chat:set-bounds', (event, rect) => {
+  if (!chatView || !win || win.isDestroyed() || event.sender !== win.webContents) return;
+  const r = layoutMath.normalizeRect(rect);
+  if (!r) return; // нулевая ячейка или мусор — WebContentsView не трогаем
+  const [maxW, maxH] = win.getContentSize();
+  const x = Math.min(r.x, Math.max(0, maxW - 1));
+  const y = Math.min(r.y, Math.max(0, maxH - 1));
+  chatView.setBounds({
+    x, y,
+    width: Math.max(1, Math.min(r.width, maxW - x)),
+    height: Math.max(1, Math.min(r.height, maxH - y)),
+  });
+});
+
+// На время перетаскивания разделителя чат скрывается: WebContentsView — нативный слой,
+// он проглатывает события мыши, и без скрытия разделитель «терял» бы курсор.
+ipcMain.on('chat:set-visible', (event, visible) => {
+  if (!chatView || !win || win.isDestroyed() || event.sender !== win.webContents) return;
+  chatView.setVisible(visible !== false);
+});
 
 // Блоки кода от наблюдателя (строгая проверка структуры)
 ipcMain.on('chat:blocks', (event, payload) => {
@@ -248,7 +268,10 @@ function registerIpc() {
     project: store.getProjectForChat(currentChatId),
     pendingProjectId,
     lastProjectId: store.config.lastProjectId,
-    ratio,
+    // Этап B: renderer владеет геометрией — main отдаёт сохранённые ширины панелей,
+    // а не долю окна. layoutRatio больше не используется (миграция: старые конфиги
+    // просто получают дефолты, число из прежней версии ничего не ломает).
+    layout: layoutMath.sanitize(store.config.layout),
   }; });
 
 
@@ -508,18 +531,14 @@ function registerIpc() {
     return s;
   });
 
-  // Разделитель панелей. На время перетаскивания чат скрывается, чтобы события мыши не терялись.
-  handle('layout:drag-start', () => { dragging = true; chatView?.setVisible(false); layout(); });
-  handle('layout:set', ({ ratio: r }) => {
-    if (typeof r !== 'number' || !isFinite(r)) return;
-    ratio = Math.min(0.8, Math.max(0.2, r));
-  });
-  handle('layout:drag-end', async () => {
-    dragging = false;
-    chatView?.setVisible(true);
-    layout();
-    store.config.layoutRatio = ratio;
+  // ---- раскладка (этап B, ТЗ §4, §28) ----
+  // main не считает геометрию: renderer присылает готовые ширины панелей, а позицию чата
+  // задаёт прямоугольником в chat:set-bounds (ниже, в ipcMain.on).
+  handle('layout:save', async ({ layout }) => {
+    const winW = win && !win.isDestroyed() ? win.getContentSize()[0] : null;
+    store.config.layout = layoutMath.sanitize(layout, winW);
     await store.saveConfig();
+    return store.config.layout;
   });
 }
 

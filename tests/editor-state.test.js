@@ -405,3 +405,49 @@ test('editor-state: без src/context.js падает сразу, а не мо�
   const src = fs.readFileSync(path.join(__dirname, '..', 'ui', 'editor-state.js'), 'utf8');
   assert.throws(() => vm.runInContext(src, ctx, { filename: 'editor-state.js' }), /WhaleContext/);
 });
+
+test('editor-state: treeRowMarks соединяет буфер с журналами (этап B)', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  ES.setText(s, 'a.gd', 'v1\n');            // dirty
+  ES.setDiskHash(s, 'a.gd', B);             // drift: диск уехал от точки сохранения
+  ES.setKnown(s, 'a.gd', C, 'applied');     // модель знает версию C, на диске B → расхождение
+
+  const undoEntry = { id: 'h2', op: 'update', ts: 1, relPath: 'a.gd' };
+  const extras = {
+    manual: new Set(['a.gd', 'closed.gd']),
+    undo: new Map([['a.gd', undoEntry]]),
+    proposals: new Map([['p.gd', { count: 2, added: 5, removed: 1, firstId: 'x' }]]),
+  };
+
+  // открытый файл: видно всё — dirty, drift, расхождение с моделью, откат
+  const m = ES.treeRowMarks(s, 'a.gd', extras);
+  assert.equal(m.dirty, true);
+  assert.equal(m.drift, true);
+  assert.equal(m.diverged, true);
+  assert.equal(m.hasManual, true);
+  assert.equal(m.undo, undoEntry);
+  assert.equal(m.proposal, null);
+
+  // файл не открыт в редакторе, но есть в журнале расхождений — отметка остаётся
+  const mc = ES.treeRowMarks(s, 'closed.gd', extras);
+  assert.equal(mc.dirty, false);
+  assert.equal(mc.drift, false);
+  assert.equal(mc.diverged, true, 'расхождение видно и без открытого буфера');
+  assert.equal(mc.hasManual, true);
+
+  // файл с предложением, но без расхождений
+  const mp = ES.treeRowMarks(s, 'p.gd', extras);
+  assert.equal(mp.diverged, false);
+  assert.deepEqual(mp.proposal, { count: 2, added: 5, removed: 1, firstId: 'x' });
+
+  // совсем обычный файл
+  const mn = ES.treeRowMarks(s, 'clean.gd', extras);
+  assert.deepEqual(mn, { dirty: false, drift: false, missing: false, diverged: false, hasManual: false, undo: null, proposal: null });
+
+  // extras может не быть вовсе (данные журналов ещё не загрузились)
+  const me = ES.treeRowMarks(s, 'a.gd');
+  assert.equal(me.diverged, true, 'расхождение из knownHash видно и без журнала');
+  assert.equal(me.hasManual, false);
+  assert.equal(me.undo, null);
+});
