@@ -237,12 +237,18 @@
     if (!force && d.diskDrift) { showConflict(f, d, null); return false; }
 
     const base = force ? ES.forceSaveBase(state, p) : f.savedHash;
+    // Принятые в буфер ханки модели уходят вместе с сохранением (этап C): main по ним
+    // ставит source:'ai' в истории, помечает предложения применёнными и решает,
+    // знает ли модель итоговый текст (честное правило контекста).
+    const pendingAi = ES.getPendingAi(state, p);
     const r = await call('file:write', {
       projectId: f.projectId, path: f.path, content: f.text, expectedHash: base,
+      aiAccepts: pendingAi.length ? pendingAi : undefined,
     });
     if (!r) return false;
     if (r.ok) {
       ES.setSaved(state, p, { text: f.text, hash: r.hash });
+      ES.clearPendingAi(state, p);
       renderAll();
       onDirtyChange();
       toast(`Сохранено: ${f.name}`, 'ok');
@@ -253,15 +259,19 @@
     return false;
   }
 
+  /**
+   * Сохранить активный файл. Возвращает результат (Promise<boolean>): «Принять и
+   * сохранить» из диффа ждёт ответа, чтобы не оставлять просмотр открытым при ошибке.
+   */
   function saveActive() {
-    if (!state.active) { toast('Нет открытого файла', 'err'); return; }
+    if (!state.active) { toast('Нет открытого файла', 'err'); return false; }
     const f = ES.active(state);
     if (ES.isMissing(f)) {
       toast('Файл удалён или недоступен на диске — сохранение невозможно. Закройте вкладку или восстановите файл.', 'err');
-      return;
+      return false;
     }
-    if (!ES.isDirty(f)) { toast('Изменений нет', 'ok'); return; }
-    savePath(state.active, false);
+    if (!ES.isDirty(f)) { toast('Изменений нет', 'ok'); return false; }
+    return savePath(state.active, false);
   }
 
   /**
@@ -625,7 +635,7 @@
   /**
    * Показать две версии текста в #diff-host.
    * @returns {Promise<boolean>} true — Monaco принял дифф; false — caller показывает
-   * текстовый фолбэк (app.js переключает просмотр в режим «Подробности»).
+   * текстовый фолбэк (app.js переключает просмотр в режим текстового отчёта).
    */
   async function showDiff(opts) {
     if (!els || !els.diffEditor || !opts) return false;
@@ -680,6 +690,64 @@
     }
   }
 
+  // ---------- принятие предложения модели в буфер (этап C, §20–§21) ----------
+
+  /** Текущий текст буфера, если файл открыт; иначе null (caller читает диск сам). */
+  function getText(rel) {
+    const f = ES.get(state, rel);
+    return f ? f.text : null;
+  }
+
+  /**
+   * Положить текст (результат слияния выбранных ханков) в буфер файла. Файл
+   * открывается, если ещё не открыт; панель переключается в режим редактора —
+   * принятое надо видеть. Правка идёт через executeEdits, когда модель активна:
+   * стек undo сохраняется, и Ctrl+Z отменяет принятие, а не всю сессию.
+   *
+   * @returns {Promise<boolean>} true — буфер обновлён и помечен dirty
+   */
+  async function acceptIntoBuffer(projectIdArg, rel, text, aiInfo) {
+    if (typeof text !== 'string') return false;
+    let f = ES.get(state, rel);
+    if (!f) {
+      const opened = await openPath(rel, projectIdArg); // внутри — onWantEditorMode
+      if (!opened) return false;
+      f = ES.get(state, rel);
+      if (!f) return false;
+    } else {
+      onWantEditorMode();
+      await activate(rel);
+    }
+    const m = models.get(rel);
+    if (m) {
+      if (editor && editor.getModel() === m) {
+        editor.pushUndoStop();
+        editor.executeEdits('whale-accept', [{ range: m.getFullModelRange(), text, forceMoveMarkers: true }]);
+        editor.pushUndoStop();
+      } else if (m.getValue() !== text) {
+        m.setValue(text);
+      }
+    }
+    ES.setText(state, rel, m ? m.getValue() : text);
+    ES.setPendingAi(state, rel, aiInfo || null);
+    renderAll();
+    onDirtyChange();
+    return true;
+  }
+
+  /**
+   * Какие предложения сейчас приняты в буферы и не сохранены: proposalId → сведения.
+   * app.js рисует по ним бейдж «в буфере редактора» на карточках и восстанавливает
+   * выбор ханков при повторном открытии диффа.
+   */
+  function stagedProposals() {
+    const out = new Map();
+    for (const f of ES.list(state)) {
+      for (const info of ES.getPendingAi(state, f.path)) out.set(info.proposalId, { path: f.path, ...info });
+    }
+    return out;
+  }
+
   /** Явный пересчёт размеров Monaco — страховка после разделителей и смены режимов панели. */
   function layoutEditors() {
     if (editor) { try { editor.layout(); } catch { /* редактор ещё не поднят */ } }
@@ -728,6 +796,10 @@
       h('span', {}, f.eol === 'crlf' ? 'CRLF' : 'LF'),
       f.hasBom && h('span', {}, 'BOM'),
       badge,
+      d.pendingAi && d.pendingAi.length > 0 && h('span', {
+        class: 'badge', style: 'border-color: var(--accent); color: var(--accent)',
+        title: 'Изменения из предложения модели приняты в буфер и ещё не сохранены на диск',
+      }, `принято от модели: ${d.pendingAi.length}`),
       d.modelDiverged && h('span', {
         class: 'badge bad',
         title: 'Модель в чате видела другую версию этого файла и может предлагать правки от устаревшего кода',
@@ -921,6 +993,7 @@
     mount, setProject, setVisible, openPath, activate, closePath, closeActive,
     nextTab, saveActive, showQuickOpen, refreshDisk, handleKey, ackCurrent,
     setTreeExtras, refreshTree, layout: layoutEditors, showDiff, hideDiff,
+    getText, acceptIntoBuffer, stagedProposals,
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),
     isVisible: () => visible,

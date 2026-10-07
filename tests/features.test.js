@@ -125,6 +125,38 @@ test('proposal: решения «принято/отклонено» переж�
   assert.match(fv.newText, /x = 4/);
 });
 
+test('proposal: markAppliedExternally — принятие в буфер редактора закрывает предложение', async (t) => {
+  const { root, store, chat } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
+  const pm = new ProposalManager({ store });
+  pm.ingest(chat, [{ key: 'k1', text: '# &a.py\nx = 2\n' }]);
+  const [item] = await pm.list(chat, true);
+  assert.equal(item.status, 'pending');
+
+  // Пользователь принял предложение в буфер и сохранил его сам: main вызывает этот метод
+  // после успешного file:write. Диск метод НЕ трогает — запись уже сделана редактором.
+  assert.equal(pm.markAppliedExternally(item.id, { historyId: 'h-1' }), true);
+  const [after] = await pm.list(chat, true);
+  assert.equal(after.status, 'applied');
+  assert.equal((await pm.view(item.id)).historyId, 'h-1');
+  assert.equal(await fs.readFile(path.join(root, 'a.py'), 'utf8'), 'x = 1\n', 'диск не изменён');
+
+  // повторный вызов и неизвестный id не ломают состояние
+  assert.equal(pm.markAppliedExternally(item.id, { historyId: 'h-2' }), false);
+  assert.equal(pm.markAppliedExternally('нет-такого', {}), false);
+
+  // Журнал контекста метод не трогает: «модель знает» ставит main только когда сохранённый
+  // текст байт в байт равен предложенному (честный учёт — иначе модель верила бы в версию,
+  // которой никогда не видела).
+  assert.deepEqual(store.contextKnown()[chat] || {}, {});
+
+  // решение переживает перезапуск, как после обычного apply
+  const pm2 = new ProposalManager({ store });
+  pm2.ingest(chat, [{ key: 'k1-again', text: '# &a.py\nx = 2\n' }]);
+  const [restored] = await pm2.list(chat, true);
+  assert.equal(restored.status, 'applied');
+});
+
 test('patch: полный цикл через предложение — Diff, запись с CRLF, откат', async (t) => {
   const { root, pm, chat } = await setup(t);
   const file = path.join(root, 'big.gd');

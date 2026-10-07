@@ -1,5 +1,15 @@
 'use strict';
 // Построчный Diff (алгоритм Майерса). Без зависимостей.
+//
+// UMD: модуль нужен и в main (require), и в renderer (<script>, window.WhaleDiff) —
+// на этапе Crenderer сам считает ханки и предпросмотр слияния, а правило «авторитетный
+// дифф — src/diff.js, а не воркер Monaco» требует, чтобы реализация была одна.
+
+(function (root, factory) {
+  const api = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (root) root.WhaleDiff = api;
+})(typeof window !== 'undefined' ? window : null, function () {
 
 const MAX_D = 3000; // защита от квадратичного роста памяти
 
@@ -170,4 +180,5 @@ function toUnifiedDiff(oldText, newText, opts = {}) {
   return out.join('\n') + '\n';
 }
 
-module.exports = { diffLines, diffStats, toRows, splitLines, toUnifiedDiff };
+return { diffLines, diffStats, toRows, splitLines, toUnifiedDiff };
+});

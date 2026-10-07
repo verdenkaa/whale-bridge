@@ -54,7 +54,8 @@ test('UI: левая панель, режимы редактора, геомет
   const roots = {};
   for (const id of ['head', 'left-tabs', 'files-pane', 'body', 'toast', 'workspace', 'chat-slot',
     'vsplit-left', 'vsplit-chat', 'files-head', 'files-banner', 'prompt-close',
-    'view-host', 'diff-host', 'diff-bar', 'diff-editor', 'prompt-host', 'prompt-body',
+    'view-host', 'diff-host', 'diff-bar', 'diff-notices', 'hunk-strip', 'diff-editor',
+    'prompt-host', 'prompt-body',
     'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
@@ -141,7 +142,7 @@ test('UI: левая панель, режимы редактора, геомет
   global.requestAnimationFrame = (f) => setTimeout(f, 0);
 
   // заглушка редактора: smoke-тест проверяет СВЯЗИ в app.js, а не внутренности editor.js
-  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null, layoutCalls: 0, diffs: [], hideDiff: 0, diffOk: true };
+  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null, layoutCalls: 0, diffs: [], hideDiff: 0, diffOk: true, getTextValue: null, staged: new Map() };
   global.window.WhaleEditor = {
     mount: (els, hooks) => { ed.mount++; ed.els = els; ed.hooks = hooks; },
     setProject: (p) => ed.setProject.push(p ? p.id : null),
@@ -152,6 +153,10 @@ test('UI: левая панель, режимы редактора, геомет
     layout: () => { ed.layoutCalls++; },
     showDiff: async (pair) => { ed.diffs.push(pair); return ed.diffOk; },
     hideDiff: () => { ed.hideDiff++; },
+    getText: () => ed.getTextValue,
+    stagedProposals: () => ed.staged,
+    acceptIntoBuffer: async () => true,
+    saveActive: async () => true,
     hasUnsaved: () => false,
     dirtyPaths: () => [],
   };
@@ -164,6 +169,11 @@ test('UI: левая панель, режимы редактора, геомет
   assert.ok(global.window.WhaleDom && typeof global.window.WhaleDom.h === 'function');
   require(path.join(__dirname, '..', 'ui', 'layout.js'));
   assert.ok(global.window.WhaleLayout && typeof global.window.WhaleLayout.drag === 'function');
+  // src/diff.js и src/hunks.js — UMD, общие для main и renderer: в браузере их грузит
+  // index.html до app.js, здесь повторяем тот же порядок
+  require(path.join(__dirname, '..', 'src', 'diff.js'));
+  require(path.join(__dirname, '..', 'src', 'hunks.js'));
+  assert.ok(global.window.WhaleHunks && typeof global.window.WhaleHunks.toHunks === 'function');
   require(path.join(__dirname, '..', 'ui', 'app.js'));
   await tick(60);
 
@@ -224,32 +234,33 @@ test('UI: левая панель, режимы редактора, геомет
   await click(btn(roots['diff-bar'], '✓ Модель проинформирована'));
   assert.ok(log.some(([ch, a]) => ch === 'context:ack' && a.relPath === 'a.gd'));
   await tick(40);
-  // «Подробности» переключают на HTML-отчёт, «◧ Diff» возвращает в Monaco
-  await click(btn(roots['diff-bar'], 'Подробности'));
-  await tick(30);
-  assert.equal(hidden(roots['view-host']), false);
-  assert.match(text(roots['view-host']), /Модель в чате не знает об этом изменении/);
-  await click(btn(roots['view-host'], '← Закрыть'));
+  await click(btn(roots['diff-bar'], '✕'));
   await tick(40);
-  assert.equal(hidden(roots['view-host']), true, 'просмотр закрыт');
+  assert.equal(hidden(roots['diff-host']), true, 'просмотр закрыт');
   assert.equal(hidden(roots['ed-tabs']), false, 'редактор вернулся');
 
-  // клик по синей точке открывает предложение в Monaco-диффе и переключает левую панель
+  // клик по синей точке открывает предложение в Monaco-диффе и переключает левую панель.
+  // Буфер совпадает с диском ('a'), база модели — снимок 'a0': предпросмотр слияния
+  // при расхождении деградирует к тексту предложения, а переключатель режима показывает
+  // базу модели явно.
+  ed.getTextValue = 'a\n';
   const diffsBefore = ed.diffs.length;
   await ed.extras.callbacks.onProposal('big.gd');
   await tick(40);
   assert.equal(hidden(roots['diff-host']), false);
   const propDiff = ed.diffs[ed.diffs.length - 1];
   assert.deepEqual({ o: propDiff.original, m: propDiff.modified }, { o: 'a\n', m: 'b\n' });
-  assert.equal(propDiff.leftLabel, 'Текущий файл на диске');
+  assert.equal(propDiff.leftLabel, 'Ваш файл сейчас');
   assert.equal(log.filter(([ch]) => ch === 'layout:save').pop()[1].layout.leftTab, 'proposals');
-  // база сравнения переключается на версию, которую видела модель
-  await click(btn(roots['diff-bar'], 'База: файл на диске'));
+  // переключатель режима сравнения: версия модели → предложение
+  await click(btn(roots['diff-bar'], 'Сравнение: ваш файл → результат'));
   await tick(40);
   assert.equal(ed.diffs.length, diffsBefore + 2, 'дифф перерисован');
   assert.equal(ed.diffs[ed.diffs.length - 1].original, 'a0\n');
   assert.equal(ed.diffs[ed.diffs.length - 1].leftLabel, 'Версия, которую видела модель');
-  await click(btn(roots['diff-bar'], '← К списку') || btn(roots['diff-bar'], '✕'));
+  await click(btn(roots['diff-bar'], 'Сравнение: версия модели → предложение'));
+  await tick(40);
+  await click(btn(roots['diff-bar'], '✕'));
   await tick(40);
   assert.equal(hidden(roots['diff-host']), true);
 
@@ -278,16 +289,16 @@ test('UI: левая панель, режимы редактора, геомет
   assert.equal(hidden(roots['diff-host']), false);
   assert.match(text(roots['diff-bar']), /Предложение модели/);
   assert.match(text(roots['diff-bar']), /частичная правка · 2/);
-  await click(btn(roots['diff-bar'], 'Подробности'));
-  await tick(30);
-  assert.equal(hidden(roots['view-host']), false);
-  assert.match(text(roots['view-host']), /Частичная правка: блоков 3/);
-  assert.match(text(roots['view-host']), /функция\/класс заменены целиком, строки 5–8/);
-  assert.match(text(roots['view-host']), /Путь исправлен автоматически: «proj\/big\.gd» → «big\.gd»/);
-  assert.match(text(roots['view-host']), /Просмотреть итоговый файл/);
-  await click(btn(roots['view-host'], '◧ Diff'));
-  await tick(30);
-  assert.equal(hidden(roots['diff-host']), false, 'из отчёта можно вернуться в Monaco-дифф');
+  // предупреждения живут полоской над диффом — отдельного режима «Подробности» нет:
+  // он дублировал дифф (ручная проверка патча 0015)
+  assert.equal(hidden(roots['view-host']), true, 'отчёт не открывается сам');
+  assert.ok(!btn(roots['diff-bar'], 'Отчёт'), 'кнопки «Отчёт»/«Подробности» в шапке диффа нет');
+  assert.match(text(roots['diff-notices']), /Частичная правка: блоков 3/);
+  assert.match(text(roots['diff-notices']), /Путь исправлен автоматически: «proj\/big\.gd» → «big\.gd»/);
+  const patchRows = findAll(roots['diff-notices'], (e) => e.tag === 'summary');
+  assert.equal(patchRows.length, 1);
+  await click(patchRows[0]); // <details> раскрывается нативно — проверяем содержимое
+  assert.match(text(roots['diff-notices']), /строки 5–8|Блок 1/);
   await click(btn(roots['diff-bar'], '✕'));
   await tick(40);
   assert.equal(hidden(roots['diff-host']), true);
@@ -343,6 +354,85 @@ test('UI: левая панель, режимы редактора, геомет
   await tick(20);
   assert.equal(hidden(roots['files-pane']), false);
   assert.equal(hidden(roots.body), true);
+
+  // ---------- принятие предложения по ханкам в буфер (§20–§22) ----------
+  // Предложение big.gd: база модели (снимок) 'a0\n', предложено 'b\n'.
+  // Буфер 'a0\n' = база: слияние быстро и точно равно предложению.
+  ed.getTextValue = 'a0\n';
+  await click(leftTab('Предложения'));
+  await tick(30);
+  await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(60);
+  assert.equal(hidden(roots['diff-host']), false);
+
+  // список ханков нарисован, по умолчанию выбраны все
+  const hunkBoxes = findAll(roots['hunk-strip'], (e) => e.tag === 'input');
+  assert.equal(hunkBoxes.length, 1, 'ханк один: a0 → b');
+  assert.ok('checked' in hunkBoxes[0].attrs, 'ханк выбран по умолчанию'); // boolean-атрибут
+  assert.match(text(roots['hunk-strip']), /Изменений: 1/);
+  assert.match(text(roots['hunk-strip']), /выбрано 1/);
+
+  // предпросмотр: слева ваш буфер, справа — результат принятия
+  const preview = ed.diffs[ed.diffs.length - 1];
+  assert.equal(preview.original, 'a0\n', 'слева — ваш файл');
+  assert.equal(preview.modified, 'b\n', 'справа — результат принятия');
+  assert.equal(preview.leftLabel, 'Ваш файл сейчас');
+
+  // снять галочку — предпросмотр возвращается к вашему файлу (пустой дифф)
+  hunkBoxes[0].listeners.change[0]({ target: { checked: false } });
+  await tick(40);
+  const empty = ed.diffs[ed.diffs.length - 1];
+  assert.deepEqual({ o: empty.original, m: empty.modified }, { o: 'a0\n', m: 'a0\n' });
+  hunkBoxes[0] && findAll(roots['hunk-strip'], (e) => e.tag === 'input')[0].listeners.change[0]({ target: { checked: true } });
+  await tick(40);
+
+  // принять в буфер: текст уходит в редактор, на диск ничего не пишется
+  const accepted = [];
+  global.window.WhaleEditor.acceptIntoBuffer = async (pid, rel, txt, info) => { accepted.push({ pid, rel, txt, info }); return true; };
+  await click(btn(roots['diff-bar'], 'Принять все (1) в буфер'));
+  await tick(60);
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].rel, 'big.gd');
+  assert.equal(accepted[0].txt, 'b\n');
+  assert.equal(accepted[0].info.acceptedHunks, 1);
+  assert.equal(accepted[0].info.totalHunks, 1);
+  assert.equal(accepted[0].info.proposedText, 'b\n', 'точный текст предложения — для честного учёта контекста');
+  assert.ok(!log.some(([ch]) => ch === 'file:write'), 'принятие в буфер НЕ пишет на диск');
+  // карточка и шапка диффа помечают, что изменения ждут сохранения
+  ed.staged.set('a', { path: 'big.gd', acceptedHunks: 1, totalHunks: 1, contentHash: 'c' });
+  await click(leftTab('История')); // перерисовать список
+  await tick(20);
+  await click(leftTab('Предложения'));
+  await tick(30);
+  assert.match(text(roots.body), /в буфере редактора/);
+
+  // «Принять и сохранить» вызывает сохранение редактора и закрывает просмотр
+  let saveCalls = 0;
+  global.window.WhaleEditor.saveActive = async () => { saveCalls++; return true; };
+  await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(60);
+  await click(btn(roots['diff-bar'], 'Принять и сохранить'));
+  await tick(60);
+  assert.equal(saveCalls, 1);
+  assert.equal(hidden(roots['diff-host']), true, 'после сохранения просмотр закрыт');
+  ed.staged.clear();
+
+  // пересечение правок: буфер 'c\n', база модели 'a0\n', предложение 'b\n' — конфликт.
+  // В буфер не пишется ничего, показывается отчёт с маркерами (§22).
+  ed.getTextValue = 'c\n';
+  await click(findAll(roots.body, (e) => e.tag === 'button' && e.className.startsWith('card'))[0]);
+  await tick(60);
+  const acceptedBefore = accepted.length;
+  await click(btn(roots['diff-bar'], 'Принять все (1) в буфер'));
+  await tick(60);
+  assert.equal(accepted.length, acceptedBefore, 'при конфликте в буфер ничего не пишется');
+  assert.equal(hidden(roots['view-host']), false, 'показан отчёт о конфликте');
+  assert.match(text(roots['view-host']), /Конфликт merge/);
+  assert.match(text(roots['view-host']), /Ни диск, ни буфер редактора не изменены/);
+  await click(btn(roots['view-host'], '← К предложению'));
+  await tick(60);
+  assert.equal(hidden(roots['view-host']), true, 'отчёт закрыт');
+  ed.getTextValue = 'a\n';
 
   // ---------- «Промпт» вместо редактора, с возвратом в прежнее окно ----------
   const promptBtn = btn(roots.head, 'Промпт');

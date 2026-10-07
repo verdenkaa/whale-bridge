@@ -175,3 +175,36 @@ test('обвязка: каналы чат-преалода принимаютс�
   const missing = sent.filter((c) => !received.has(c)).sort();
   assert.deepEqual(missing, [], 'чат отправляет каналы, которые main не слушает');
 });
+
+test('wiring: сохранение принятых ханков связано на всех трёх сторонах', () => {
+  // renderer шлёт aiAccepts → main чистит их и зовёт markAppliedExternally + recordContext
+  // → editorfs пишет историю с source:'ai'. Оборванное звено здесь означает, что принятые
+  // правки модели уйдут на диск как «ручные», а журнал контекста соврёт.
+  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'app.js'), 'utf8');
+  const editorSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'editor.js'), 'utf8');
+  const stateSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'editor-state.js'), 'utf8');
+  const editorfsSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'editorfs.js'), 'utf8');
+  const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
+
+  assert.match(appSrc, /acceptIntoBuffer/, 'app.js принимает ханки в буфер редактора');
+  assert.match(editorSrc, /aiAccepts: pendingAi\.length \? pendingAi : undefined/,
+    'editor.js передаёт принятые ханки вместе с file:write');
+  assert.match(stateSrc, /function setPendingAi/, 'editor-state хранит принятые, но не сохранённые правки');
+  assert.match(mainSrc, /function cleanAiAccepts/, 'main чистит aiAccepts из renderer');
+  assert.match(mainSrc, /markAppliedExternally/, 'main закрывает предложения после сохранения из редактора');
+  assert.match(mainSrc, /normEol\(accepts\[0\]\.proposedText\) === normEol\(content\)/,
+    'честное правило контекста: точное совпадение с текстом модели (с учётом EOL)');
+  assert.match(editorfsSrc, /source === 'ai' \? 'ai' : 'manual'/, 'история редактора различает ai/manual');
+  // src/hunks.js и src/diff.js — UMD, общие для main и renderer: index.html грузит их до app.js
+  const at = (needle) => {
+    const i = htmlSrc.indexOf(needle);
+    assert.ok(i >= 0, `в index.html нет ${needle}`);
+    return i;
+  };
+  assert.ok(at('src/diff.js') < at('src/hunks.js'), 'diff.js подключается раньше hunks.js');
+  assert.ok(at('src/hunks.js') < at('"app.js"'), 'hunks.js подключается раньше app.js');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'proposals.js'), 'utf8'),
+    /const \{ merge3 \} = require\('\.\/hunks'\)/,
+    'proposals.js использует то же слияние, что и renderer — правило одно');
+});

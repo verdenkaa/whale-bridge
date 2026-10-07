@@ -246,3 +246,24 @@ test('file:read/write без проекта — внятная ошибка, а 
   const w = await editorfs.writeFromEditor({ project: null, rel: 'a.gd', content: 'x', expectedHash: ABSENT, store: null });
   assert.equal(w.code, 'no-project');
 });
+
+test('file:write с принятыми ханками модели: source ai и подробности в журнале', async (t) => {
+  const { root, store, project, chat } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.gd'), 'extends Node\n');
+  const r0 = await editorfs.readForEditor(project, 'a.gd');
+  const aiMeta = { proposals: [{ id: 'p1', acceptedHunks: 2, totalHunks: 3 }] };
+  const r = await editorfs.writeFromEditor({
+    project, rel: 'a.gd', content: 'extends Node\n\nfunc _ready():\n\tpass\n',
+    expectedHash: r0.hash, store, chatId: chat, source: 'ai', aiMeta,
+  });
+  assert.equal(r.ok, true, r.error);
+  const h = store.history.find((x) => x.id === r.historyId);
+  assert.equal(h.source, 'ai', 'запись журнала помечена источником ai (§10)');
+  assert.deepEqual(h.ai, aiMeta, 'видно, какие предложения и сколько ханков приняты');
+  // неизвестный source не проходит: normalizeSource оставляет только ai/manual/rollback
+  const r2 = await editorfs.writeFromEditor({
+    project, rel: 'a.gd', content: 'x\n', expectedHash: r.hash, store, chatId: chat, source: 'что угодно',
+  });
+  assert.equal(r2.ok, true, r2.error);
+  assert.equal(store.history.find((x) => x.id === r2.historyId).source, 'manual');
+});

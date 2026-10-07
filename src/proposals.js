@@ -10,6 +10,9 @@ const { ABSENT, classifyVersions } = require('./versions');
 const Context = require('./context');
 const editorfs = require('./editorfs');
 const { applyEdits } = require('./patch');
+// Трёхстороннее слияние живёт в src/hunks.js (UMD): тем же кодом пользуется renderer
+// при принятии предложения в буфер редактора — правило слияния должно быть одно.
+const { merge3 } = require('./hunks');
 
 const MAX_BACKUPS_PER_FILE = 2;
 
@@ -35,72 +38,6 @@ const MAX_COPY_CHARS = 4_000_000;
 const MAX_ROWS = 4000;
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 24);
 const countLines = (t) => (t === '' ? 0 : t.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n').length);
-const linesOf = (t) => (t === '' ? [] : t.replace(/\r\n?/g, '\n').split('\n').filter((x, i, a) => !(i === a.length - 1 && x === '')));
-
-function diffChanges(base, other) {
-  const ops = diffLines(base, other);
-  if (ops == null) return null;
-  const out = []; let baseIndex = 0;
-  for (let i = 0; i < ops.length;) {
-    if (ops[i].type === 'eq') { baseIndex += linesOf(ops[i].text).length; i++; continue; }
-    const start = baseIndex; let oldCount = 0; const replacement = [];
-    while (i < ops.length && ops[i].type !== 'eq') {
-      if (ops[i].type === 'del') oldCount += linesOf(ops[i].text).length;
-      else replacement.push(...linesOf(ops[i].text));
-      i++;
-    }
-    out.push({ start, end: start + oldCount, replacement });
-    baseIndex += oldCount;
-  }
-  return out;
-}
-
-function merge3(base, ours, theirs) {
-  const a = diffChanges(base, ours), b = diffChanges(base, theirs);
-  if (!a || !b) return { ok: false, conflicts: 1, text: null };
-  const changes = [...a.map((x) => ({ ...x, side: 'ours' })), ...b.map((x) => ({ ...x, side: 'theirs' }))]
-    .sort((x, y) => x.start - y.start || x.end - y.end || (x.side === 'ours' ? -1 : 1));
-  const groups = [];
-  for (const ch of changes) {
-    const last = groups.at(-1);
-    const overlap = last && last.some((x) =>
-      (x.start === x.end && ch.start === ch.end && x.start === ch.start) ||
-      (x.start < ch.end && ch.start < x.end) ||
-      (x.start === x.end && x.start > ch.start && x.start < ch.end) ||
-      (ch.start === ch.end && ch.start > x.start && ch.start < x.end));
-    if (overlap) last.push(ch); else groups.push([ch]);
-  }
-  const accepted = [], conflicts = [];
-  for (const group of groups) {
-    const ours = group.filter((x) => x.side === 'ours'), theirs = group.filter((x) => x.side === 'theirs');
-    if (!ours.length || !theirs.length) { accepted.push(group[0]); continue; }
-    if (ours.length === 1 && theirs.length === 1 &&
-        ours[0].start === theirs[0].start && ours[0].end === theirs[0].end &&
-        ours[0].replacement.join('\n') === theirs[0].replacement.join('\n')) { accepted.push(ours[0]); continue; }
-    conflicts.push({ start: Math.min(...group.map((x) => x.start)), end: Math.max(...group.map((x) => x.end)),
-      ours: ours.map((x) => x.replacement.join('\n')).join('\n'),
-      theirs: theirs.map((x) => x.replacement.join('\n')).join('\n') });
-  }
-  const baseLines = linesOf(base);
-  const all = [...accepted.map((x) => ({ ...x, kind: 'ok' })), ...conflicts.map((x) => ({ ...x, kind: 'conflict' }))]
-    .sort((x, y) => x.start - y.start || x.end - y.end);
-  const out = []; let pos = 0;
-  for (const ch of all) {
-    if (ch.start > pos) out.push(...baseLines.slice(pos, ch.start));
-    if (ch.kind === 'ok') out.push(...ch.replacement);
-    else {
-      out.push('<<<<<<< YOUR CURRENT FILE');
-      if (ch.ours) out.push(...linesOf(ch.ours));
-      out.push('=======');
-      if (ch.theirs) out.push(...linesOf(ch.theirs));
-      out.push('>>>>>>> AI PROPOSAL');
-    }
-    pos = Math.max(pos, ch.end);
-  }
-  if (pos < baseLines.length) out.push(...baseLines.slice(pos));
-  return { ok: conflicts.length === 0, conflicts: conflicts.length, text: out.join('\n') + (base.endsWith('\n') ? '\n' : '') };
-}
-
 // Модель иногда пишет путь вместе с именем корневой папки («myproject/test.py»), хотя она уже в корне.
 // Отбрасываем это имя, если внутри проекта нет настоящей подпапки с таким названием.
 async function stripRootPrefix(rootAbs, relInput) {
@@ -456,7 +393,7 @@ class ProposalManager {
     // открытому просмотру. baseText — что на диске сейчас; aiBaseText — снимок версии,
     // которую видела модель (null, если снимка нет: интерфейс обязан это оговорить).
     let baseText = null;
-    if (ev.projectId && ev.op === 'update' && ev.state === 'update') {
+    if (ev.projectId && (ev.op === 'update' || ev.op === 'delete') && (ev.state === 'update' || ev.state === 'delete')) {
       const project = this.store.getProject(ev.projectId);
       if (project) {
         const r = await resolveInProject(project.path, ev.relPath);
@@ -578,6 +515,28 @@ class ProposalManager {
     await this.store.setProposalDecision(p.chatId, p.contentHash, 'applied', opId);
     this.onChange();
     return { ok: true, historyId: opId };
+  }
+
+  /**
+   * Предложение было записано на диск НЕ через apply(), а сохранением из редактора:
+   * пользователь принял изменения (целиком или выбранные ханки) в буфер, возможно
+   * смешал со своими правками, и нажал Ctrl+S (этап C, §20–§21).
+   *
+   * Отличия от apply() принципиальные:
+   *   - текст на диске может НЕ равняться тексту предложения — поэтому журнал контекста
+   *     здесь не трогается: правило «модель знает версию» ставит main только когда
+   *     сохранённое содержимое байт в байт равно предложенному (честный учёт);
+   *   - история и резервные копии уже созданы editorfs.writeFromEditor (source: 'ai').
+   */
+  markAppliedExternally(id, { historyId }) {
+    const p = this.get(id);
+    if (!p || p.status !== 'pending') return false;
+    p.status = 'applied';
+    p.historyId = historyId || null;
+    this.store.setProposalDecision(p.chatId, p.contentHash, 'applied', historyId || null)
+      .catch((e) => console.error('[proposal decision]', e));
+    this.onChange();
+    return true;
   }
 
   // ---- история ----

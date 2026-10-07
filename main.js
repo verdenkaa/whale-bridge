@@ -327,7 +327,28 @@ function registerIpc() {
 
   handle('file:read', ({ projectId, path: rel }) => editorfs.readForEditor(projectOf(projectId), rel));
 
-  handle('file:write', async ({ projectId, path: rel, content, expectedHash }) => {
+  // Этап C (§20–§21): принятые в буфер ханки предложения приходят вместе с сохранением.
+  // payload — из renderer, поэтому чистим так же строго, как chat:blocks.
+  function cleanAiAccepts(raw) {
+    if (!Array.isArray(raw) || !raw.length || raw.length > 20) return [];
+    const out = [];
+    for (const a of raw) {
+      if (!a || typeof a !== 'object') continue;
+      if (typeof a.proposalId !== 'string' || !a.proposalId) continue;
+      const num = (v) => (typeof v === 'number' && isFinite(v) && v >= 0 ? Math.round(v) : null);
+      out.push({
+        proposalId: a.proposalId.slice(0, 64),
+        acceptedHunks: num(a.acceptedHunks),
+        totalHunks: num(a.totalHunks),
+        proposedText: typeof a.proposedText === 'string' && a.proposedText.length <= 2_000_000
+          ? a.proposedText
+          : null,
+      });
+    }
+    return out;
+  }
+
+  handle('file:write', async ({ projectId, path: rel, content, expectedHash, aiAccepts }) => {
     const project = projectOf(projectId);
     // До перезаписи: если журнал знает текущее содержимое только по хэшу (записи,
     // сделанные до появления снимков, и перенесённые миграцией), успеваем сохранить его.
@@ -342,10 +363,31 @@ function registerIpc() {
         }
       } catch { /* страховка не должна мешать сохранению */ }
     }
+    const accepts = cleanAiAccepts(aiAccepts);
     const r = await editorfs.writeFromEditor({
       project, rel, content, expectedHash, store, chatId: currentChatId,
+      // §10: сохранение, в котором участвовали ханки модели, — операция источника 'ai'
+      source: accepts.length ? 'ai' : 'manual',
+      aiMeta: accepts.length ? { proposals: accepts.map(({ proposalId, acceptedHunks, totalHunks }) => ({ id: proposalId, acceptedHunks, totalHunks })) } : null,
     });
-    if (r.ok) proposals.onChange(); // drift-детекция предложений зависит от нового состояния файла
+    if (r.ok) {
+      for (const a of accepts) proposals.markAppliedExternally(a.proposalId, { historyId: r.historyId });
+      // Честный учёт контекста: «модель знает» ставится ТОЛЬКО если сохранённый текст
+      // байт в байт равен предложенному ею и в сохранении не смешано несколько правок.
+      // Частичное принятие или примесь ручных правок даёт версию, которую модель не видела, —
+      // файл остаётся с отметкой расхождения, и это видно.
+      // Переводы строк не смысл: модель присылает LF, файл на диске может быть CRLF —
+      // сравниваем нормализованно, иначе полное принятие на CRLF-файле вечно выглядело бы
+      // как «модель не знает версию».
+      const normEol = (t) => (typeof t === 'string' ? t.replace(/\r\n/g, '\n') : t);
+      const exact = accepts.length === 1 && typeof accepts[0].proposedText === 'string'
+        && normEol(accepts[0].proposedText) === normEol(content);
+      if (exact && project && r.hash) {
+        await proposals.recordContext(currentChatId, project.id,
+          [{ relPath: r.path, hash: r.hash, content }], 'applied').catch((e) => console.error('[context]', e));
+      }
+      proposals.onChange(); // drift-детекция предложений зависит от нового состояния файла
+    }
     return r;
   });
 

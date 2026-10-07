@@ -75,7 +75,7 @@ async function hashesForEditor(project, rels) {
  *
  * @returns {Promise<{ok:true, path, hash, historyId}|{ok:false, code, error, actualHash?, diskContent?}>}
  */
-async function writeFromEditor({ project, rel, content, expectedHash, store, chatId = null }) {
+async function writeFromEditor({ project, rel, content, expectedHash, store, chatId = null, source = 'manual', aiMeta = null }) {
   if (!project) return fail('no-project', 'Проект не выбран');
   if (typeof content !== 'string') return fail('bad-content', 'Содержимое должно быть строкой');
   if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) {
@@ -121,18 +121,22 @@ async function writeFromEditor({ project, rel, content, expectedHash, store, cha
     if (res.code === 'io') {
       await store.addHistory({
         id: opId, ts: Date.now(), chatId, projectId: project.id, projectName: project.name,
-        relPath: r.rel, op: 'update', status: 'failed', error: res.error, source: 'manual',
+        relPath: r.rel, op: 'update', status: 'failed', error: res.error,
+        source: source === 'ai' ? 'ai' : 'manual', ai: aiMeta || undefined,
       });
     }
     return res;
   }
 
-  // §10: это правка пользователя в редакторе, а не предложение модели
+  // §10: источник записи. По умолчанию это правка пользователя в редакторе; source='ai'
+  // приходит, когда в сохранении участвовали принятые ханки предложения модели —
+  // подробности (какие предложения, сколько ханков) лежат в aiMeta.
   await store.addHistory({
     id: opId, ts: Date.now(), chatId, projectId: project.id, projectName: project.name,
     relPath: r.rel, op: 'update', newRelPath: null,
     status: 'applied', beforeHash: res.beforeHash, afterHash: res.afterHash, error: null,
-    source: 'manual',
+    source: source === 'ai' ? 'ai' : 'manual',
+    ai: aiMeta || undefined,
   });
   await store.pruneFile(project.id, r.rel, MAX_BACKUPS_PER_FILE).catch((e) => console.error('[prune]', e));
 

@@ -64,8 +64,11 @@
     // (panelBeforePrompt), и возвращает туда же: редактор или просмотр — явное требование.
     panel: 'editor',
     panelBeforePrompt: 'editor',
-    viewPane: 'diff',    // внутри режима view: Monaco-дифф или 'details' — подробный HTML-отчёт
-    diffBase: 'current', // база сравнения предложения: 'current' (диск) | 'ai' (версия модели)
+    viewPane: 'diff',    // внутри режима view: Monaco-дифф или 'details' — текстовый отчёт
+    diffBase: 'current', // что слева в диффе предложения: 'current' (ваш файл) | 'ai' (версия модели)
+    // Ханки текущего предложения (этап C): считаются src/hunks.js от базы модели,
+    // hunkBase хранит, от каких текстов они построены, — пересчёт только при смене.
+    hunks: null, hunkBase: null, hunkSel: null,
     history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
     context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
@@ -315,6 +318,12 @@
     return box;
   }
 
+  /** Сведения о предложении, принятом в буфер редактора и ещё не сохранённом. */
+  function stagedOf(proposalId) {
+    const ed = window.WhaleEditor;
+    return ed && ed.stagedProposals ? ed.stagedProposals().get(proposalId) || null : null;
+  }
+
   function proposalCard(p, versions) {
     const title = p.op === 'create' ? `➕ Create ${base(p.relPath)}` : `🔍 Diff & Update ${base(p.relPath)}`;
     const done = p.status !== 'pending';
@@ -330,6 +339,10 @@
         p.warnings > 0 && h('span', { class: 'badge warn' }, 'возможно неполный код'),
         p.encodingWarning && h('span', { class: 'badge warn', title: p.encodingWarning }, 'не UTF-8'),
         p.manualChanged && h('span', { class: 'badge warn', title: 'Файл изменён на диске после последней операции Whale Bridge' }, 'изменён вручную'),
+        stagedOf(p.id) && h('span', {
+          class: 'badge', style: 'border-color: var(--accent); color: var(--accent)',
+          title: `Изменения приняты в буфер редактора (${stagedOf(p.id).acceptedHunks ?? '?'} из ${stagedOf(p.id).totalHunks ?? '?'}) и ждут сохранения`,
+        }, 'в буфере редактора'),
         p.status === 'pending' && versions > 1 && h('span', { class: 'badge warn' }, `версий этого файла: ${versions}`),
         p.historical && h('span', { class: 'badge' }, 'из истории чата')));
     return h('div', { class: 'card-wrap' }, card,
@@ -804,7 +817,7 @@
         h('button', { class: 'btn ghost', style: 'justify-self:start', onclick: closeView }, '← К предложению'),
         h('div', { class: 'view-title' }, 'Конфликт merge'),
         h('div', { class: 'path' }, d.relPath)),
-      h('div', { class: 'notice bad' }, `Автоматическое слияние не выполнено: конфликтов ${d.conflicts}. Ни одна версия на диске не изменена.`),
+      h('div', { class: 'notice bad' }, `Автоматическое слияние не выполнено: конфликтов ${d.conflicts}. Ни диск, ни буфер редактора не изменены.`),
       d.conflictRows?.length && h('div', { class: 'stack' },
         h('div', { class: 'path' }, 'DIFF: текущий файл → предложение ИИ'),
         diffTable(d.conflictRows, false)),
@@ -1175,26 +1188,212 @@
   function diffCapable(kind, d) {
     if (!d) return false;
     if (kind === 'proposal') {
-      if (d.op !== 'update' && d.op !== 'create') return false; // delete/move — отчёт с пояснениями
+      if (!['update', 'create', 'delete'].includes(d.op)) return false; // move — отчёт с пояснениями
       if (typeof d.newText !== 'string') return false;          // patch-failed/open — сравнивать нечего
       return d.op === 'create' || typeof d.baseText === 'string';
     }
     if (kind === 'manual') return d.diverged === true && typeof d.baseText === 'string' && typeof d.currentText === 'string';
     if (kind === 'history') return !d.missingBackup && typeof d.beforeText === 'string' && typeof d.afterText === 'string';
-    return false; // merge — разметка конфликтов, всегда «Подробности»
+    return false; // merge — разметка конфликтов, всегда текстовый отчёт
   }
 
-  /** Обе стороны диффа + подписи. null — пары нет, просмотр уходит в «Подробности». */
-  function diffPair(kind, d) {
+  // ---------- просмотр предложения по ханкам (этап C, §20–§22) ----------
+  //
+  // Правила одни и покрыты node-тестами (src/hunks.js): ханки и слияние считает он,
+  // а не воркер Monaco — решение о том, какой текст попадёт в буфер, не может зависеть
+  // от асинхронной отрисовки. Monaco здесь только показывает результат.
+  const H = window.WhaleHunks;
+  const D = window.WhaleDiff;
+
+  /**
+   * База слияния — всегда версия, которую видела модель (§22), а не диск и не последняя
+   * операция Whale Bridge. Берём снимок из журнала контекста; если снимка нет, но файл
+   * с тех пор не менялся (aiBaseHash === baseHash), диск и есть база. Иначе базы нет —
+   * и частичное принятие честно запрещается: сливать не с чем.
+   */
+  function mergeBaseFor(d) {
+    if (typeof d.aiBaseText === 'string') return { text: d.aiBaseText, source: 'ai' };
+    if (d.aiBaseHash && d.baseHash && d.aiBaseHash === d.baseHash && typeof d.baseText === 'string') {
+      return { text: d.baseText, source: 'disk-equals-ai' };
+    }
+    return null;
+  }
+
+  /** Выбор ханков: Set индексов. Сбрасывается при смене предложения/базы. */
+  function hunkSelection() {
+    return S.hunkSel || (S.hunkSel = new Set());
+  }
+
+  function computeHunks(d) {
+    const base = mergeBaseFor(d);
+    if (!base || typeof d.newText !== 'string') { S.hunks = null; S.hunkBase = null; return; }
+    if (S.hunkBase && S.hunkBase.id === d.id && S.hunkBase.baseText === base.text && S.hunkBase.newText === d.newText) return;
+    S.hunks = H ? H.toHunks(base.text, d.newText, 3) : null;
+    S.hunkBase = { id: d.id, baseText: base.text, newText: d.newText };
+    const sel = hunkSelection();
+    sel.clear();
+    // По умолчанию отмечены все ханки: «принять всё» должно остаться одним нажатием
+    for (const hk of S.hunks || []) sel.add(hk.index);
+    // Предложение уже принимали в буфер — восстанавливаем прежний выбор, чтобы повторное
+    // открытие диффа не предлагало заново то, что пользователь уже отметил.
+    const ed = window.WhaleEditor;
+    const staged = ed && ed.stagedProposals ? ed.stagedProposals().get(d.id) : null;
+    if (staged && Array.isArray(staged.hunkIndexes) && S.hunks) {
+      const valid = staged.hunkIndexes.filter((i) => i >= 0 && i < S.hunks.length);
+      if (valid.length) { sel.clear(); for (const i of valid) sel.add(i); }
+    }
+  }
+
+  /** База модели с применёнными ВЫБРАННЫМИ ханками — сторона «их» для трёхстороннего слияния. */
+  function selectedText(d) {
+    const base = mergeBaseFor(d);
+    if (!base || !S.hunks || !S.hunks.length) return null;
+    return H.applySelection(base.text, S.hunks, hunkSelection(), /(\r\n|\n)$/.test(d.newText));
+  }
+
+  /** Текст, который окажется в буфере при текущем выборе. null — слияние не удалось. */
+  function mergedPreview(oursText, d) {
+    const base = mergeBaseFor(d);
+    const theirs = selectedText(d);
+    if (!base || theirs == null) return null;
+    return H.merge3(base.text, oursText, theirs);
+  }
+
+  /**
+   * Принять выбранные ханки В БУФЕР редактора (§20): файл становится dirty, на диск
+   * изменения уйдут только по Ctrl+S — тем же путём, что и ручные правки.
+   * @param {boolean} andSave сразу сохранить (кнопка «Принять и сохранить»)
+   */
+  async function acceptHunks(d, andSave) {
+    if (!S.hunks || !S.hunks.length) return;
+    const sel = hunkSelection();
+    if (!sel.size) { toast('Не выбрано ни одного изменения', 'err'); return; }
+    if (!S.project) { toast('Чат не привязан к проекту', 'err'); return; }
+    const ed = window.WhaleEditor;
+    if (!ed || !ed.acceptIntoBuffer) { toast('Редактор недоступен', 'err'); return; }
+
+    const ours = ed.getText(d.relPath);
+    const oursText = typeof ours === 'string' ? ours : await readDiskText(d);
+    if (typeof oursText !== 'string') { toast('Не удалось прочитать текущую версию файла', 'err'); return; }
+
+    const merged = mergedPreview(oursText, d);
+    if (!merged) { toast('Слияние невозможно: нет версии, которую видела модель', 'err'); return; }
+    if (!merged.ok) {
+      // §22: пересечение принятых ханков с правками пользователя. Ничего не пишем —
+      // показываем конфликт и его стороны, решение остаётся за пользователем.
+      const theirs = selectedText(d);
+      const ops = D ? D.diffLines(oursText, theirs) : null;
+      S.view = {
+        kind: 'merge',
+        data: {
+          ...d, mergedText: merged.text, conflicts: merged.conflicts, oursText,
+          conflictRows: ops ? D.toRows(ops, 3) : [],
+          conflictStats: ops ? D.diffStats(ops) : null,
+        },
+      };
+      S.viewPane = 'details';
+      render();
+      toast(`Изменения пересекаются с вашими правками: конфликтов ${merged.conflicts}. В буфер ничего не записано.`, 'err');
+      return;
+    }
+
+    const total = S.hunks.length;
+    const accepted = sel.size;
+    const ok = await ed.acceptIntoBuffer(S.project.id, d.relPath, merged.text, {
+      proposalId: d.id,
+      contentHash: d.contentHash,
+      acceptedHunks: accepted,
+      totalHunks: total,
+      hunkIndexes: [...sel].sort((a, b) => a - b),
+      // Текст предложения целиком: main сравнит его с сохранённым и только при точном
+      // совпадении отметит, что модель знает версию (честный учёт контекста).
+      proposedText: accepted === total ? d.newText : null,
+    });
+    if (!ok) { toast('Не удалось открыть файл в редакторе', 'err'); return; }
+
+    if (andSave) {
+      const saved = await ed.saveActive();
+      if (saved) {
+        // main уже отметил предложение применённым (markAppliedExternally) и решил
+        // честное правило контекста — закрываем просмотр и обновляем список
+        S.view = null;
+        await loadProposals();
+      }
+      return; // ошибка/конфликт сохранения уже показаны редактором
+    }
+    toast(accepted === total
+      ? 'Предложение принято в буфер редактора. Сохраните (Ctrl+S), чтобы записать на диск.'
+      : `Принято изменений: ${accepted} из ${total}. Файл в буфере — сохраните (Ctrl+S) для записи на диск.`, 'ok');
+    await loadProposals(); // карточка получает отметку «в буфере», счётчик обновляется
+  }
+
+  /** Текущий текст файла на диске (когда файл не открыт в редакторе). */
+  async function readDiskText(d) {
+    if (!S.project || !d.relPath) return null;
+    const r = await call('file:read', { projectId: S.project.id, path: d.relPath });
+    return r && r.ok ? r.content : null;
+  }
+
+  async function renderDiffPane() {
+    if (!S.view) return;
+    const kind = S.view.kind;
+    const d = S.view.data;
+    if (kind === 'proposal' && d.op === 'update') computeHunks(d);
+    else { S.hunks = null; S.hunkBase = null; }
+
+    const pair = await diffPair(kind, d);
+    renderDiffBar(kind, d, pair);
+    renderDiffNotices(kind, d);
+    renderHunkStrip(d);
+    if (!pair) { S.viewPane = 'details'; render(); return; }
+    const sig = [kind, d.id || d.relPath, S.diffBase,
+      pair.original.length, pair.modified.length,
+      pair.original.slice(0, 64), pair.modified.slice(0, 64),
+      pair.original.slice(-64), pair.modified.slice(-64)].join('::');
+    if (sig === lastDiffSig) return;
+    lastDiffSig = sig;
+    const ok = window.WhaleEditor && window.WhaleEditor.showDiff ? await window.WhaleEditor.showDiff(pair) : false;
+    if (!ok && S.view && S.viewPane === 'diff') {
+      // Monaco не поднялся или разметка старая — показываем подробный отчёт с текстовым диффом
+      lastDiffSig = null;
+      S.viewPane = 'details';
+      render();
+    }
+  }
+
+  /**
+   * Обе стороны диффа + подписи. null — пары нет, просмотр уходит в текстовый отчёт.
+   *
+   * Режимы (§19): «результат» — ваш буфер против того, что получится после принятия
+   * выбранных ханков (живой предпросмотр); «предложение» — база модели против её текста.
+   */
+  async function diffPair(kind, d) {
     const lang = (rel) => (window.WhaleMonaco ? window.WhaleMonaco.languageForPath(rel) : 'plaintext');
     if (kind === 'proposal') {
-      const useAi = S.diffBase === 'ai' && typeof d.aiBaseText === 'string';
-      const original = d.op === 'create' ? '' : (useAi ? d.aiBaseText : d.baseText);
-      if (typeof original !== 'string' || typeof d.newText !== 'string') return null;
+      if (typeof d.newText !== 'string') return null;
+      if (S.diffBase === 'ai') {
+        const base = mergeBaseFor(d);
+        const original = d.op === 'create' ? '' : (base ? base.text : d.baseText);
+        if (typeof original !== 'string') return null;
+        return {
+          original, modified: d.newText, language: lang(d.relPath),
+          leftLabel: d.op === 'create' ? 'Файла ещё нет' : (base ? 'Версия, которую видела модель' : 'Текущий файл на диске'),
+          rightLabel: 'Предложение модели',
+        };
+      }
+      const ed = window.WhaleEditor;
+      const ours = ed && ed.getText ? ed.getText(d.relPath) : null;
+      const oursText = typeof ours === 'string' ? ours : (d.op === 'create' ? '' : await readDiskText(d));
+      if (typeof oursText !== 'string') return null;
+      const preview = mergedPreview(oursText, d);
       return {
-        original, modified: d.newText, language: lang(d.relPath),
-        leftLabel: d.op === 'create' ? 'Файла ещё нет' : (useAi ? 'Версия, которую видела модель' : 'Текущий файл на диске'),
-        rightLabel: 'Предложение модели',
+        original: oursText,
+        modified: preview && preview.ok ? preview.text : d.newText,
+        language: lang(d.relPath),
+        leftLabel: 'Ваш файл сейчас',
+        rightLabel: preview && preview.ok
+          ? (hunkSelection().size === (S.hunks || []).length ? 'Результат принятия' : 'Результат: выбранные изменения')
+          : 'Предложение модели',
       };
     }
     if (kind === 'manual') {
@@ -1215,41 +1414,13 @@
     return null;
   }
 
-  /**
-   * Нарисовать панель диффа и показать тексты в Monaco. Сигнатура содержимого
-   * защищает от лишней перестановки моделей: render() вызывается на каждое внешнее
-   * событие, а setModel сбрасывает прокрутку диффа.
-   */
-  async function renderDiffPane() {
-    if (!S.view) return;
-    const kind = S.view.kind;
-    const d = S.view.data;
-    const pair = diffPair(kind, d);
-    renderDiffBar(kind, d, pair);
-    if (!pair) { S.viewPane = 'details'; render(); return; }
-    const sig = [kind, d.id || d.relPath, S.diffBase,
-      pair.original.length, pair.modified.length,
-      pair.original.slice(0, 64), pair.modified.slice(0, 64),
-      pair.original.slice(-64), pair.modified.slice(-64)].join('::');
-    if (sig === lastDiffSig) return;
-    lastDiffSig = sig;
-    const ok = window.WhaleEditor && window.WhaleEditor.showDiff ? await window.WhaleEditor.showDiff(pair) : false;
-    if (!ok && S.view && S.viewPane === 'diff') {
-      // Monaco не поднялся или разметка старая — показываем подробный отчёт с текстовым диффом
-      lastDiffSig = null;
-      S.viewPane = 'details';
-      render();
-    }
-  }
-
-  /** Шапка диффа: заголовок, бейджи, легенда, переключатель базы и действия. */
+  /** Шапка диффа: заголовок, бейджи, легенда, переключатель режима и действия. */
   function renderDiffBar(kind, d, pair) {
     const bar = $('#diff-bar');
     if (!bar) return;
-    const toDetails = () => { S.viewPane = 'details'; lastDiffSig = null; render(); };
-    const icon = kind === 'proposal' ? (d.op === 'create' ? '➕' : '🔍') : kind === 'manual' ? '✎' : '🕘';
+    const icon = kind === 'proposal' ? (d.op === 'create' ? '➕' : d.op === 'delete' ? '🗑' : '🔍') : kind === 'manual' ? '✎' : '🕘';
     const title = kind === 'proposal'
-      ? (d.op === 'create' ? 'Создание файла' : 'Предложение модели')
+      ? (d.op === 'create' ? 'Создание файла' : d.op === 'delete' ? 'Удаление файла' : 'Предложение модели')
       : kind === 'manual' ? 'Мои правки' : 'Операция истории';
 
     const head = h('div', { class: 'diff-bar-row' },
@@ -1269,37 +1440,60 @@
         h('span', { class: 'side' }, h('span', { class: 'swatch old' }), pair.leftLabel),
         h('span', { class: 'side' }, h('span', { class: 'swatch new' }), pair.rightLabel),
         h('span', { class: 'grow' }),
-        kind === 'proposal' && d.op === 'update' && (typeof d.aiBaseText === 'string'
-          ? h('button', {
-            class: 'btn tiny', title: 'Что считать левой стороной сравнения',
-            onclick: () => { S.diffBase = S.diffBase === 'current' ? 'ai' : 'current'; lastDiffSig = null; render(); },
-          }, S.diffBase === 'current' ? 'База: файл на диске' : 'База: версия модели')
-          : h('span', {
-            class: 'path',
-            title: 'Снимок содержимого не сохранён: версия появилась до журнала снимков или больше 1 МБ',
-          }, 'точная версия модели не сохранена'))));
+        kind === 'proposal' && d.op === 'update' && h('button', {
+          class: 'btn tiny',
+          title: S.diffBase === 'ai'
+            ? 'Показать, что изменится в вашем файле'
+            : 'Показать базу, которую видела модель, против её предложения',
+          onclick: () => { S.diffBase = S.diffBase === 'current' ? 'ai' : 'current'; lastDiffSig = null; render(); },
+        }, S.diffBase === 'current' ? 'Сравнение: ваш файл → результат' : 'Сравнение: версия модели → предложение')));
 
     const actions = h('div', { class: 'diff-bar-row' });
     if (kind === 'proposal') {
-      // как в подробном отчёте: применять можно только валидное update/create предложение
-      const canApply = d.status === 'pending' && (d.state === 'update' || d.state === 'create');
+      const canApply = d.status === 'pending' && ['update', 'create', 'delete'].includes(d.state);
       const risky = (d.incomplete && d.incomplete.length > 0) || !!d.shrink;
-      if (canApply) {
+      const sel = hunkSelection();
+      const total = (S.hunks || []).length;
+      if (canApply && d.op === 'update' && total > 0) {
+        // §20: принятие по ханкам — в буфер редактора, на диск только по Ctrl+S
+        const blocked = risky && !S.allowIncomplete;
+        actions.append(
+          h('button', {
+            class: 'btn primary', disabled: !sel.size || blocked,
+            title: blocked
+              ? 'Ответ похож на неполный — сначала подтвердите, что проверили Diff'
+              : `Принять выбранные изменения (${sel.size} из ${total}) в буфер редактора`,
+            onclick: () => acceptHunks(d, false),
+          }, sel.size === total ? `Принять все (${total}) в буфер` : `Принять выбранные (${sel.size}/${total})`),
+          h('button', {
+            class: 'btn', disabled: !sel.size || blocked,
+            title: 'Принять в буфер и сразу записать на диск',
+            onclick: () => acceptHunks(d, true),
+          }, 'Принять и сохранить'),
+          h('button', { class: 'btn', title: 'Закрыть предложение и убрать из списка', onclick: () => onReject(d) }, 'Отклонить'));
+      } else if (canApply) {
+        // Создание/удаление в буфере невыразимы — прямая операция на диске (с защитой SHA).
+        // Update без базы слияния (снимка нет, а файл менялся) — тоже прямое применение
+        // целиком: частичное принятие без базы было бы нечестным.
+        const label = d.op === 'delete' ? 'Удалить в корзину'
+          : d.op === 'create' ? (d.needsDirs ? 'Создать папки и файл' : 'Создать файл')
+            : 'Принять целиком (перезаписать файл)';
         actions.append(h('button', {
-          class: 'btn primary',
-          title: risky && !S.allowIncomplete ? 'Ответ похож на неполный — применение нужно подтвердить в «Подробностях»' : null,
-          onclick: () => {
-            // Неполный ответ блокируется до явного подтверждения (§29 этап C): чекбокс
-            // «я проверил» живёт в подробном отчёте, поэтому уводим туда.
-            if (risky && !S.allowIncomplete) { toDetails(); return; }
-            onApply(d);
-          },
-        }, d.needsDirs ? 'Создать папки и файл' : 'Принять изменения'));
-        if (d.manualChanged) actions.append(h('button', { class: 'btn', onclick: () => onMerge(d) }, 'Применить и слить мои правки'));
+          class: 'btn' + (d.op === 'update' ? ' danger-subtle' : ' primary'),
+          disabled: risky && !S.allowIncomplete,
+          title: d.op === 'update' ? 'Версия модели не сохранена — безопасное слияние невозможно; файл будет перезаписан предложением (проверьте Diff)' : null,
+          onclick: () => onApply(d),
+        }, label));
         actions.append(h('button', { class: 'btn', title: 'Закрыть предложение и убрать из списка', onclick: () => onReject(d) }, 'Отклонить'));
       }
       if (d.status === 'applied' && d.historyId) {
         actions.append(h('button', { class: 'btn', onclick: () => onRevert(d.historyId) }, 'Восстановить предыдущую версию'));
+      }
+      if (d.status === 'pending' && isStaged(d.id)) {
+        actions.append(h('span', {
+          class: 'badge', style: 'border-color: var(--accent); color: var(--accent)',
+          title: 'Изменения уже приняты в буфер редактора и ждут сохранения',
+        }, 'принято в буфер'));
       }
     } else if (kind === 'manual') {
       actions.append(
@@ -1311,15 +1505,109 @@
         actions.append(h('button', { class: 'btn', onclick: () => onRevert(d.id) }, 'Восстановить предыдущую версию'));
       }
     }
-    actions.append(h('span', { class: 'grow' }),
-      h('button', {
-        class: 'btn', title: 'Подробный отчёт: предупреждения, блоки правки, полный текст',
-        onclick: toDetails,
-      }, 'Подробности'));
 
     // filter(Boolean): legend может отсутствовать (нет пары текстов) — реальный DOM
     // превратил бы null в текстовый узел «null»
     bar.replaceChildren(...[head, legend, actions].filter(Boolean));
+  }
+
+  /** Предложение уже принято в буфер редактора и ждёт Ctrl+S. */
+  function isStaged(proposalId) {
+    const ed = window.WhaleEditor;
+    return !!(ed && ed.stagedProposals && ed.stagedProposals().has(proposalId));
+  }
+
+  /**
+   * Предупреждения над диффом. Отдельного режима «Подробности» больше нет — он дублировал
+   * дифф (ручная проверка 0015), поэтому всё существенное живёт здесь компактно.
+   */
+  function renderDiffNotices(kind, d) {
+    const box = $('#diff-notices');
+    if (!box) return;
+    const out = [];
+    const risky = kind === 'proposal' && ((d.incomplete && d.incomplete.length > 0) || !!d.shrink);
+    if (risky) {
+      out.push(h('div', { class: 'notice warn' },
+        h('div', {}, 'Ответ похож на неполный. Обычное применение заблокировано, пока вы не подтвердите его вручную.'),
+        d.shrink && h('div', { class: 'path' }, d.shrink),
+        d.incomplete && d.incomplete.length > 0 && h('ul', {}, d.incomplete.slice(0, 6).map((x) => h('li', {}, `строка ${x.line}: ${x.text}`))),
+        h('label', { class: 'check' },
+          h('input', {
+            type: 'checkbox', checked: S.allowIncomplete,
+            onchange: (e) => { S.allowIncomplete = e.target.checked; render(); },
+          }),
+          'Я проверил(а) Diff и всё равно хочу применить')));
+    }
+    if (kind === 'proposal' && d.op === 'update' && !S.hunks && d.status === 'pending') {
+      out.push(h('div', { class: 'notice warn' },
+        'Версия, которую видела модель, не сохранена (снимка нет, а файл с тех пор изменился) — ',
+        'принять отдельные изменения нельзя: сливать не с чем. «Принять целиком» перезапишет файл ',
+        'предложением (запись защищена проверкой SHA-256). Безопаснее передать модели актуальную ',
+        'версию («Скопировать изменения для модели» в панели файлов) и попросить повторить правку.'));
+    }
+    if (kind === 'proposal' && d.patchResults && d.patchResults.length) {
+      out.push(h('details', { class: 'notice' },
+        h('summary', {}, `Частичная правка: блоков ${d.patchResults.length}`),
+        h('ul', {}, d.patchResults.map((r, i) => h('li', {}, patchLine(r, i))))));
+    }
+    if (kind === 'proposal' && d.pathFixed) {
+      out.push(h('div', { class: 'notice' }, `Путь исправлен автоматически: «${d.pathFixed.from}» → «${d.pathFixed.to}» (ИИ добавил имя корневой папки проекта).`));
+    }
+    if (kind === 'proposal' && d.toPathFixed) {
+      out.push(h('div', { class: 'notice' }, `Путь назначения исправлен автоматически: «${d.toPathFixed.from}» → «${d.toPathFixed.to}».`));
+    }
+    if (kind === 'proposal' && d.needsDirs) {
+      out.push(h('div', { class: 'notice' }, 'Папки для этого файла ещё не существуют — они будут созданы при применении.'));
+    }
+    if (kind === 'proposal' && d.op === 'delete') {
+      out.push(h('div', { class: 'notice warn' }, 'Файл будет отправлен в системную корзину. До удаления создаётся резервная копия, поэтому операцию можно откатить из Истории.'));
+    }
+    if (kind === 'manual' && d.notice) out.push(h('div', { class: 'notice warn' }, d.notice));
+    if (kind === 'manual' && d.knownVersion) {
+      out.push(h('div', { class: 'notice' }, `Известная модели версия: ${fmtTime(d.knownVersion.ts)} · ${d.knownVersion.label}`));
+    }
+    box.replaceChildren(...out);
+  }
+
+  /** Список ханков с чекбоксами (§20). Выбор сразу пересчитывает предпросмотр диффа. */
+  function renderHunkStrip(d) {
+    const strip = $('#hunk-strip');
+    if (!strip) return;
+    const hunks = S.hunks || [];
+    if (!hunks.length || !(d && d.status === 'pending')) {
+      strip.replaceChildren();
+      strip.classList.add('hidden');
+      return;
+    }
+    const sel = hunkSelection();
+    const setAll = (on) => {
+      sel.clear();
+      if (on) for (const hk of hunks) sel.add(hk.index);
+      lastDiffSig = null;
+      render();
+    };
+    const toggle = (idx, on) => {
+      if (on) sel.add(idx); else sel.delete(idx);
+      lastDiffSig = null;
+      render();
+    };
+    strip.classList.remove('hidden');
+    strip.replaceChildren(
+      h('div', { class: 'hunk-head' },
+        h('span', {}, `Изменений: ${hunks.length}`),
+        h('span', { class: 'grow' }),
+        h('span', { class: 'path' }, `выбрано ${sel.size}`),
+        h('button', { class: 'btn ghost tiny', onclick: () => setAll(true) }, 'Все'),
+        h('button', { class: 'btn ghost tiny', onclick: () => setAll(false) }, 'Снять')),
+      ...hunks.map((hk) => h('label', { class: 'hunk' + (sel.has(hk.index) ? ' on' : '') },
+        h('input', {
+          type: 'checkbox', checked: sel.has(hk.index),
+          onchange: (e) => toggle(hk.index, e.target.checked),
+        }),
+        h('span', { class: 'hunk-loc' }, `стр ${hk.baseLineStart}–${hk.baseLineEnd}`),
+        hk.added > 0 && h('span', { class: 'badge add' }, '+' + hk.added),
+        hk.removed > 0 && h('span', { class: 'badge del' }, '−' + hk.removed),
+        h('span', { class: 'hunk-snip', title: hk.snippet }, hk.snippet))));
   }
 
   /** Из подробного отчёта — обратно в Monaco-дифф (кнопка «◧ Diff»). */

@@ -451,3 +451,36 @@ test('editor-state: treeRowMarks соединяет буфер с журнала
   assert.equal(me.hasManual, false);
   assert.equal(me.undo, null);
 });
+
+test('editor-state: pendingAi — принятые в буфер ханки модели (этап C)', () => {
+  const s = ES.createState();
+  ES.open(s, opened('a.gd', 'v0\n', A));
+  assert.deepEqual(ES.getPendingAi(s, 'a.gd'), []);
+
+  ES.setPendingAi(s, 'a.gd', { proposalId: 'p1', acceptedHunks: 2, totalHunks: 3 });
+  ES.setPendingAi(s, 'a.gd', { proposalId: 'p2', acceptedHunks: 1, totalHunks: 1 });
+  assert.deepEqual(ES.getPendingAi(s, 'a.gd').map((x) => x.proposalId), ['p1', 'p2']);
+
+  // повторное принятие того же предложения заменяет запись, а не удваивает её
+  ES.setPendingAi(s, 'a.gd', { proposalId: 'p1', acceptedHunks: 3, totalHunks: 3 });
+  const list = ES.getPendingAi(s, 'a.gd');
+  assert.deepEqual(list.map((x) => x.proposalId), ['p2', 'p1']);
+  assert.equal(list.find((x) => x.proposalId === 'p1').acceptedHunks, 3);
+
+  // мусор не принимается
+  ES.setPendingAi(s, 'a.gd', null);
+  ES.setPendingAi(s, 'a.gd', { contentHash: 'x' });
+  assert.equal(ES.getPendingAi(s, 'a.gd').length, 2);
+
+  // describe показывает принятые правки — статус-бар и бейджи берут их оттуда
+  assert.equal(ES.describe(s, 'a.gd').pendingAi.length, 2);
+
+  // перечитывание с диска теряет принятые, но не сохранённые правки модели
+  ES.reload(s, 'a.gd', { content: 'v0\n', hash: A });
+  assert.deepEqual(ES.getPendingAi(s, 'a.gd'), []);
+
+  ES.setPendingAi(s, 'a.gd', { proposalId: 'p3' });
+  ES.clearPendingAi(s, 'a.gd');
+  assert.deepEqual(ES.getPendingAi(s, 'a.gd'), []);
+  assert.equal(ES.getPendingAi(s, 'нет-такого.gd').length, 0);
+});

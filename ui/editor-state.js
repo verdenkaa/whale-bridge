@@ -71,6 +71,11 @@
       // null — модель файл не видела, сравнивать не с чем.
       knownHash: file.knownHash != null ? file.knownHash : null,
       knownSource: file.knownSource || null,
+      // Принятые в буфер, но ещё не сохранённые правки модели (этап C): список
+      // {proposalId, contentHash, acceptedHunks, totalHunks, proposedText, hunkIndexes}.
+      // Уходит в file:write как aiAccepts: main по нему ставит source:'ai' в истории,
+      // помечает предложения применёнными и решает честное правило контекста.
+      pendingAi: [],
       language: file.language || 'plaintext',
       viewState: null,
       openedAt: Date.now(),
@@ -109,6 +114,9 @@
     f.missing = hash == null;
     if (eol) f.eol = eol;
     if (hasBom != null) f.hasBom = !!hasBom;
+    // Буфер заменён содержимым диска: принятые, но не сохранённые правки модели
+    // потеряны вместе с прежним буфером — честнее считать их непринятыми.
+    f.pendingAi = [];
     return f;
   }
 
@@ -179,6 +187,29 @@
   /** Модель знает устаревшую версию файла — главный признак уехавшего контекста. */
   const modelDiverged = (f) => !!f && C.isDiverged(f.knownHash, f.diskHash);
 
+  /**
+   * Принятые в буфер правки модели (этап C). Одно предложение — одна запись: повторное
+   * принятие того же предложения заменяет прежнее (выбор ханков мог измениться).
+   */
+  function setPendingAi(state, path, info) {
+    const f = get(state, path);
+    if (!f || !info || typeof info.proposalId !== 'string') return null;
+    if (!Array.isArray(f.pendingAi)) f.pendingAi = [];
+    f.pendingAi = [...f.pendingAi.filter((x) => x.proposalId !== info.proposalId), info];
+    return f;
+  }
+
+  const getPendingAi = (state, path) => {
+    const f = get(state, path);
+    return f && Array.isArray(f.pendingAi) ? f.pendingAi : [];
+  };
+
+  function clearPendingAi(state, path) {
+    const f = get(state, path);
+    if (f) f.pendingAi = [];
+    return f;
+  }
+
   const isDirty = (f) => !!f && f.text !== f.savedText;
   const isDrifted = (f) => !!f && f.savedHash != null && f.diskHash != null && f.diskHash !== f.savedHash;
   const isMissing = (f) => !!f && f.missing === true;
@@ -207,6 +238,7 @@
       missing: isMissing(f),
       needsReload: needsReload(f),
       modelDiverged: modelDiverged(f),
+      pendingAi: Array.isArray(f.pendingAi) ? f.pendingAi : [],
       knownHash: f.knownHash,
       knownSource: f.knownSource,
       path: f.path,
@@ -293,6 +325,7 @@
     setText, setSaved, reload, forceSaveBase,
     setDiskHash, setDiskHashes, setViewState,
     setKnown, setKnownMap,
+    setPendingAi, getPendingAi, clearPendingAi,
     isDirty, isDrifted, isMissing, needsReload, modelDiverged, describe,
     close, activate, activateRelative,
     hasUnsaved, dirtyPaths, driftedPaths, baseName,
