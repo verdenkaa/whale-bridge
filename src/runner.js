@@ -138,6 +138,8 @@ function createRunner(deps) {
       pty = spawnPty({
         exe, args: step.args.slice(), cwd, env,
         cols: session.cols, rows: session.rows,
+        // Командная строка оболочки уходит в pty дословно (см. runlangs.planShell)
+        verbatim: !!step.verbatim,
       });
     } catch (e) {
       // Сбой запуска шага — ошибка сессии: reason придёт в run:exit, текст — в ответе start()
@@ -376,7 +378,13 @@ function createRunner(deps) {
       // ComSpec — настоящий путь к cmd.exe ('C:\WINDOWS\system32\cmd.exe'): надёжнее,
       // чем искать cmd.exe в PATH. Берётся только для целевой Windows-платформы.
       if (isWin && comSpec) shell.exe = comSpec;
-      plan = { steps: [{ kind: 'run', tool: null, exe: shell.exe, args: shell.args }], env: null, outDir: null };
+      // verbatim — командную строку оболочки нельзя собирать экранированием MSVCRT:
+      // cmd.exe не понимает «\"», и кавычки в команде терялись (см. planShell).
+      plan = {
+        steps: [{ kind: 'run', tool: null, exe: shell.exe, args: shell.args, verbatim: !!shell.verbatim }],
+        env: null,
+        outDir: null,
+      };
       exes = {};
     } else if (target.kind === 'file') {
       kind = 'file';

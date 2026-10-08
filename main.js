@@ -126,6 +126,12 @@ function getPty() {
  * Ошибки — исключениями: раннер ловит их в startStep и превращает в понятный ответ
  * пользователю («не удалось запустить»), потому что типичная причина — битый путь
  * инструмента, и ронять main из-за этого нельзя.
+ *
+ * Аргументы готовит runlangs.ptySpawnArgs: на Windows команда оболочки обязана уйти в
+ * node-pty ОДНОЙ СТРОКОЙ. Из массива node-pty собирает командную строку по правилам
+ * MSVCRT (кавычка внутри аргумента → «\"»), а cmd.exe такое экранирование не понимает —
+ * «findstr "fn main" poem.rs» доезжал как «findstr fn main poem.rs», и findstr падал с
+ * «не удаётся открыть main». Строку node-pty кладёт в командную строку дословно.
  */
 function spawnPtyAdapter(opts) {
   const ptyLib = getPty();
@@ -134,7 +140,7 @@ function spawnPtyAdapter(opts) {
       ? 'node-pty не загружен: ' + (ptyError.message || ptyError)
       : 'node-pty не загружен');
   }
-  const raw = ptyLib.spawn(opts.exe, opts.args, {
+  const raw = ptyLib.spawn(opts.exe, runlangs.ptySpawnArgs(opts.args, process.platform, opts.verbatim), {
     name: 'xterm-256color',
     cols: opts.cols || 80,
     rows: opts.rows || 24,

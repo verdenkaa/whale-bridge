@@ -397,3 +397,32 @@ test('wiring: предложения запуска и команд (C3c) свя
   // main: обработчик пометки и его аргументы
   assert.match(mainSrc, /handle\('proposal:executed'/, 'в main.js есть handle(proposal:executed)');
 });
+
+test('wiring: команда оболочки доходит до cmd.exe дословно (кавычки не теряются)', () => {
+  // node-pty собирает командную строку из массива по правилам MSVCRT (кавычка → «\"»),
+  // а cmd.exe такое экранирование не понимает: findstr "fn main" poem.rs доезжал как
+  // findstr fn main poem.rs. Строку node-pty кладёт в командную строку дословно,
+  // поэтому оболочке команда отдаётся строкой — и это обязано быть связано в main.js.
+  assert.match(mainSrc, /runlangs\.ptySpawnArgs\(/, 'адаптер pty готовит аргументы общей функцией');
+  assert.match(mainSrc, /opts\.verbatim/, 'адаптер знает про дословную командную строку');
+
+  const runlangs = require('../src/runlangs');
+  const win = runlangs.planShell('findstr "fn main" poem.rs', 'win32');
+  assert.equal(win.verbatim, true, 'план оболочки помечен дословным');
+  const line = runlangs.ptySpawnArgs(win.args, 'win32', win.verbatim);
+  assert.equal(typeof line, 'string');
+  assert.ok(line.includes('findstr "fn main" poem.rs'), 'кавычки дожили до командной строки');
+  assert.ok(!line.includes('\\"'), 'экранирования MSVCRT нет');
+  // консоль переводится в UTF-8 до команды: файлы проекта в UTF-8, cmd.exe по умолчанию в CP866
+  assert.ok(line.includes(runlangs.UTF8_CONSOLE_PREFIX), 'префикс chcp 65001 на месте');
+  assert.match(mainSrc, /chcp|UTF8_CONSOLE_PREFIX|ptySpawnArgs/, 'main связан с правилами оболочки');
+
+  // раннер передаёт признак в адаптер
+  const runnerSrc = read('src/runner.js');
+  assert.match(runnerSrc, /verbatim: !!step\.verbatim/, 'раннер передаёт verbatim в spawnPty');
+  assert.match(runnerSrc, /shell\.verbatim/, 'признак берётся из плана оболочки');
+
+  // запуск файла остаётся argv-ом: экранирование MSVCRT там корректно и нужно
+  const file = runlangs.ptySpawnArgs(['-u', 'main.py'], 'win32', false);
+  assert.ok(Array.isArray(file), 'у файла аргументы массивом');
+});

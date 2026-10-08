@@ -132,14 +132,48 @@ test('runlangs: planRun — мусор на входе не роняет, а о�
 test('runlangs: planShell — Windows всегда cmd.exe, команда одним аргументом', () => {
   const win = RL.planShell('grep -rn "Player" src', 'win32');
   assert.equal(win.exe, 'cmd.exe');
-  assert.deepEqual(win.args, ['/d', '/s', '/c', 'grep -rn "Player" src']);
+  assert.deepEqual(win.args, ['/d', '/s', '/c', 'chcp 65001>nul & grep -rn "Player" src']);
+  assert.equal(win.verbatim, true, 'командная строка оболочки уходит в pty дословно');
   // оболочка — только cmd (решение пользователя: PowerShell не внедряем)
   assert.deepEqual([...RL.SHELLS_WIN], ['cmd']);
-  // posix
+  // posix: argv поштучно, никакого verbatim
   const posix = RL.planShell('ls -la', 'linux');
-  assert.deepEqual(posix, { exe: '/bin/sh', args: ['-c', 'ls -la'] });
-  // не-строка не роняет
+  assert.deepEqual(posix, { exe: '/bin/sh', args: ['-c', 'ls -la'], verbatim: false });
+  // не-строка не роняет; префикс chcp к пустой команде не добавляется
   assert.deepEqual(RL.planShell(null, 'win32').args, ['/d', '/s', '/c', '']);
+  // префикс можно отключить (консоль остаётся в OEM-кодировке)
+  assert.deepEqual(RL.planShell('dir', 'win32', { utf8: false }).args, ['/d', '/s', '/c', 'dir']);
+});
+
+test('runlangs: planShell — кавычки и кодировка консоли (замечания пользователя)', () => {
+  // Реальный случай: findstr с фразой в кавычках. Кавычки обязаны дожить до cmd.exe —
+  // иначе findstr принимает «fn» за шаблон, а «main» за имя файла и падает.
+  const win = RL.planShell('findstr "fn main" poem.rs', 'win32');
+  assert.equal(win.args[3], 'chcp 65001>nul & findstr "fn main" poem.rs');
+  assert.equal(win.args[3].includes('\\"'), false, 'никакого экранирования MSVCRT');
+  // пайп с кавычками тоже цел
+  const pipe = RL.planShell('type poem.rs | findstr "fn main"', 'win32');
+  assert.equal(pipe.args[3], 'chcp 65001>nul & type poem.rs | findstr "fn main"');
+  // кириллица в файлах проекта: консоль переводится в UTF-8 до команды (CP866 → кракозябры)
+  assert.ok(win.args[3].startsWith(RL.UTF8_CONSOLE_PREFIX), 'префикс chcp 65001 в начале');
+  assert.equal(RL.UTF8_CONSOLE_PREFIX, 'chcp 65001>nul & ');
+});
+
+test('runlangs: ptySpawnArgs — на Windows команда оболочки одной строкой', () => {
+  const args = ['/d', '/s', '/c', 'chcp 65001>nul & findstr "fn main" poem.rs'];
+  // win32 + verbatim: строка — node-pty кладёт её в командную строку дословно
+  assert.equal(RL.ptySpawnArgs(args, 'win32', true), args.join(' '));
+  // win32 без verbatim (запуск файла: exe + argv) — массив
+  assert.deepEqual(RL.ptySpawnArgs(['-u', 'main.py'], 'win32', false), ['-u', 'main.py']);
+  // posix всегда массив: там execvp, экранирование не нужно
+  assert.deepEqual(RL.ptySpawnArgs(args, 'linux', true), args);
+  // исходный массив не мутируется
+  const copy = args.slice();
+  RL.ptySpawnArgs(args, 'win32', true);
+  assert.deepEqual(args, copy);
+  // мусор на входе
+  assert.equal(RL.ptySpawnArgs(null, 'win32', true), '');
+  assert.deepEqual(RL.ptySpawnArgs(null, 'linux', false), []);
 });
 
 test('runlangs: tokenizeArgs — кавычки, пустые токены, мусор', () => {

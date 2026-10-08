@@ -10,6 +10,7 @@ const os = require('os');
 const path = require('path');
 
 const { createRunner, OUTPUT_LIMIT } = require('../src/runner');
+const runlangs = require('../src/runlangs');
 
 /**
  * Ожидание пути, собранного раннером: пути он собирает модулем ЦЕЛЕВОЙ платформы
@@ -600,7 +601,8 @@ test('runner: cmd-сессия — оболочка платформы, кома
   const w = await setup(t, { platform: 'win32', comSpec: '' });
   await w.runner.start({ project: w.project, target: { kind: 'cmd', command: 'dir' } });
   assert.equal(w.ptys[0].opts.exe, 'cmd.exe');
-  assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'dir']);
+  assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'chcp 65001>nul & dir']);
+  assert.equal(w.ptys[0].opts.verbatim, true, 'командная строка оболочки помечена дословной');
 
   // пустая команда отклоняется
   const bad = await s.runner.start({ project: s.project, target: { kind: 'cmd', command: '   ' } });
@@ -614,11 +616,44 @@ test('runner: cmd на win32 берёт cmd.exe из ComSpec, на posix — и�
   const w = await setup(t, { platform: 'win32', comSpec });
   await w.runner.start({ project: w.project, target: { kind: 'cmd', command: 'dir' } });
   assert.equal(w.ptys[0].opts.exe, comSpec);
-  assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'dir']);
+  assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'chcp 65001>nul & dir']);
   // 'C:\WINDOWS\…' содержит каталог и уже абсолютен — раннер его не пересобирает
   const p = await setup(t, { platform: 'linux', comSpec });
   await p.runner.start({ project: p.project, target: { kind: 'cmd', command: 'ls' } });
   assert.equal(p.ptys[0].opts.exe, '/bin/sh', 'чужой ComSpec на posix не подставляется');
+});
+
+test('runner: cmd-сессия на win32 — кавычки целы, argv не экранируется', async (t) => {
+  // Реальный случай пользователя: findstr "fn main" poem.rs доезжал до cmd.exe как
+  // findstr fn main poem.rs (node-pty экранирует кавычки массива аргументов по правилам
+  // MSVCRT, а cmd.exe их не понимает) и падал с «не удаётся открыть main».
+  const s = await setup(t, { platform: 'win32', comSpec: '' });
+  await s.runner.start({
+    project: s.project,
+    target: { kind: 'cmd', command: 'findstr "fn main" poem.rs' },
+  });
+  const opts = s.ptys[0].opts;
+  assert.equal(opts.verbatim, true);
+  assert.equal(opts.args[3], 'chcp 65001>nul & findstr "fn main" poem.rs', 'кавычки на месте');
+  // то, что реально уйдёт в node-pty: одна строка, без «\"»
+  const line = runlangs.ptySpawnArgs(opts.args, 'win32', opts.verbatim);
+  assert.equal(typeof line, 'string', 'на Windows команда оболочки — строка, а не массив');
+  assert.equal(line, '/d /s /c chcp 65001>nul & findstr "fn main" poem.rs');
+  assert.ok(!line.includes('\\"'), 'экранирования MSVCRT нет');
+  // отчёт и эхо в терминале показывают команду пользователя, без префикса chcp
+  assert.match(s.runner.report().text, /Команда: findstr "fn main" poem\.rs/);
+
+  // пайп с кавычками тоже доезжает целиком
+  const p = await setup(t, { platform: 'win32', comSpec: '' });
+  await p.runner.start({ project: p.project, target: { kind: 'cmd', command: 'type poem.rs | findstr "fn main"' } });
+  assert.equal(p.ptys[0].opts.args[3], 'chcp 65001>nul & type poem.rs | findstr "fn main"');
+});
+
+test('runner: запуск файла не помечается verbatim — argv уходит поштучно', async (t) => {
+  const s = await setup(t, { platform: 'win32' });
+  await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'main.py' } });
+  assert.equal(s.ptys[0].opts.verbatim, false, 'у файла argv, а не командная строка');
+  assert.deepEqual(runlangs.ptySpawnArgs(s.ptys[0].opts.args, 'win32', false), ['-u', 'main.py']);
 });
 
 test('runner: данные и события чужой/устаревшей сессии не смешиваются', async (t) => {

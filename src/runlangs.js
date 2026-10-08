@@ -18,6 +18,14 @@
   const BUILD_DIR = '.ide_build';
 
   /**
+   * Префикс командной строки cmd.exe: перевести консоль в UTF-8 до выполнения команды.
+   * Файлы проекта Whale Bridge пишет в UTF-8, а консоль cmd.exe по умолчанию в OEM
+   * (CP866) — без префикса type/findstr выводили кириллицу кракозябрами. «>nul» прячет
+   * ответ chcp («Active code page: 65001»), чтобы он не смешивался с выводом команды.
+   */
+  const UTF8_CONSOLE_PREFIX = 'chcp 65001>nul & ';
+
+  /**
    * Таблица языков. Поля:
    *   id, label — идентификатор и подпись для UI;
    *   exts      — расширения файлов (с точкой, нижний регистр);
@@ -281,16 +289,52 @@
 
   /**
    * Оболочка для &CMD: (ТЗ §5.3). Windows — всегда cmd.exe (/d отключает autorun-скрипты
-   * пользователя), остальные платформы — /bin/sh. Команда передаётся ОДНИМ аргументом:
-   * никакой интерполяции строк, инъекции исключены.
+   * пользователя), остальные платформы — /bin/sh. Команда передаётся одним элементом и
+   * нигде не интерполируется: инъекции исключены.
+   *
+   * Два обстоятельства Windows, из-за которых команда доезжала до cmd.exe не той:
+   *
+   * 1. verbatim. node-pty собирает командную строку из массива аргументов по правилам
+   *    MSVCRT (кавычка внутри аргумента превращается в «\"»), а cmd.exe такое экранирование
+   *    не понимает: «findstr "fn main" poem.rs» доезжал как «findstr fn main poem.rs» —
+   *    findstr принимал «fn» за шаблон, а «main» за имя файла и падал с «не удаётся открыть
+   *    main». Если же args — СТРОКА, node-pty кладёт её в командную строку дословно
+   *    (argsToCommandLine → isCommandLine), поэтому оболочке команда отдаётся строкой.
+   * 2. utf8. Консоль cmd.exe по умолчанию в OEM-кодировке (в России CP866), а файлы
+   *    проекта Whale Bridge пишет в UTF-8: type/findstr выводили кириллицу кракозябрами.
+   *    Префикс «chcp 65001>nul &» выполняется в той же консоли и переводит её в UTF-8
+   *    до команды. Это не порча файла, а несовпадение кодировок консоли и файла.
+   *
+   * @param {string} command командная строка как есть
+   * @param {string} platform 'win32' | иное
+   * @param {{utf8?:boolean}} opts utf8=false отключает префикс chcp (консоль OEM)
    */
-  function planShell(command, platform) {
+  function planShell(command, platform, opts) {
     const cmd = typeof command === 'string' ? command : '';
+    const o = isObj(opts) ? opts : {};
     // Чистая функция не знает process.env: ComSpec подставляет вызывающий (main),
     // а 'cmd.exe' — корректный запасной вариант (находится через PATH).
-    return platform === 'win32'
-      ? { exe: 'cmd.exe', args: ['/d', '/s', '/c', cmd] }
-      : { exe: '/bin/sh', args: ['-c', cmd] };
+    if (platform !== 'win32') return { exe: '/bin/sh', args: ['-c', cmd], verbatim: false };
+    const utf8 = o.utf8 !== false;
+    const line = utf8 && cmd ? UTF8_CONSOLE_PREFIX + cmd : cmd;
+    return { exe: 'cmd.exe', args: ['/d', '/s', '/c', line], verbatim: true };
+  }
+
+  /**
+   * Аргументы для node-pty.spawn. На Windows команда оболочки передаётся одной строкой
+   * (см. planShell, verbatim): массив node-pty экранировал бы по правилам MSVCRT и
+   * cmd.exe потерял бы кавычки. На POSIX argv остаётся массивом — там аргументы
+   * передаются execvp поштучно и экранирование не нужно в принципе.
+   *
+   * @param {string[]} args аргументы из плана
+   * @param {string} platform 'win32' | иное
+   * @param {boolean} verbatim передавать ли командную строку дословно
+   * @returns {string[]|string}
+   */
+  function ptySpawnArgs(args, platform, verbatim) {
+    const list = Array.isArray(args) ? args.slice() : [];
+    if (platform === 'win32' && verbatim) return list.join(' ');
+    return list;
   }
 
   // ---------- классификатор опасных команд (ТЗ §6) ----------
@@ -446,9 +490,9 @@
   }
 
   return {
-    BUILD_DIR, LANGS, TOOL_KEYS, ARGS_KEYS, SHELLS_WIN,
+    BUILD_DIR, LANGS, TOOL_KEYS, ARGS_KEYS, SHELLS_WIN, UTF8_CONSOLE_PREFIX,
     DANGER_CMDS, DANGER_FLAGS, CAUTION_CMDS,
     langById, langByExt, tokenizeArgs, javaClassFqn, parseVersion,
-    sanitizeRunConfig, defaultRunConfig, planRun, planShell, classifyCommand,
+    sanitizeRunConfig, defaultRunConfig, planRun, planShell, ptySpawnArgs, classifyCommand,
   };
 });
