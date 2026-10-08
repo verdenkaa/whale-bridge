@@ -60,7 +60,8 @@ test('UI: левая панель, режимы редактора, геомет
     'view-host', 'diff-host', 'diff-bar', 'diff-notices', 'hunk-strip', 'diff-editor',
     'prompt-host', 'prompt-body',
     'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay',
-    'ed-content', 'hsplit-term', 'term-panel', 'term-bar', 'term-host', 'xterm-css']) { roots[id] = new El('div'); }
+    'ed-content', 'hsplit-term', 'term-panel', 'term-bar', 'term-host', 'xterm-css',
+    'settings-host', 'settings-body', 'settings-close']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
     createTextNode: (t) => new TextNode(t),
@@ -82,6 +83,25 @@ test('UI: левая панель, режимы редактора, геомет
     { id: 'b', status: 'pending', state: 'patch-failed', op: 'update', relPath: 'x.gd', mode: 'patch', patchBlocks: 1, stats: null, warnings: 0, historical: false },
     { id: 'c', status: 'pending', state: 'create', op: 'create', relPath: 'n.gd', mode: 'full', patchBlocks: 0, stats: { added: 3, removed: 0 }, warnings: 0, historical: false },
   ];
+  // Настройки запуска (этап C3b): config.run и результат tools:detect покрывают все
+  // четыре статуса таблицы — найден в PATH, взят из настроек, битый ручной путь
+  // (с запасом в PATH и без него) и «не найден».
+  const RUN_CFG = {
+    tools: { python: null, node: null, cpp: 'C:\\gone\\g++.exe', c: null, javac: 'C:\\jdk\\bin\\javac.exe', java: 'C:\\gone\\java.exe' },
+    args: { python: '', cpp: '', c: '', java: '' },
+    timeoutSec: 600, shellWin: 'cmd',
+  };
+  const TOOLS = {
+    python: { found: true, exe: 'C:\\Python312\\python.exe', source: 'path', version: { text: '3.12.4', major: 3 }, brokenManual: false, candidates: [] },
+    node: { found: true, exe: 'C:\\node\\node.exe', source: 'path', version: { text: '22.9.0', major: 22 }, brokenManual: false, candidates: [] },
+    cpp: { found: true, exe: 'C:\\mingw64\\bin\\g++.exe', source: 'path', version: null, brokenManual: true, candidates: [] },
+    c: { found: false, exe: null, source: null, version: null, brokenManual: false, candidates: [] },
+    javac: { found: true, exe: 'C:\\jdk\\bin\\javac.exe', source: 'manual', version: { text: '17.0.2', major: 17 }, brokenManual: false, candidates: [] },
+    java: { found: false, exe: null, source: null, version: null, brokenManual: true, candidates: [] },
+  };
+  const detectCalls = [];
+  const pickCalls = [];
+  const runSaveCalls = [];
   const canned = {
     'state:get': { projects: [PROJECT], chatId: CHAT, project: PROJECT, lastProjectId: 'p1', layout: { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' } },
     'proposals:list': proposals,
@@ -131,6 +151,13 @@ test('UI: левая панель, режимы редактора, геомет
     'run:start': { ok: true, sessionId: 's1' },
     'run:stop': { ok: true },
     'run:copy-report': { ok: true, length: 42 },
+    // настройки запуска (этап C3b): чтение config.run, обнаружение инструментов,
+    // диалог выбора файла и сохранение. Функции вместо значений — чтобы сохранить
+    // присланное и вернуть его обратно, как делает main.
+    'settings:get': { ok: true, run: RUN_CFG },
+    'tools:detect': (arg) => { detectCalls.push(arg || {}); return { ok: true, tools: TOOLS, run: RUN_CFG }; },
+    'tools:pick': (arg) => { pickCalls.push(arg || {}); return { ok: true, path: 'C:\\mingw64\\bin\\g++.exe' }; },
+    'settings:save': (arg) => { runSaveCalls.push(arg.run); return { ok: true, run: arg.run }; },
   };
   global.window = {
     innerWidth: 1500,
@@ -139,7 +166,8 @@ test('UI: левая панель, режимы редактора, геомет
     api: {
       invoke: async (ch, arg) => {
         log.push([ch, arg]);
-        return canned[ch] ?? null;
+        const v = canned[ch];
+        return typeof v === 'function' ? v(arg) : (v ?? null);
       },
       on: (ch, cb) => { handlers[ch] = cb; return () => {}; },
       send: (ch, arg) => { sent.push([ch, arg]); },
@@ -210,6 +238,9 @@ test('UI: левая панель, режимы редактора, геомет
   // src/runlangs.js и ui/terminal.js грузятся index.html до app.js — повторяем порядок
   require(path.join(__dirname, '..', 'src', 'runlangs.js'));
   assert.ok(global.window.WhaleRunLangs && typeof global.window.WhaleRunLangs.classifyCommand === 'function');
+  // модель представления настроек (src/runsettings.js) грузится сразу за runlangs
+  require(path.join(__dirname, '..', 'src', 'runsettings.js'));
+  assert.ok(global.window.WhaleRunSettings && typeof global.window.WhaleRunSettings.toolRows === 'function');
   require(path.join(__dirname, '..', 'ui', 'terminal.js'));
   assert.ok(global.window.WhaleTerminal && typeof global.window.WhaleTerminal.write === 'function');
   require(path.join(__dirname, '..', 'ui', 'app.js'));
@@ -755,6 +786,133 @@ test('UI: левая панель, режимы редактора, геомет
   await tick(40);
   save = log.filter(([ch]) => ch === 'layout:save').pop();
   assert.equal(save[1].layout.termH, 260 + 60, 'высота терминала сохранена');
+
+  // ---------- настройки запуска (этап C3b, §2.4) ----------
+  const settingsBtn = findAll(roots.head, (e) => e.tag === 'button').find((b) => text(b) === '⚙ Настройки');
+  assert.ok(settingsBtn, 'кнопка «⚙ Настройки» в шапке');
+  await click(settingsBtn);
+  await tick(80);
+  assert.equal(hidden(roots['settings-host']), false, 'панель настроек открыта');
+  assert.equal(hidden(roots['prompt-host']), true, 'режимы центральной панели взаимоисключающие');
+  assert.equal(hidden(roots['ed-tabs']), true, 'вкладки редактора скрыты под настройками');
+  assert.ok(log.some(([ch]) => ch === 'settings:get'), 'config.run прочитан из main');
+  assert.equal(detectCalls.length > 0 && detectCalls[0].fresh, true, 'при открытии PATH проверяется заново');
+
+  // таблица: строка на каждый инструмент (у Java их две — javac и java)
+  const rowsOf = () => findAll(roots['settings-body'], (e) => e.className === 'set-row');
+  assert.equal(rowsOf().length, 6, 'шесть инструментов в таблице');
+  const bodyText = text(roots['settings-body']);
+  for (const s of ['Python', 'Node.js', 'g++ / clang++', 'gcc / clang', 'javac', 'java',
+    'Дополнительные аргументы', 'Таймаут бездействия', 'Оболочка для команд модели']) {
+    assert.ok(bodyText.includes(s), 'в панели есть «' + s + '»');
+  }
+  // статусы: найден в PATH, взят из настроек, битый ручной путь (с запасом в PATH и без), не найден
+  assert.ok(bodyText.includes('✔ C:\\Python312\\python.exe · 3.12.4'), 'автопоиск показан с версией');
+  assert.ok(bodyText.includes('из настроек'), 'ручной путь помечен как источник');
+  assert.ok(bodyText.includes('⚠ указанный путь не найден; в PATH есть'), 'битый путь показан честно, факт о PATH сохранён');
+  assert.ok(bodyText.includes('⚠ указан, но не найден'), 'битый путь без запаса в PATH');
+  assert.ok(bodyText.includes('✘ не найден в PATH'), 'честное «не найден»');
+  const withClass = (cls) => findAll(roots['settings-body'],
+    (e) => typeof e.className === 'string' && e.className.split(' ').includes(cls));
+  assert.equal(withClass('st-none').length, 1, 'красным — только «не найден»');
+  assert.equal(withClass('st-broken').length, 2, 'жёлтым — оба битых ручных пути');
+  assert.equal(withClass('st-ok').length, 2, 'зелёным — python и node из PATH');
+  assert.equal(withClass('st-manual').length, 1, 'отдельный цвет у пути из настроек (javac)');
+  assert.equal(withClass('st-unknown').length, 0, 'без результата обнаружения «не проверялось» не показывается');
+  // подсказка «что установить» — только там, где не найдено (§9)
+  const hints = findAll(roots['settings-body'], (e) => e.className === 'set-hint');
+  assert.equal(hints.length, 1);
+  assert.match(text(hints[0]), /MinGW-w64|LLVM/);
+  // оболочка — справка, а не настройка (решение пользователя: PowerShell не внедряем)
+  assert.match(bodyText, /cmd\.exe \/d \/s \/c/);
+  assert.equal(findAll(roots['settings-body'], (e) => e.tag === 'select').length, 0, 'выбора оболочки нет');
+
+  // ручной путь из конфига виден в поле, пустой — placeholder «автопоиск в PATH»
+  const inputOf = (labelPart) => findAll(roots['settings-body'],
+    (e) => e.tag === 'input' && String(e.getAttribute('aria-label') || '').includes(labelPart))[0];
+  assert.equal(inputOf('Путь вручную: javac').getAttribute('value'), 'C:\\jdk\\bin\\javac.exe');
+  assert.equal(inputOf('Путь вручную: gcc / clang').getAttribute('placeholder'), 'автопоиск в PATH');
+
+  // «Обзор…» → tools:pick → settings:save → повторная проверка PATH (статус обязан обновиться)
+  const detectBefore = detectCalls.length;
+  const cppRow = rowsOf().find((r) => text(r).includes('g++'));
+  await click(btn(cppRow, 'Обзор…'));
+  await tick(60);
+  assert.deepEqual(pickCalls.pop(), { toolKey: 'cpp' }, 'диалог знает, какой инструмент выбираем');
+  assert.equal(runSaveCalls[runSaveCalls.length - 1].tools.cpp, 'C:\\mingw64\\bin\\g++.exe', 'выбранный путь сохранён');
+  assert.equal(runSaveCalls[runSaveCalls.length - 1].shellWin, 'cmd', 'оболочка не меняется');
+  assert.ok(detectCalls.length > detectBefore, 'после сохранения пути таблица перечитана');
+
+  // «Авто» сбрасывает ручной путь; где пути нет — кнопка неактивна (сбрасывать нечего)
+  const javacRow = rowsOf().find((r) => text(r).includes('javac'));
+  assert.equal(btn(javacRow, 'Авто').getAttribute('disabled'), null, '«Авто» доступна, когда путь задан');
+  await click(btn(javacRow, 'Авто'));
+  await tick(60);
+  assert.equal(runSaveCalls[runSaveCalls.length - 1].tools.javac, null, 'сброс к автопоиску сохранён');
+  const pyRow = rowsOf().find((r) => text(r).includes('Python'));
+  assert.equal(btn(pyRow, 'Авто').getAttribute('disabled'), '', 'без ручного пути «Авто» неактивна');
+
+  // дополнительные аргументы: четыре поля (Node без аргументов), сохранение по change
+  const argInputs = findAll(roots['settings-body'],
+    (e) => e.tag === 'input' && String(e.getAttribute('aria-label') || '').startsWith('Дополнительные аргументы'));
+  assert.equal(argInputs.length, 4, 'аргументы у Python, C++, C и javac');
+  const cppArgs = argInputs.find((i) => String(i.getAttribute('aria-label')).includes('C++'));
+  cppArgs.value = '-Wall -O2';
+  for (const f of cppArgs.listeners.change) await f({ target: cppArgs });
+  await tick(40);
+  assert.equal(runSaveCalls[runSaveCalls.length - 1].args.cpp, '-Wall -O2', 'аргументы сохранены');
+
+  // таймаут: мусор не сохраняется и объясняется тостом, число — сохраняется
+  const numInput = () => findAll(roots['settings-body'], (e) => e.tag === 'input' && e.getAttribute('type') === 'number')[0];
+  const savesBeforeTimeout = runSaveCalls.length;
+  let ni = numInput();
+  ni.value = 'много';
+  for (const f of ni.listeners.change) await f({ target: ni });
+  await tick(40);
+  assert.match(text(roots.toast), /Таймаут — целое число секунд/);
+  assert.equal(runSaveCalls.length, savesBeforeTimeout, 'недопустимый таймаут в конфиг не попал');
+  ni = numInput();
+  assert.equal(ni.getAttribute('value'), '600', 'прежнее значение возвращено в поле');
+  ni.value = '120';
+  for (const f of ni.listeners.change) await f({ target: ni });
+  await tick(40);
+  assert.equal(runSaveCalls[runSaveCalls.length - 1].timeoutSec, 120, 'таймаут сохранён');
+
+  // «↻ Обновить» — повторная проверка PATH без перезаписи конфига
+  const detectBefore2 = detectCalls.length;
+  const savesBefore2 = runSaveCalls.length;
+  await click(btn(roots['settings-body'], '↻ Обновить'));
+  await tick(60);
+  assert.equal(detectCalls.length, detectBefore2 + 1, 'PATH проверен заново');
+  assert.equal(detectCalls[detectCalls.length - 1].fresh, true);
+  assert.equal(runSaveCalls.length, savesBefore2, 'обновление ничего не сохраняет');
+  assert.match(text(roots.toast), /проверены заново/);
+
+  // ✕ закрывает настройки и возвращает к редактору
+  for (const f of roots['settings-close'].listeners.click) await f({});
+  await tick(40);
+  assert.equal(hidden(roots['settings-host']), true, '✕ закрыл настройки');
+  assert.equal(hidden(roots['ed-tabs']), false, 'редактор вернулся');
+
+  // ошибка «инструмент не найден» ведёт в настройки кнопкой в тосте (§2.2 шаг 3, §9)
+  canned['run:start'] = { ok: false, reason: 'tool-missing', message: 'Не найден gcc в PATH.', tool: 'c', brokenManual: false };
+  await click(runBtn);
+  await tick(60);
+  assert.match(text(roots.toast), /Не найден gcc/);
+  const toastAct = findAll(roots.toast, (e) => e.tag === 'button')[0];
+  assert.ok(toastAct, 'в тосте есть кнопка действия');
+  assert.equal(text(toastAct), 'Открыть настройки');
+  await click(toastAct);
+  await tick(60);
+  assert.equal(hidden(roots['settings-host']), false, 'кнопка тоста открыла настройки');
+  // обычная ошибка запуска кнопки не предлагает
+  await click(findAll(roots.head, (e) => e.tag === 'button').find((b) => text(b) === '← Редактор'));
+  await tick(40);
+  canned['run:start'] = { ok: false, reason: 'no-project', message: 'Сначала выберите проект для этого чата' };
+  await click(runBtn);
+  await tick(60);
+  assert.equal(findAll(roots.toast, (e) => e.tag === 'button').length, 0, 'у ошибки без действия кнопки нет');
+  canned['run:start'] = { ok: true, sessionId: 's9' };
 
   console.error = origErr;
   assert.deepEqual(errors, []);

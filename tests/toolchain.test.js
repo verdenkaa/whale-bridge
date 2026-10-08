@@ -142,7 +142,9 @@ test('toolchain: detect — ручной путь побеждает автоп�
   assert.equal(r.python.version.text, '3.11.9');
 });
 
-test('toolchain: detect — битый ручной путь виден честно, запуск спасает автопоиск', async () => {
+test('toolchain: detect — битый ручной путь виден честно, факт о PATH сохраняется', async () => {
+  // detect сообщает ФАКТЫ (что указано, что найдено в PATH), а решение «запускать ли
+  // найденным в PATH вместо битого ручного пути» принимает раннер — и он отказывает (ТЗ §9).
   // кандидаты cpp — g++ и clang++: ручной путь битый, но g++ жив в PATH
   const { tc } = harness(['/usr/bin/g++'], {});
   const r = await tc.detect({ tools: { cpp: '/opt/gone/g++' } }, { PATH: '/usr/bin' });

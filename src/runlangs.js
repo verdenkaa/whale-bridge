@@ -35,7 +35,12 @@
     Object.freeze({
       id: 'python', label: 'Python',
       exts: Object.freeze(['.py']),
-      tools: Object.freeze([Object.freeze({ key: 'python', names: Object.freeze(['python', 'python3', 'py']) })]),
+      // label и install — данные для раздела «Настройки → Запуск» (src/runsettings.js):
+      // подпись инструмента в таблице и подсказка, что установить, если его нет в PATH.
+      tools: Object.freeze([Object.freeze({
+        key: 'python', names: Object.freeze(['python', 'python3', 'py']),
+        label: 'Python', install: 'Python 3 и добавьте его в PATH (или укажите путь к python.exe вручную)',
+      })]),
       plan: ({ rel, args, exeSuffix }) => ({
         steps: [{ kind: 'run', tool: 'python', exeSuffix, args: ['-u', rel, ...args] }],
         // PYTHONIOENCODING — страховка от cp1251/cp866 в stdout на Windows,
@@ -46,7 +51,10 @@
     Object.freeze({
       id: 'node', label: 'JavaScript / TypeScript',
       exts: Object.freeze(['.js', '.mjs', '.cjs', '.ts', '.mts']),
-      tools: Object.freeze([Object.freeze({ key: 'node', names: Object.freeze(['node']) })]),
+      tools: Object.freeze([Object.freeze({
+        key: 'node', names: Object.freeze(['node']),
+        label: 'Node.js', install: 'Node.js 22 или новее (для запуска .ts — обязательно)',
+      })]),
       // Node для JS берётся из PATH пользователя, а не встроенный в Electron:
       // запуск должен вести себя как в обычной консоли.
       plan: ({ rel, ext }) => ({
@@ -61,7 +69,10 @@
     Object.freeze({
       id: 'cpp', label: 'C++',
       exts: Object.freeze(['.cpp', '.cc', '.cxx']),
-      tools: Object.freeze([Object.freeze({ key: 'cpp', names: Object.freeze(['g++', 'clang++']) })]),
+      tools: Object.freeze([Object.freeze({
+        key: 'cpp', names: Object.freeze(['g++', 'clang++']),
+        label: 'g++ / clang++', install: 'MinGW-w64 (g++) или LLVM (clang++) и добавьте его в PATH',
+      })]),
       // Имя бинарника = имя исходника: два разных файла не перетирают друг друга.
       plan: ({ rel, base, args, exeSuffix }) => ({
         steps: [
@@ -74,7 +85,10 @@
     Object.freeze({
       id: 'c', label: 'C',
       exts: Object.freeze(['.c']),
-      tools: Object.freeze([Object.freeze({ key: 'c', names: Object.freeze(['gcc', 'clang']) })]),
+      tools: Object.freeze([Object.freeze({
+        key: 'c', names: Object.freeze(['gcc', 'clang']),
+        label: 'gcc / clang', install: 'MinGW-w64 (gcc) или LLVM (clang) и добавьте его в PATH',
+      })]),
       plan: ({ rel, base, args, exeSuffix }) => ({
         steps: [
           { kind: 'build', tool: 'c', args: [...args, rel, '-o', BUILD_DIR + '/' + base + exeSuffix] },
@@ -87,8 +101,14 @@
       id: 'java', label: 'Java',
       exts: Object.freeze(['.java']),
       tools: Object.freeze([
-        Object.freeze({ key: 'javac', names: Object.freeze(['javac']) }),
-        Object.freeze({ key: 'java', names: Object.freeze(['java']) }),
+        Object.freeze({
+          key: 'javac', names: Object.freeze(['javac']),
+          label: 'javac', install: 'JDK 17 или новее (JRE не содержит javac)',
+        }),
+        Object.freeze({
+          key: 'java', names: Object.freeze(['java']),
+          label: 'java', install: 'JDK 17 или новее (JRE не содержит javac)',
+        }),
       ]),
       // Байт-код уходит в .ide_build/classes и не мусорит рядом с исходниками;
       // класс запускается по полному имени (package + имя файла) с явным -cp.

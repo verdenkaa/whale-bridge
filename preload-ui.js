@@ -13,6 +13,8 @@ const INVOKE = new Set([
   'layout:save',
   // запуск (этап C3): старт/остановка сессии и отчёт в буфер обмена
   'run:start', 'run:stop', 'run:copy-report',
+  // настройки запуска (этап C3b): обнаружение инструментов, выбор файла, чтение/запись config.run
+  'tools:detect', 'tools:pick', 'settings:get', 'settings:save',
 ]);
 // run:data/run:exit/run:state — поток вывода терминала и состояние сессии (ТЗ C3 §3.4)
 const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound', 'run:data', 'run:exit', 'run:state']);

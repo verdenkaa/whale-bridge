@@ -151,3 +151,22 @@ test('ipc: события потока вывода на месте и слуш�
     assert.ok(!INVOKE.has(c) && !SEND.has(c), `${c} не должен пересекаться с invoke и send`);
   }
 });
+
+// ---- этап C3b: каналы настроек запуска (ТЗ §2.4, §3.4) ----
+
+test('ipc: invoke-каналы настроек запуска на месте и разрешены', () => {
+  for (const c of ['tools:detect', 'tools:pick', 'settings:get', 'settings:save']) {
+    assert.ok(INVOKE.has(c), `${c} не в белом списке INVOKE preload`);
+    assert.ok(handled.has(c), `${c} не обрабатывается в main`);
+    assert.ok(invoked.has(c), `${c} разрешён, но renderer его не вызывает`);
+    assert.ok(!EVENTS.has(c) && !SEND.has(c), `${c} не должен пересекаться с событиями и send`);
+  }
+});
+
+test('ipc: каналы настроек не дублируют каналы запуска', () => {
+  const run = new Set(['run:start', 'run:stop', 'run:copy-report', 'run:input', 'run:resize', 'run:data', 'run:exit', 'run:state']);
+  const settings = new Set(['tools:detect', 'tools:pick', 'settings:get', 'settings:save']);
+  assert.deepEqual([...settings].filter((c) => run.has(c)), [], 'имена каналов не пересекаются');
+  // запись конфига — только через settings:save: renderer не умеет писать config.json напрямую
+  assert.match(main, /handle\('settings:save'[\s\S]{0,400}sanitizeRunConfig/, 'settings:save чистит присланный конфиг');
+});

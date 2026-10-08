@@ -14,6 +14,8 @@ const pg = require('./src/promptgen');
 // Этап C3 «Запуск»: планирование языков (чистое ядро), поиск инструментов и
 // оркестратор сессий. runlangs общий с renderer (UMD) — правила одни на два процесса.
 const runlangs = require('./src/runlangs');
+// Подписи инструментов для диалога выбора файла — те же данные, что рисует renderer
+const runsettings = require('./src/runsettings');
 const { createToolchain } = require('./src/toolchain');
 const { createRunner } = require('./src/runner');
 const { pathToFileURL } = require('url');
@@ -763,6 +765,49 @@ function registerIpc() {
     clipboard.writeText(r.text);
     return { ok: true, length: r.text.length };
   });
+
+  // ---- настройки запуска (этап C3b, ТЗ §2.4, §3.4) ----
+
+  // Обнаружение инструментов для таблицы настроек. Кеш toolchain живёт до смены конфига,
+  // поэтому «Обновить» (fresh: true) сбрасывает его явно: пользователь мог установить
+  // компилятор, не трогая настройки, и ждать, что таблица это увидит.
+  handle('tools:detect', async ({ fresh }) => {
+    if (fresh) toolchain.clearCache();
+    const tools = await toolchain.detect(store.config.run);
+    return { ok: true, tools, run: store.config.run };
+  });
+
+  // «Обзор…» — выбор исполняемого файла вручную. Фильтр включает .cmd/.bat: тулчейны
+  // ставят обёртки (py.bat, npm.cmd), и жёсткий фильтр только по .exe не дал бы их выбрать.
+  handle('tools:pick', async ({ toolKey }) => {
+    const hit = runsettings.toolByKey(typeof toolKey === 'string' ? toolKey : '');
+    const name = hit ? hit.tool.names[0] : null;
+    const isWin = process.platform === 'win32';
+    const r = await dialog.showOpenDialog(win, {
+      title: name ? `Путь к исполняемому файлу (${name})` : 'Путь к исполняемому файлу',
+      buttonLabel: 'Выбрать',
+      properties: ['openFile'],
+      filters: isWin
+        ? [{ name: 'Исполняемые файлы', extensions: ['exe', 'cmd', 'bat', 'com'] }, { name: 'Все файлы', extensions: ['*'] }]
+        : [{ name: 'Все файлы', extensions: ['*'] }],
+    });
+    if (r.canceled || !Array.isArray(r.filePaths) || !r.filePaths[0]) return { ok: true, path: null };
+    return { ok: true, path: String(r.filePaths[0]) };
+  });
+
+  handle('settings:get', () => ({ ok: true, run: store.config.run }));
+
+  // Сохранение мгновенное (как у черновика промпта, §2.4): раздел пока единственный,
+  // а запуск обязан видеть свежие пути. Всё, что пришло из renderer, проходит тот же
+  // sanitizeRunConfig, что и при загрузке config.json, — мусор не сохраняется.
+  handle('settings:save', async ({ run }) => {
+    store.config.run = runlangs.sanitizeRunConfig(run);
+    await store.saveConfig();
+    // Кеш инструментов привязан к config.tools, но сбрасываем его явно: порядок вызовов
+    // не должен влиять на то, увидит ли следующий запуск новые пути.
+    toolchain.clearCache();
+    return { ok: true, run: store.config.run };
+  });
 }
 
 // ---------- старт ----------
@@ -793,11 +838,14 @@ if (!app.requestSingleInstanceLock()) {
       cb(['clipboard-sanitized-write', 'fullscreen'].includes(permission));
     });
 
+    // Раннер и поиск инструментов создаются после store (нужны config.run и путь проекта)
+    // и ДО регистрации IPC и окна: обработчики tools:detect/settings:save обращаются к
+    // toolchain, и первый же вызов не должен застать его не созданным.
+    createAppRunner();
+
     registerIpc();
     buildMenu();
     createWindow();
-    // Раннер создаётся после store: ему нужны config.run и путь проекта.
-    createAppRunner();
     // Не оставляем сирот: дерево процессов запуска умирает вместе с приложением
     app.on('before-quit', () => { if (runner) runner.stopAll(); });
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

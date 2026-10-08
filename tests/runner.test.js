@@ -180,10 +180,31 @@ test('runner: инструмент не найден — reason tool-missing с 
   assert.match(r.message, /Настройках/);
   assert.equal(s.ptys.length, 0);
 
-  // битый ручной путь упоминается отдельно
-  const s2 = await setup(t, { tools: { python: { found: false, exe: null, brokenManual: true } } });
+  // битый ручной путь называется в сообщении вместе с самим путём: чинить надо его
+  const s2 = await setup(t, {
+    tools: { python: { found: false, exe: null, brokenManual: true } },
+    runConfig: { tools: { python: 'C:\\gone\\python.exe' } },
+  });
   const r2 = await s2.runner.start({ project: s2.project, target: { kind: 'file', rel: 'main.py' } });
-  assert.match(r2.message, /Указанный в настройках путь не найден/);
+  assert.equal(r2.ok, false);
+  assert.match(r2.message, /Указанный в настройках путь не найден: C:\\gone\\python\.exe/);
+});
+
+test('runner: битый ручной путь не подменяется молча инструментом из PATH (§9)', async (t) => {
+  // Пользователь явно указал, чем запускать. Если этого файла больше нет, запуск другим
+  // интерпретатором выглядел бы как игнорирование настроек: честный ответ — «не найден».
+  // toolchain при этом факт о PATH сообщает (для таблицы настроек), решение принимает раннер.
+  const s = await setup(t, {
+    tools: { python: { found: true, exe: '/bin/otherpython', source: 'path', brokenManual: true } },
+    runConfig: { tools: { python: 'C:\\gone\\python.exe' } },
+  });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'main.py' } });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'tool-missing');
+  assert.equal(r.brokenManual, true, 'renderer покажет кнопку «Открыть настройки»');
+  assert.match(r.message, /Указанный в настройках путь не найден/);
+  assert.equal(s.ptys.length, 0, 'процесс не стартовал');
+  assert.equal(s.started.length, 0, 'сессия не создавалась — наблюдение за файлами не приостанавливалось');
 });
 
 test('runner: spawn упал — сессия завершена с ошибкой, приложение живо', async (t) => {
@@ -404,6 +425,30 @@ test('runner: resize доходит до pty с санитарными рамк�
   assert.deepEqual(s.ptys[0].resizes[1], [2, 2], 'нули и отрицания прижаты к минимуму');
   s.runner.resize('широко', NaN);
   assert.deepEqual(s.ptys[0].resizes[2], [80, 24], 'мусор — к дефолту');
+});
+
+test('runner: папка инструмента из настроек попадает в PATH процесса', async (t) => {
+  // Ручной путь к g++ при пустом PATH: сам компилятор найдётся, а вот собранному
+  // .exe нужны libstdc++-6.dll и libgcc_s_seh-1.dll из папки MinGW — без добавления
+  // этой папки в PATH запуск упал бы с ошибкой про отсутствующую DLL.
+  const pathBefore = process.env.PATH;
+  const s = await setup(t, {
+    platform: 'win32',
+    tools: { cpp: { found: true, exe: 'C:\\mingw64\\bin\\g++.exe', source: 'manual' } },
+  });
+  await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'app.cpp' } });
+  const env = s.ptys[0].opts.env;
+  assert.ok(env.PATH.startsWith('C:\\mingw64\\bin;'), 'папка инструмента — первая в PATH');
+  assert.ok(env.PATH.endsWith(pathBefore || ''), 'прежний PATH сохранён за ней');
+  assert.equal(env.Path, undefined, 'второй ключ PATH/Path не появился');
+
+  // инструмент из PATH ничего не добавляет: его папка там уже есть
+  const p = await setup(t, { tools: { python: { found: true, exe: '/usr/bin/python3', source: 'path' } } });
+  await p.runner.start({ project: p.project, target: { kind: 'file', rel: 'main.py' } });
+  assert.equal(p.ptys[0].opts.env.PATH, process.env.PATH, 'для PATH-инструмента окружение не меняется');
+
+  // окружение главного процесса не мутируется
+  assert.equal(process.env.PATH, pathBefore, 'process.env родителя не изменён');
 });
 
 test('runner: холостой resize не доходит до pty', async (t) => {

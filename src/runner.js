@@ -7,6 +7,9 @@
 const fs = require('fs');
 const path = require('path');
 const runlangs = require('./runlangs');
+// Подписи инструментов и подсказки «что установить» — общие с разделом настроек
+// (renderer рисует ими таблицу, раннер — сообщение об ошибке в терминал).
+const runsettings = require('./runsettings');
 const { buildReport, createRing, shortToolName } = require('./runfmt');
 
 const OUTPUT_LIMIT = 4 * 1024 * 1024; // кольцевой буфер вывода на сессию, 4 МБ
@@ -94,6 +97,15 @@ function createRunner(deps) {
     const env = Object.assign({}, process.env);
     if (session.plan.env) {
       for (const [k, v] of Object.entries(session.plan.env)) env[k] = String(v).replace('{root}', cwd);
+    }
+    // Папки инструментов, указанных вручную, идут первыми в PATH процесса: собранному
+    // бинарнику нужны DLL из папки компилятора (MinGW), а javac — свои классы из JDK.
+    if (session.manualDirs && session.manualDirs.length) {
+      // Имя переменной ищем без учёта регистра: в окружении Windows она обычно 'Path',
+      // и второй ключ ('PATH' рядом с 'Path') создал бы неоднозначность в блоке окружения.
+      const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || (isWin ? 'Path' : 'PATH');
+      const sep = isWin ? ';' : ':';
+      env[key] = session.manualDirs.join(sep) + sep + (env[key] || '');
     }
     let pty;
     try {
@@ -233,23 +245,37 @@ function createRunner(deps) {
       nodeMajor,
     });
     if (!plan.ok) return { error: 'plan-failed', message: plan.error };
-    // Разрешение инструментов: exe для каждого шага с tool
+    // Разрешение инструментов: exe для каждого шага с tool. manualDirs — папки
+    // инструментов, указанных в настройках вручную: они добавляются в PATH процесса.
     const exes = {};
+    const manualDirs = [];
     for (const step of plan.steps) {
       if (!step.tool || exes[step.tool]) continue;
       const t = tools[step.tool];
-      if (!t || !t.found) {
-        const names = (runlangs.langById(lang.id).tools.find((x) => x.key === step.tool) || { names: [step.tool] }).names;
-        const manualNote = t && t.brokenManual ? ' Указанный в настройках путь не найден.' : '';
+      // Битый ручной путь — это «не найден» (ТЗ §9), а не повод молча взять другой
+      // интерпретатор из PATH: пользователь явно указал, чем запускать, и запуск чем-то
+      // другим выглядел бы как игнорирование настроек. Сообщение называет и путь.
+      const brokenManual = !!(t && t.brokenManual);
+      if (!t || !t.found || brokenManual) {
         return {
           error: 'tool-missing',
           lang: lang.id,
           tool: step.tool,
-          message: `Не найден ${names[0]} в PATH. Установите ${lang.label} и добавьте его в PATH,`
-            + ` либо укажите путь к исполняемому файлу в Настройках → Запуск.${manualNote}`,
+          brokenManual,
+          message: runsettings.missingToolMessage(step.tool, brokenManual ? runCfg.tools[step.tool] : null),
         };
       }
       exes[step.tool] = t.exe;
+      // Папку инструмента, указанного вручную, добавим в PATH дочернего процесса:
+      // собранный MinGW-бинарник ищет libstdc++-6.dll и libgcc_s_seh-1.dll рядом с
+      // компилятором, а javac — свои классы рядом с JDK. Без этого ручной путь
+      // «находится», но запуск падает с ошибкой про отсутствующую DLL, и догадаться
+      // о причине по выводу терминала трудно. Для инструментов из PATH это холостой
+      // ход: их папка уже в PATH.
+      if (t.source === 'manual' && t.exe) {
+        const dir = pth.dirname(t.exe);
+        if (dir && !manualDirs.includes(dir)) manualDirs.push(dir);
+      }
     }
     // Папка артефактов создаётся до компиляции: gcc/javac не создают промежуточные папки
     if (plan.outDir) {
@@ -259,7 +285,7 @@ function createRunner(deps) {
         return { error: 'build-dir-failed', message: 'Не удалось создать папку .ide_build: ' + (e && e.message ? e.message : String(e)) };
       }
     }
-    return { lang, plan, exes };
+    return { lang, plan, exes, manualDirs };
   }
 
   /**
@@ -275,6 +301,7 @@ function createRunner(deps) {
     const target = a.target || {};
     const runCfg = runlangs.sanitizeRunConfig(getRunConfig());
     let kind, label, commandLine, plan, exes, lang = null, cwd = project.path;
+    let manualDirs = []; // папки инструментов из настроек — в PATH процесса (§3.2)
 
     if (target.kind === 'cmd') {
       kind = 'cmd';
@@ -310,11 +337,17 @@ function createRunner(deps) {
       }
       const prepared = await prepareFilePlan(cwd, rel, runCfg);
       if (prepared.error) {
-        return { ok: false, reason: prepared.error, message: prepared.message, lang: prepared.lang };
+        // tool и brokenManual нужны renderer'у: по ним показывается кнопка
+        // «Открыть настройки» и подсвечивается именно битый ручной путь (§2.2 шаг 3)
+        return {
+          ok: false, reason: prepared.error, message: prepared.message,
+          lang: prepared.lang, tool: prepared.tool || null, brokenManual: !!prepared.brokenManual,
+        };
       }
       lang = prepared.lang;
       plan = prepared.plan;
       exes = prepared.exes;
+      manualDirs = prepared.manualDirs || [];
       label = rel;
       // Командная строка для отчёта — читаемой: путь к инструменту укорачивается до имени
       // ('C:\…\python.exe' → 'python'), а артефакт сборки остаётся относительным
@@ -339,7 +372,7 @@ function createRunner(deps) {
       kind, label, commandLine, lang: lang ? lang.id : null,
       file: kind === 'file' ? label : null,
       cwd, projectDir: project.path, projectId: project.id || null,
-      plan, exes, input,
+      plan, exes, manualDirs, input,
       step: 0, state: 'running', pid: null, exitCode: null,
       startedAt: clock(), endedAt: null,
       ring: createRing(maxOutputBytes),

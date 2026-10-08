@@ -10,6 +10,10 @@
   // Математика раскладки (ui/layout.js, UMD): правила одни для renderer и main —
   // clamp, минимумы и сторону чата тесты проверяют как чистые функции.
   const L = window.WhaleLayout;
+  // Модель представления настроек запуска (src/runsettings.js, UMD): строки таблицы
+  // языков, подписи статусов и правило изменения config.run — общие с main. Renderer
+  // не решает, какие бывают языки и что значит «найден»: он рисует то, что вернул модуль.
+  const RS = window.WhaleRunSettings;
   const $ = (s) => document.querySelector(s);
   const base = (p) => p.split('/').pop();
   const fmtBytes = (n) => (n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ');
@@ -18,10 +22,22 @@
 
   let toastTimer;
   let panelInit = false; // первый state:get переносит сохранённый «Промпт» в режим панели
-  function toast(msg, kind) {
+  /**
+   * Тост. action — необязательная кнопка действия (§2.2.3: ошибка «инструмент не найден»
+   * ведёт в настройки одним кликом). С кнопкой тост становится кликабельным: в CSS у
+   * #toast pointer-events выключен, иначе WebContentsView-соседство съедало бы клики.
+   */
+  function toast(msg, kind, action) {
     const t = $('#toast');
-    t.textContent = msg;
-    t.className = 'show ' + (kind || '');
+    t.replaceChildren();
+    t.append(h('span', { class: 'toast-msg' }, String(msg)));
+    if (action && action.label) {
+      t.append(h('button', {
+        class: 'btn tiny toast-act', type: 'button',
+        onclick: () => { clearTimeout(toastTimer); t.className = ''; action.onclick(); },
+      }, action.label));
+    }
+    t.className = 'show ' + (kind || '') + (action && action.label ? ' act' : '');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (t.className = ''), kind === 'err' ? 6000 : 3000);
   }
@@ -64,6 +80,9 @@
     // (panelBeforePrompt), и возвращает туда же: редактор или просмотр — явное требование.
     panel: 'editor',
     panelBeforePrompt: 'editor',
+    // «Настройки» — такой же режим панели, но в layout не сохраняются: это утилита,
+    // а не рабочее окно, поэтому после перезапуска приложение открывается как раньше.
+    panelBeforeSettings: 'editor',
     viewPane: 'diff',    // внутри режима view: Monaco-дифф или 'details' — текстовый отчёт
     diffBase: 'current', // что слева в диффе предложения: 'current' (ваш файл) | 'ai' (версия модели)
     // Ханки текущего предложения (этап C): считаются src/hunks.js от базы модели,
@@ -263,7 +282,12 @@
     if (!r) return; // ошибка уже показана тостом (call)
     if (!r.ok) {
       if (r.message) termWrite(r.message + '\r\n');
-      toast(r.message || 'Запуск не состоялся', 'err');
+      // §2.2 шаг 3 и §9: «инструмент не найден» обязан вести в настройки одним кликом —
+      // путь к компилятору указывается там, искать раздел по меню дольше, чем починить.
+      const action = r.reason === 'tool-missing'
+        ? { label: 'Открыть настройки', onclick: () => openSettings() }
+        : null;
+      toast(r.message || 'Запуск не состоялся', 'err', action);
       return;
     }
     RUN.running = true;
@@ -333,6 +357,16 @@
           : 'Открыть конструктор промптов вместо редактора кода',
         onclick: () => (S.panel === 'prompt' ? leavePrompt() : openPrompt()),
       }, S.panel === 'prompt' ? (S.view ? '← Просмотр' : 'Редактор кода') : 'Промпт'),
+      // Настройки запуска (этап C3b, §2.4): инструменты, аргументы, таймаут.
+      // Подпись кнопки — то, что будет показано по клику: из настроек она возвращает
+      // в прежнее окно (редактор, просмотр или «Промпт»).
+      h('button', {
+        class: 'btn mode' + (S.panel === 'settings' ? ' on' : ''), type: 'button',
+        title: S.panel === 'settings'
+          ? 'Закрыть настройки и вернуться к редактору кода'
+          : 'Настройки запуска: инструменты, дополнительные аргументы, таймаут',
+        onclick: () => (S.panel === 'settings' ? leaveSettings() : openSettings()),
+      }, S.panel === 'settings' ? '← Редактор' : '⚙ Настройки'),
       // Памятка о маркерах и формате кода нужна в любой момент, а не только внутри
       // конструктора промптов — поэтому живёт в шапке.
       h('button', {
@@ -456,6 +490,226 @@
     if (S.panel === 'prompt') S.panel = S.view ? 'view' : 'editor';
     render();
     await call('layout:save', { layout: S.layout });
+  }
+
+  // ---------- настройки запуска (этап C3b, ТЗ §2.4) ----------
+  //
+  // Раздел «Запуск» — режим центральной панели по образцу «Промпта»: та же колонка,
+  // то же взаимоисключение с редактором и просмотром, тот же возврат туда, откуда пришли.
+  // Данные приходят из main (settings:get, tools:detect), строки таблицы и правило
+  // изменения config.run считает src/runsettings.js — чистая модель, общая с main.
+  //
+  // Сохранение мгновенное при изменении поля (§2.4). Текстовые поля сохраняются по
+  // событию change (потеря фокуса или Enter), а не на каждый символ: иначе либо
+  // конфиг писался бы на каждое нажатие, либо перерисовка выбивала бы фокус.
+  const SET = {
+    loaded: false, loading: false, busy: false,
+    cfg: null,       // config.run из main
+    tools: null,     // результат tools:detect по каждому инструменту
+    detectedAt: 0,   // когда проверяли PATH — подписью в панели
+    error: null,
+  };
+  let savedTimer = null;
+
+  async function loadSettings() {
+    const s = await call('settings:get');
+    SET.cfg = s && s.ok ? s.run : null;
+    const d = await call('tools:detect', { fresh: true });
+    SET.tools = d && d.ok ? d.tools : null;
+    SET.detectedAt = Date.now();
+    SET.error = SET.cfg ? null : 'Не удалось прочитать настройки запуска';
+    SET.loaded = true;
+  }
+
+  /** Короткая подпись «Сохранено» вместо тоста: правки здесь частые, тосты мешали бы. */
+  function markSaved() {
+    const el = $('#settings-saved');
+    if (el) el.textContent = 'Сохранено ✓';
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => {
+      const e = $('#settings-saved');
+      if (e) e.textContent = 'Изменения сохраняются сразу';
+    }, 2000);
+  }
+
+  /**
+   * Сохранить правку одного поля. patch — {tool:{key,value}} | {args:{key,value}} |
+   * {timeoutSec}. Новый конфиг собирается чистой функцией nextConfig и проходит
+   * sanitize ещё раз в main: правило одно, и «что сохранено» не зависит от стороны.
+   *
+   * @param {object} patch
+   * @param {{rerender?:boolean}} opts rerender — после правки пути инструмента таблица
+   *   обязана показать новый статус, поэтому перечитываем tools:detect и перерисовываем
+   */
+  async function saveSetting(patch, opts) {
+    if (!RS || !SET.cfg) return false;
+    const next = RS.nextConfig(SET.cfg, patch);
+    const r = await call('settings:save', { run: next });
+    if (!r || !r.ok) { toast('Настройки не сохранены', 'err'); return false; }
+    SET.cfg = r.run;
+    if (opts && opts.rerender) {
+      const d = await call('tools:detect', { fresh: true });
+      if (d && d.ok) { SET.tools = d.tools; SET.cfg = d.run || SET.cfg; SET.detectedAt = Date.now(); }
+      renderSettingsPanel();
+    } else {
+      markSaved();
+    }
+    return true;
+  }
+
+  async function openSettings() {
+    if (S.panel === 'settings') return;
+    S.panelBeforeSettings = S.panel === 'view' && S.view ? 'view' : (S.panel === 'prompt' ? 'prompt' : 'editor');
+    S.panel = 'settings';
+    if (!SET.loaded && !SET.loading) {
+      SET.loading = true;
+      loadSettings().finally(() => { SET.loading = false; renderSettingsPanel(); });
+    }
+    renderSettingsPanel();
+    render();
+  }
+
+  /** Кнопка в шапке и ✕ панели делают одно и то же: настройки не живут в layout. */
+  function leaveSettings() {
+    if (S.panel !== 'settings') return;
+    S.panel = S.panelBeforeSettings === 'view' && S.view
+      ? 'view'
+      : (S.panelBeforeSettings === 'prompt' && S.layout.promptOpen ? 'prompt' : 'editor');
+    render();
+  }
+
+  /** «↻ Обновить»: заново проверить PATH и версии — например, после установки компилятора. */
+  async function onRefreshTools() {
+    if (SET.busy) return;
+    SET.busy = true;
+    renderSettingsPanel(); // кнопка становится неактивной, таблица остаётся на месте
+    const d = await call('tools:detect', { fresh: true });
+    SET.busy = false;
+    if (d && d.ok) {
+      SET.tools = d.tools;
+      SET.cfg = d.run || SET.cfg;
+      SET.detectedAt = Date.now();
+      renderSettingsPanel();
+      toast('Инструменты проверены заново', 'ok');
+    } else {
+      renderSettingsPanel();
+      toast('Не удалось проверить инструменты', 'err');
+    }
+  }
+
+  /** «Обзор…» — диалог выбора исполняемого файла; отмена диалога ошибкой не считается. */
+  async function pickTool(toolKey) {
+    const r = await call('tools:pick', { toolKey });
+    if (!r || !r.ok || !r.path) return;
+    await saveSetting({ tool: { key: toolKey, value: r.path } }, { rerender: true });
+  }
+
+  /** Таймаут бездействия: недопустимое значение не сохраняем и возвращаем прежнее. */
+  async function onTimeoutChange(value) {
+    if (!RS) return;
+    const n = RS.parseTimeoutInput(value);
+    if (n === null) {
+      toast(`Таймаут — целое число секунд от 0 до ${RS.TIMEOUT_MAX} (0 = не останавливать)`, 'err');
+      renderSettingsPanel();
+      return;
+    }
+    await saveSetting({ timeoutSec: n });
+  }
+
+  /** Строка таблицы инструментов: язык, инструмент, что найдено, ручной путь. */
+  function toolRow(r) {
+    const st = r.status;
+    return h('tr', { class: 'set-row' },
+      h('td', { class: 'set-lang' }, r.firstOfLang ? r.langLabel : ''),
+      h('td', { class: 'set-tool', title: 'Ищется в PATH: ' + r.candidates.join(', ') }, r.toolLabel),
+      h('td', { class: 'set-found st-' + st.kind },
+        st.text,
+        st.kind === 'none' && h('div', { class: 'set-hint' }, 'Нет в PATH? ' + r.install)),
+      h('td', { class: 'set-manual' },
+        h('input', {
+          type: 'text', value: r.manual || '', placeholder: 'автопоиск в PATH',
+          'aria-label': 'Путь вручную: ' + r.toolLabel,
+          onchange: (e) => saveSetting({ tool: { key: r.toolKey, value: e.target.value } }, { rerender: true }),
+        }),
+        h('button', {
+          class: 'btn tiny', type: 'button', title: 'Выбрать исполняемый файл…',
+          onclick: () => pickTool(r.toolKey),
+        }, 'Обзор…'),
+        h('button', {
+          class: 'btn ghost tiny', type: 'button', title: 'Сбросить к автопоиску в PATH',
+          disabled: !r.manual,
+          onclick: () => saveSetting({ tool: { key: r.toolKey, value: null } }, { rerender: true }),
+        }, 'Авто')));
+  }
+
+  function renderSettings() {
+    if (!RS) return h('div', { class: 'empty' }, 'Модуль настроек не загружен');
+    if (!SET.loaded) {
+      if (!SET.loading) {
+        SET.loading = true;
+        loadSettings().finally(() => { SET.loading = false; renderSettingsPanel(); });
+      }
+      return h('div', { class: 'empty' }, 'Загрузка…');
+    }
+    if (SET.error) return h('div', { class: 'empty' }, SET.error);
+
+    const box = h('div', { class: 'stack' });
+    box.append(
+      h('div', { class: 'path' },
+        'Инструменты для запуска файлов ищутся в PATH автоматически. Указанный вручную путь побеждает автопоиск; «Авто» возвращает поиск в PATH.'),
+      h('div', { class: 'toolbar' },
+        h('button', {
+          class: 'btn', type: 'button', disabled: SET.busy,
+          title: 'Заново проверить PATH и версии — например, после установки компилятора',
+          onclick: onRefreshTools,
+        }, SET.busy ? 'Проверка…' : '↻ Обновить'),
+        h('span', { id: 'settings-saved', class: 'path' }, 'Изменения сохраняются сразу'),
+        h('span', { class: 'grow' }),
+        h('span', { class: 'path' }, SET.detectedAt ? 'Проверено: ' + fmtTime(SET.detectedAt) : '')),
+    );
+
+    box.append(
+      h('div', { class: 'set-sec-title' }, 'Инструменты'),
+      h('table', { class: 'set-table' },
+        h('thead', {}, h('tr', {},
+          h('th', {}, 'Язык'), h('th', {}, 'Инструмент'),
+          h('th', {}, 'Обнаружено'), h('th', {}, 'Путь вручную'))),
+        h('tbody', {}, RS.toolRows(SET.cfg, SET.tools).map((r) => toolRow(r)))));
+
+    box.append(h('div', { class: 'set-sec-title' }, 'Дополнительные аргументы'));
+    for (const a of RS.argRows(SET.cfg)) {
+      box.append(h('div', { class: 'set-arg' },
+        h('label', { class: 'set-arg-label' }, a.label),
+        h('input', {
+          type: 'text', value: a.value, placeholder: a.hint,
+          'aria-label': 'Дополнительные аргументы: ' + a.label, title: a.hint,
+          onchange: (e) => saveSetting({ args: { key: a.key, value: e.target.value } }),
+        })));
+    }
+
+    box.append(
+      h('div', { class: 'set-sec-title' }, 'Таймаут бездействия'),
+      h('div', { class: 'row' },
+        h('input', {
+          type: 'number', class: 'set-num', min: '0', max: String(RS.TIMEOUT_MAX), step: '30',
+          value: String(SET.cfg.timeoutSec), 'aria-label': 'Таймаут бездействия, секунд',
+          onchange: (e) => onTimeoutChange(e.target.value),
+        }),
+        h('span', {}, 'секунд'),
+        h('span', { class: 'path' }, 'Процесс останавливается, если столько времени нет ни вывода, ни ввода. 0 — не останавливать.')),
+      h('div', { class: 'set-sec-title' }, 'Оболочка для команд модели'),
+      h('div', { class: 'path set-note' }, RS.SHELL_NOTE));
+    return box;
+  }
+
+  /** Панель настроек перерисовывается только своими действиями — как форма «Промпта». */
+  function renderSettingsPanel() {
+    const root = $('#settings-body');
+    if (!root) return;
+    if (S.panel !== 'settings') { root.replaceChildren(); return; }
+    const scroll = root.scrollTop;
+    root.replaceChildren(renderSettings());
+    root.scrollTop = scroll;
   }
 
   // ---------- вкладка «Предложения» ----------
@@ -1321,6 +1575,7 @@
     show('#ed-tabs', mode === 'editor');
     show('#ed-status', mode === 'editor');
     show('#prompt-host', mode === 'prompt');
+    show('#settings-host', mode === 'settings');
     show('#diff-host', isDiff);
     show('#view-host', mode === 'view' && !isDiff);
     if (mode !== 'editor') { show('#ed-host', false); show('#ed-empty', false); }
@@ -1919,6 +2174,14 @@
   (function bindPromptClose() {
     const btn = $('#prompt-close');
     if (btn && btn.addEventListener) btn.addEventListener('click', () => closePrompt());
+  })();
+
+  // Крестик панели настроек — статичный узел разметки, привязываем один раз.
+  // В отличие от «Промпта», настройки не живут в layout, поэтому ✕ просто возвращает
+  // в прежнее окно (та же функция, что у переключателя в шапке).
+  (function bindSettingsClose() {
+    const btn = $('#settings-close');
+    if (btn && btn.addEventListener) btn.addEventListener('click', () => leaveSettings());
   })();
 
   // ---------- события запуска (этап C3, ТЗ §3.4) ----------

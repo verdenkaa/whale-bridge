@@ -89,6 +89,20 @@
             </div>
             <div id="prompt-body" class="prompt-body"></div>
           </div>
+          <!-- настройки (этап C3b, §2.4): тот же приём, что у «Промпта» — режим центральной
+               панели вместо редактора. Содержимое рисует ui/app.js по данным
+               src/runsettings.js (таблица языков) и tools:detect (что найдено в PATH).
+               Режим не сохраняется в layout: настройки — утилита, а не рабочее окно,
+               и после перезапуска приложение обязано открываться как раньше. -->
+          <div id="settings-host" class="settings-host hidden">
+            <div class="prompt-head">
+              <span class="panel-title">НАСТРОЙКИ</span>
+              <span class="section-note">Запуск</span>
+              <span class="grow"></span>
+              <button class="btn ghost tiny" id="settings-close" type="button" title="Закрыть и вернуться к редактору">✕</button>
+            </div>
+            <div id="settings-body" class="settings-body"></div>
+          </div>
           <div id="ed-empty" class="ed-empty">
             <div>Файл не открыт.</div>
             <div class="path">Выберите файл в дереве слева или нажмите Ctrl+P.</div>
@@ -137,6 +151,9 @@
   <!-- runlangs общий для main и renderer (UMD): классификатор опасных команд и
        таблица языков обязаны быть одним правилом на два процесса (ТЗ C3 §3.1) -->
   <script src="../src/runlangs.js"></script>
+  <!-- модель представления настроек запуска (этап C3b): строки таблицы, статусы,
+       правило изменения config.run — те же данные, что использует main -->
+  <script src="../src/runsettings.js"></script>
   <script src="dom.js"></script>
   <script src="layout.js"></script>
   <script src="editor-state.js"></script>

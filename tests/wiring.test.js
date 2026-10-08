@@ -286,3 +286,56 @@ test('wiring: запуск (C3) связан на всех сторонах — 
   assert.ok(pkg.dependencies['@xterm/xterm'], '@xterm/xterm не объявлен в dependencies');
   assert.ok(pkg.dependencies['@xterm/addon-fit'], '@xterm/addon-fit не объявлен в dependencies');
 });
+
+test('wiring: настройки запуска (C3b) связаны на всех сторонах — main, preload, ui, модуль', () => {
+  const htmlSrc = read('ui/index.html');
+  const appSrc = read('ui/app.js');
+  const rs = require('../src/runsettings');
+
+  // main: четыре обработчика и то, что они реально делают
+  for (const c of ['tools:detect', 'tools:pick', 'settings:get', 'settings:save']) {
+    assert.match(mainSrc, new RegExp(`handle\\('${c}'`), `в main.js нет handle('${c}')`);
+  }
+  assert.match(mainSrc, /toolchain\.detect\(store\.config\.run\)/, 'tools:detect отдаёт результат обнаружения для текущего конфига');
+  assert.match(mainSrc, /toolchain\.clearCache\(\)/, 'кеш инструментов сбрасывается (Обновить / сохранение пути)');
+  assert.match(mainSrc, /dialog\.showOpenDialog/, '«Обзор…» открывает системный диалог выбора файла');
+  assert.match(mainSrc, /handle\('settings:save'[\s\S]{0,300}sanitizeRunConfig/, 'присланный конфиг чистится перед записью');
+  assert.match(mainSrc, /handle\('settings:save'[\s\S]{0,400}store\.saveConfig\(\)/, 'настройки сохраняются в config.json');
+  assert.match(mainSrc, /runsettings\.toolByKey/, 'main берёт подписи инструментов из общей модели, а не дублирует их');
+
+  // общая модель: renderer и main используют один модуль
+  for (const m of ['toolRows', 'argRows', 'statusOf', 'nextConfig', 'parseTimeoutInput', 'missingToolMessage', 'toolByKey']) {
+    assert.equal(typeof rs[m], 'function', `src/runsettings.js не предоставляет ${m}`);
+  }
+  assert.match(appSrc, /RS\.toolRows\(/, 'таблица настроек строится общей моделью');
+  assert.match(appSrc, /RS\.nextConfig\(/, 'правка поля проходит через общее правило');
+  assert.match(appSrc, /RS\.parseTimeoutInput\(/, 'таймаут проверяется общей функцией');
+  assert.match(read('src/runner.js'), /runsettings\.missingToolMessage\(/, 'сообщение «не найден» — из общей модели');
+
+  // renderer: каналы вызываются, панель рисуется, режим панели переключается
+  for (const c of ['tools:detect', 'tools:pick', 'settings:get', 'settings:save']) {
+    assert.ok(appSrc.includes(`call('${c}'`), `app.js не вызывает ${c}`);
+  }
+  assert.match(appSrc, /show\('#settings-host', mode === 'settings'\)/, 'режим «настройки» переключается в renderEditorArea');
+  assert.match(appSrc, /renderSettingsPanel/, 'панель настроек перерисовывается');
+  assert.match(appSrc, /reason === 'tool-missing'/, 'ошибка «инструмент не найден» ведёт в настройки');
+  assert.match(appSrc, /Открыть настройки/, 'в тосте есть действие «Открыть настройки»');
+
+  // разметка: панель настроек и порядок скриптов (runsettings требует runlangs)
+  for (const id of ['settings-host', 'settings-body', 'settings-close']) {
+    assert.ok(htmlSrc.includes(`id="${id}"`), `в index.html нет #${id}`);
+  }
+  const at = (needle) => {
+    const i = htmlSrc.indexOf(needle);
+    assert.ok(i >= 0, `в index.html нет ${needle}`);
+    return i;
+  };
+  // ищем именно теги скриптов: в комментариях разметки имена модулей тоже упоминаются
+  assert.ok(at('<script src="../src/runlangs.js">') < at('<script src="../src/runsettings.js">'),
+    'runlangs грузится до runsettings');
+  assert.ok(at('<script src="../src/runsettings.js">') < at('"app.js"'), 'runsettings грузится до app.js');
+
+  // оболочка не настраивается: ни поля выбора, ни записи shellWin из renderer (ТЗ §5.3, Q4)
+  assert.ok(!/shellWin\s*:/.test(appSrc), 'renderer не подбирает оболочку — она фиксирована');
+  assert.equal(rs.nextConfig({ shellWin: 'powershell' }, {}).shellWin, 'cmd');
+});
