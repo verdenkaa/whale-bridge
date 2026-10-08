@@ -14,6 +14,9 @@ const { buildReport, createRing, shortToolName } = require('./runfmt');
 
 const OUTPUT_LIMIT = 4 * 1024 * 1024; // кольцевой буфер вывода на сессию, 4 МБ
 const INPUT_LIMIT = 64 * 1024;        // stdin из предложения — не больше 64 КБ
+// Окно досбора вывода после события выхода (см. onExit): pty сообщает о завершении
+// процесса раньше, чем последние байты доезжают до нас.
+const EXIT_DRAIN_MS = 150;
 
 function createRunner(deps) {
   const d = deps || {};
@@ -37,6 +40,9 @@ function createRunner(deps) {
   const limits = d.limits || {};
   const maxOutputBytes = Number.isFinite(limits.maxOutputBytes) && limits.maxOutputBytes > 0
     ? limits.maxOutputBytes : OUTPUT_LIMIT;
+  // 0 — досбор выключен (тесты вызывают выход синхронно и сразу проверяют последствия)
+  const drainMs = Number.isFinite(limits.exitDrainMs) && limits.exitDrainMs >= 0
+    ? limits.exitDrainMs : EXIT_DRAIN_MS;
   const onStart = d.onStart || (() => {});   // main: пауза fs.watch
   const onEnd = d.onEnd || (() => {});       // main: возобновить fs.watch
   const onError = d.onError || ((e) => { throw e; });
@@ -86,11 +92,18 @@ function createRunner(deps) {
 
   function clearWatchdog(session) { clearTimeout(session.watchdog); session.watchdog = null; }
 
+  /** Снять отложенный finish (окно досбора вывода) — при остановке или перезапуске. */
+  function clearDrain(session) { clearTimeout(session.drainTimer); session.drainTimer = null; }
+
   // ---------- шаги ----------
 
   function startStep(session, index) {
     const step = session.plan.steps[index];
     session.step = index;
+    // Код возврата предыдущего шага больше не «ожидающий»: иначе окно досбора шага 1
+    // заставляло report() показывать готовый код, а «■ Стоп» во время шага 2 — засчитывать
+    // остановку как успешное завершение компиляции.
+    session.exitPending = null;
     const cwd = session.cwd;
     // Исполняемый файл шага с каталогом в пути обязан быть абсолютным: на Windows
     // CreateProcess ищет относительный путь относительно текущей папки РОДИТЕЛЯ
@@ -166,26 +179,51 @@ function createRunner(deps) {
     if (session.state !== 'running') return; // сессию уже завершили (перезапуск, стоп)
     const exitCode = typeof code === 'number' ? code : (signal ? 1 : 0);
     const next = session.plan && session.plan.steps ? session.plan.steps[session.step + 1] : null;
-    if (!session.forced && exitCode === 0 && next) {
-      // Двухшаговый план: компиляция успешна — разделитель и запуск в том же терминале.
-      // Разделитель печатает renderer локально (run:exit со nextStep), в pty и в отчёт
-      // он не попадает.
-      send('run:exit', {
-        sessionId: session.id, code: exitCode, step: session.step, stepKind: session.plan.steps[session.step].kind,
-        nextStep: { index: session.step + 1, kind: next.kind },
-      });
-      session.pty = null;
-      startStep(session, session.step + 1);
+    clearWatchdog(session);
+    session.exitPending = exitCode;
+
+    const proceed = () => {
+      session.drainTimer = null;
+      if (session.state !== 'running') return; // сессию остановили или перезапустили, пока дособирали вывод
+      if (!session.forced && exitCode === 0 && next) {
+        // Двухшаговый план: компиляция успешна — разделитель и запуск в том же терминале.
+        // Разделитель печатает renderer локально (run:exit со nextStep), в pty и в отчёт
+        // он не попадает.
+        send('run:exit', {
+          sessionId: session.id, code: exitCode, step: session.step, stepKind: session.plan.steps[session.step].kind,
+          nextStep: { index: session.step + 1, kind: next.kind },
+        });
+        session.pty = null;
+        startStep(session, session.step + 1);
+        return;
+      }
+      finish(session, exitCode);
+    };
+
+    // Событие выхода не означает, что вывод кончился: на Windows node-pty ждёт завершения
+    // процесса (WaitForSingleObject) и сообщает код возврата, а псевдоконсоль ещё дописывает
+    // последние байты в трубу; на POSIX то же самое — выход приходит от wait(), а данные из
+    // пайпа могут быть в пути. Быстрая команда (ошибка cmd.exe «не является внутренней или
+    // внешней командой») завершалась раньше, чем её текст доезжал до нас, и onData отбрасывал
+    // его как «сессия завершена»: пользователь видел только «Код возврата: 1» без объяснения.
+    // Поэтому finish() откладывается на короткое окно досбора — вывод успевает в терминал
+    // и в кольцевой буфер отчёта.
+    if (drainMs > 0) {
+      clearTimeout(session.drainTimer);
+      session.drainTimer = setTimeout(proceed, drainMs);
+      if (d.watchdogUnref && typeof session.drainTimer.unref === 'function') session.drainTimer.unref();
       return;
     }
-    finish(session, exitCode);
+    proceed();
   }
 
   function finish(session, code) {
     if (session.state === 'exited') return;
     clearWatchdog(session);
+    clearDrain(session);
     session.state = 'exited';
     session.exitCode = typeof code === 'number' ? code : null;
+    session.exitPending = null;
     session.endedAt = clock();
     const forced = session.forced;
     session.forced = null;
@@ -199,6 +237,10 @@ function createRunner(deps) {
     send('run:exit', {
       sessionId: session.id, code: session.exitCode, step: session.step, reason,
       error: session.spawnError || null,
+      // Пустой вывод при ненулевом коде — штатная, но неприятная ситуация: ошибка команды
+      // осталась в псевдоконсоли и не доехала до нас. Renderer говорит об этом прямо,
+      // вместо того чтобы молча показать один код возврата.
+      emptyOutput: session.ring.bytes === 0,
     });
     if (active === session) { active = null; onEnd(session); sendState(); }
   }
@@ -207,8 +249,16 @@ function createRunner(deps) {
     const s = active;
     if (!s) return;
     if (s.state === 'running') {
+      // Процесс уже завершился сам, а мы дособираем вывод: перезапуск или «Стоп» не должны
+      // превращать честный код возврата в «остановлен пользователем».
+      if (s.exitPending !== null && s.exitPending !== undefined) {
+        clearDrain(s);
+        finish(s, s.exitPending);
+        return;
+      }
       s.forced = 'stopped';
       clearWatchdog(s);
+      clearDrain(s);
       try { killTree(s.pid, s.pty); } catch (e) { onError(e); }
       // killTree асинхронен (taskkill/SIGTERM), но сессия закрывается сразу:
       // пользователь нажал «Стоп» и не должен ждать агонии дерева процессов.
@@ -390,6 +440,9 @@ function createRunner(deps) {
       startedAt: clock(), endedAt: null,
       ring: createRing(maxOutputBytes),
       inputLog: [], forced: null, watchdog: null, pty: null,
+      // Код возврата, полученный от pty, но ещё не объявленный: между событием выхода и
+      // концом окна досбора вывода сессия формально 'running' (см. onExit).
+      exitPending: null, drainTimer: null,
       spawnError: null, lastReason: null,
       cols: Number.isFinite(a.cols) ? a.cols : 80,
       rows: Number.isFinite(a.rows) ? a.rows : 24,
@@ -451,10 +504,14 @@ function createRunner(deps) {
   function report() {
     const s = active || lastSession;
     if (!s) return { ok: false, error: 'Нет запуска для отчёта' };
+    // Во время окна досбора вывода сессия ещё 'running', но код возврата уже известен —
+    // отчёт обязан показывать его, а не «процесс ещё выполняется».
+    const code = s.exitCode !== null && s.exitCode !== undefined ? s.exitCode : s.exitPending;
+    const running = code === null || code === undefined;
     const text = buildReport({
       file: s.file, command: s.commandLine, projectDir: s.projectDir,
-      exitCode: s.state === 'running' ? undefined : s.exitCode,
-      running: s.state === 'running',
+      exitCode: running ? undefined : code,
+      running,
       inputLog: s.inputLog, output: s.ring.text(),
       truncated: s.ring.truncated, reason: s.lastReason || null,
     });

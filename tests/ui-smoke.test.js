@@ -742,6 +742,42 @@ test('UI: левая панель, режимы редактора, геомет
   canned['run:start'] = { ok: true, sessionId: 's1' };
   ed.activeFileValue = { projectId: 'p1', rel: 'main.py', name: 'main.py' };
 
+  // итог прогона виден в самом терминале, а не только в строке состояния: при ошибке —
+  // красным, при пустом выводе — честное объяснение, что текст ошибки до нас не доехал.
+  // События идут от текущей сессии ('s1'): чужие run:exit renderer игнорирует.
+  await click(runBtn);
+  await tick(40);
+  termState.writes.length = 0;
+  handlers['run:exit']({ sessionId: 's1', code: 1, step: 0, reason: null, emptyOutput: false });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('── завершено с ошибкой, код возврата: 1 ──')),
+    'код возврата напечатан в терминале');
+  termState.writes.length = 0;
+  handlers['run:exit']({ sessionId: 's1', code: 1, step: 0, reason: null, emptyOutput: true });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('[вывода нет')), 'пустой вывод объяснён');
+  termState.writes.length = 0;
+  handlers['run:exit']({ sessionId: 's1', code: 0, step: 0, reason: null, emptyOutput: false });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('── завершено, код возврата: 0 ──')), 'успех тоже помечен');
+  assert.ok(!termState.writes.some((w) => w.includes('[вывода нет')), 'при ненулевом выводе пометки нет');
+  // остановка пользователем не дублируется строкой кода возврата
+  termState.writes.length = 0;
+  handlers['run:exit']({ sessionId: 's1', code: -1, step: 0, reason: 'stopped' });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('[процесс остановлен]')), 'причина остановки названа');
+  assert.ok(!termState.writes.some((w) => w.includes('завершено')), 'строка кода не дублирует остановку');
+
+  // команда оболочки печатается в терминал целиком: после очистки экрана иначе непонятно,
+  // что именно было выполнено
+  termState.writes.length = 0;
+  handlers['run:state']({ active: { kind: 'cmd', label: 'findstr /i player *.gd', state: 'running', sessionId: 'scmd', step: 0, stepKind: 'run' } });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('⌘ findstr /i player *.gd')), 'команда напечатана');
+  assert.match(text(roots['term-bar']), /Запуск: findstr/);
+  handlers['run:state']({ active: null });
+  await tick(10);
+
   // «■ Стоп» без процесса — честная ошибка, «📋 Отчёт» — копия в буфер
   await click(btn(roots['term-bar'], '■ Стоп'));
   await tick(30);

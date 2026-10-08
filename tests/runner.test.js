@@ -91,7 +91,9 @@ async function setup(t, cfg) {
     getRunConfig: () => c.runConfig || {},
     toolchain: { detect: async () => fakeTools },
     fs: c.fs || fs,
-    limits: c.limits,
+    // Окно досбора вывода по умолчанию выключено: тесты вызывают exit() и сразу проверяют
+    // последствия. Поведение с окном проверяется отдельным тестом (см. ниже).
+    limits: Object.assign({ exitDrainMs: 0 }, c.limits),
     onStart: (s) => started.push(s),
     onEnd: (s) => ended.push(s),
     onError: () => {},
@@ -474,6 +476,75 @@ test('runner: папка инструмента из настроек попад
 
   // окружение главного процесса не мутируется
   assert.equal(process.env.PATH, pathBefore, 'process.env родителя не изменён');
+});
+
+test('runner: вывод, пришедший после события выхода, не теряется (окно досбора)', async (t) => {
+  // Реальная ситуация Windows: node-pty сообщает код возврата, когда процесс завершился,
+  // а псевдоконсоль ещё дописывает последние байты в трубу. Быстрая команда с ошибкой
+  // (cmd.exe: «не является внутренней или внешней командой») завершалась раньше, чем её
+  // текст доезжал до нас, и вывод отбрасывался — пользователь видел один «Код возврата: 1».
+  const s = await setup(t, { limits: { exitDrainMs: 25 } });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'cmd', command: 'xyz' } });
+  assert.equal(r.ok, true);
+  s.ptys[0].exit(1);
+  // выход уже случился, а вывод приходит позже — он обязан дойти до терминала и до отчёта
+  s.ptys[0].emit('"xyz" не является внутренней или внешней командой\r\n');
+  assert.equal(s.exitsOf(r.sessionId).filter((e) => !e.nextStep).length, 0, 'run:exit ещё не объявлен');
+  // во время досбора отчёт уже знает код возврата
+  const during = s.runner.report();
+  assert.match(during.text, /Код возврата: 1/);
+  assert.match(during.text, /не является внутренней или внешней командой/);
+  await new Promise((res) => setTimeout(res, 60));
+  const exits = s.exitsOf(r.sessionId).filter((e) => !e.nextStep);
+  assert.equal(exits.length, 1, 'run:exit объявлен после окна досбора');
+  assert.equal(exits[0].code, 1);
+  assert.equal(exits[0].emptyOutput, false, 'вывод дособран — пометки «вывода нет» не будет');
+  assert.equal(s.dataOf(r.sessionId).includes('не является внутренней'), true, 'текст ошибки доехал до терминала');
+  assert.match(s.runner.report().text, /не является внутренней или внешней командой/);
+});
+
+test('runner: пустой вывод помечается в run:exit — renderer объясняет, а не молчит', async (t) => {
+  const s = await setup(t, { limits: { exitDrainMs: 0 } });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'cmd', command: 'xyz' } });
+  s.ptys[0].exit(1);
+  const exit = s.exitsOf(r.sessionId).filter((e) => !e.nextStep)[0];
+  assert.equal(exit.emptyOutput, true, 'вывода не было — флаг поднят');
+  // а у сессии с выводом флаг не поднят
+  const s2 = await setup(t, { limits: { exitDrainMs: 0 } });
+  const r2 = await s2.runner.start({ project: s2.project, target: { kind: 'file', rel: 'main.py' } });
+  s2.ptys[0].emit('ok\r\n');
+  s2.ptys[0].exit(0);
+  assert.equal(s2.exitsOf(r2.sessionId).filter((e) => !e.nextStep)[0].emptyOutput, false);
+});
+
+test('runner: стоп во время окна досбора сохраняет честный код возврата', async (t) => {
+  // Процесс завершился сам, а мы ещё дособираем вывод: «■ Стоп» или перезапуск не должны
+  // превращать настоящий код в «остановлен пользователем».
+  const s = await setup(t, { limits: { exitDrainMs: 500 } });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'cmd', command: 'xyz' } });
+  s.ptys[0].exit(3);
+  const res = s.runner.stop();
+  assert.equal(res.ok, true);
+  const exit = s.exitsOf(r.sessionId).filter((e) => !e.nextStep)[0];
+  assert.equal(exit.code, 3, 'код возврата процесса, а не -1');
+  assert.equal(exit.reason, null, 'это не остановка пользователем');
+});
+
+test('runner: стоп во время второго шага — остановка, а не код компиляции', async (t) => {
+  // Окно досбора вывода оставляет exitPending от первого шага; если его не сбросить,
+  // «■ Стоп» во время запуска бинарника засчитался бы как успешное завершение компиляции.
+  const s = await setup(t, { limits: { exitDrainMs: 20 } });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'app.cpp' } });
+  s.ptys[0].exit(0);
+  await new Promise((res) => setTimeout(res, 60));
+  assert.equal(s.ptys.length, 2, 'второй шаг стартовал после окна досбора');
+  assert.match(s.runner.report().text, /процесс ещё выполняется/, 'код компиляции не выдаётся за итог');
+  const res = s.runner.stop();
+  assert.equal(res.ok, true);
+  const exit = s.exitsOf(r.sessionId).filter((e) => !e.nextStep)[0];
+  assert.equal(exit.reason, 'stopped', 'это остановка пользователем');
+  assert.equal(exit.code, -1);
+  assert.equal(s.killed.length, 1, 'дерево процессов убито');
 });
 
 test('runner: холостой resize не доходит до pty', async (t) => {

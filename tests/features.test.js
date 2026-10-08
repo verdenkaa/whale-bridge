@@ -92,6 +92,13 @@ async function setup(t) {
   return { root, data, store, project, chat, pm: new ProposalManager({ store }) };
 }
 
+/** Перечитать хранилище с диска — имитация перезапуска приложения. */
+async function reloadStore(data) {
+  const s = new Store(data);
+  await s.load();
+  return s;
+}
+
 test('proposal: решения «принято/отклонено» переживают новый ProposalManager', async (t) => {
   const { root, store, chat } = await setup(t);
   await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
@@ -106,6 +113,8 @@ test('proposal: решения «принято/отклонено» переж�
 
   // Перезапуск: те же блоки приходят заново. Обработанные не должны снова становиться pending —
   // иначе Diff предложил бы применить (или отклонить) то, что пользователь уже закрыл.
+  //Applied-блок не возвращается вовсе (правило ниже): файл уже содержит ровно это содержимое,
+  // а запись о применении живёт в Истории.
   const pm2 = new ProposalManager({ store });
   pm2.ingest(chat, [
     { key: 'new-reject-node', text: '# &a.py\nx = 2\n' },
@@ -114,15 +123,53 @@ test('proposal: решения «принято/отклонено» переж�
   ]);
   const list = await pm2.list(chat, true);
   const byStatus = (s) => list.filter((x) => x.status === s);
-  assert.equal(list.length, 3);
+  assert.equal(list.length, 2, 'применённый блок заново не предлагается');
   assert.equal(byStatus('rejected').length, 1); // отклонённое вернулось уже отклонённым
-  const restored = byStatus('applied');
-  assert.equal(restored.length, 1);
-  assert.ok(restored[0].relPath === 'a.py');
+  assert.equal(byStatus('applied').length, 0, 'применённого в списке нет');
   const fresh = byStatus('pending');
   assert.equal(fresh.length, 1); // новым осталось только действительно новое предложение
   const fv = await pm2.view(fresh[0].id);
   assert.match(fv.newText, /x = 4/);
+});
+
+test('proposal: блок, identical уже применённому, в список не добавляется', async (t) => {
+  // Требование пользователя (приёмка 0019): DeepSeek в режиме рассуждений печатает тот же
+  // код до итогового ответа, а при прокрутке старого чата догружаются давно отработанные
+  // блоки. Совпадение 1 в 1 (тот же op, путь и содержимое — от них считается contentHash)
+  // с уже применённым предложением карточку не создаёт.
+  const { root, store, chat, data } = await setup(t);
+  await fs.writeFile(path.join(root, 'a.py'), 'x = 1\n');
+  const pm1 = new ProposalManager({ store });
+  pm1.ingest(chat, [{ key: 'k1', text: '# &a.py\nx = 2\n' }]);
+  const [item] = await pm1.list(chat, true);
+  const v = await pm1.view(item.id);
+  assert.equal((await pm1.apply(item.id, { baseHash: v.baseHash, contentHash: v.contentHash })).ok, true);
+  // в текущем сеансе карточка применённого предложения остаётся — это запись о действии
+  assert.equal((await pm1.list(chat, true)).filter((x) => x.status === 'applied').length, 1);
+
+  await store.saveConfig();
+  const pm2 = new ProposalManager({ store: await reloadStore(data) });
+  // тот же блок под другим ключом (другой DOM-узел после перезагрузки страницы)
+  pm2.ingest(chat, [{ key: 'another-node', text: '# &a.py\nx = 2\n' }]);
+  assert.equal((await pm2.list(chat, true)).length, 0, 'identical применённому — не предлагается');
+
+  // отличающееся содержимое — новое предложение: правило не глушит настоящие правки
+  pm2.ingest(chat, [{ key: 'changed', text: '# &a.py\nx = 5\n' }]);
+  const fresh = await pm2.list(chat, true);
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0].status, 'pending');
+
+  // создание файла работает так же
+  const pm3 = new ProposalManager({ store });
+  pm3.ingest(chat, [{ key: 'n1', text: '# &NEW:b.py\nprint(1)\n' }]);
+  const created = (await pm3.list(chat, true)).find((x) => x.relPath === 'b.py');
+  const cv = await pm3.view(created.id);
+  assert.equal((await pm3.apply(created.id, { baseHash: cv.baseHash, contentHash: cv.contentHash })).ok, true);
+  await store.saveConfig();
+  const pm4 = new ProposalManager({ store: await reloadStore(data) });
+  pm4.ingest(chat, [{ key: 'n2', text: '# &NEW:b.py\nprint(1)\n' }]);
+  assert.equal((await pm4.list(chat, true)).filter((x) => x.relPath === 'b.py').length, 0);
+  assert.ok(data, 'хранилище то же — решения читаются из config.json');
 });
 
 test('proposal: markAppliedExternally — принятие в буфер редактора закрывает предложение', async (t) => {
@@ -150,11 +197,17 @@ test('proposal: markAppliedExternally — принятие в буфер ред�
   // которой никогда не видела).
   assert.deepEqual(store.contextKnown()[chat] || {}, {});
 
-  // решение переживает перезапуск, как после обычного apply
+  // Решение переживает перезапуск, как после обычного apply. Но identical применённому
+  // блок заново не предлагается (правило «не дублировать уже применённое»): файл уже
+  // содержит ровно это содержимое, а запись о применении живёт в Истории.
   const pm2 = new ProposalManager({ store });
   pm2.ingest(chat, [{ key: 'k1-again', text: '# &a.py\nx = 2\n' }]);
-  const [restored] = await pm2.list(chat, true);
-  assert.equal(restored.status, 'applied');
+  assert.deepEqual(await pm2.list(chat, true), [], 'применённый блок не возвращается карточкой');
+  // отличающееся содержимое — по-прежнему новое предложение
+  pm2.ingest(chat, [{ key: 'k1-other', text: '# &a.py\nx = 9\n' }]);
+  const fresh = await pm2.list(chat, true);
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0].status, 'pending');
 });
 
 test('patch: полный цикл через предложение — Diff, запись с CRLF, откат', async (t) => {
