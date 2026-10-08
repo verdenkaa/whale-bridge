@@ -118,3 +118,36 @@ test('ipc: send-каналы не пересекаются с invoke и собы
   assert.deepEqual(asInvoke, [], 'send-канал одновременно в INVOKE: ' + asInvoke.join(', '));
   assert.deepEqual(asEvent, [], 'send-канал одновременно в EVENTS: ' + asEvent.join(', '));
 });
+
+// ---- этап C3: каналы запуска и терминала (ТЗ §3.4) ----
+
+const terminal = read('ui/terminal.js');
+const invokedByTerminal = new Set(all(terminal, /post\('([^']+)'/g));
+const listenedAll = new Set([...listened, ...all(terminal, /api\.on\('([^']+)'/g)]);
+
+test('ipc: invoke-каналы запуска на месте и разрешены', () => {
+  for (const c of ['run:start', 'run:stop', 'run:copy-report']) {
+    assert.ok(INVOKE.has(c), `${c} не в белом списке INVOKE preload`);
+    assert.ok(handled.has(c), `${c} не обрабатывается в main`);
+    assert.ok(invoked.has(c), `${c} разрешён, но renderer его не вызывает`);
+    assert.ok(!EVENTS.has(c) && !SEND.has(c), `${c} не должен пересекаться с событиями и send`);
+  }
+});
+
+test('ipc: send-каналы терминала на месте и принимаются в main', () => {
+  for (const c of ['run:input', 'run:resize']) {
+    assert.ok(SEND.has(c), `${c} не в белом списке SEND preload`);
+    assert.ok(received.has(c), `${c} не принимается в main (ipcMain.on)`);
+    assert.ok(invokedByTerminal.has(c), `${c} разрешён, но терминал его не использует`);
+    assert.ok(!INVOKE.has(c) && !EVENTS.has(c), `${c} не должен пересекаться с invoke и событиями`);
+  }
+});
+
+test('ipc: события потока вывода на месте и слушаются renderer', () => {
+  for (const c of ['run:data', 'run:exit', 'run:state']) {
+    assert.ok(EVENTS.has(c), `${c} не в белом списке EVENTS preload`);
+    assert.ok(sent.has(c), `main никогда не отправляет ${c}`);
+    assert.ok(listenedAll.has(c), `${c} никто не слушает в renderer`);
+    assert.ok(!INVOKE.has(c) && !SEND.has(c), `${c} не должен пересекаться с invoke и send`);
+  }
+});

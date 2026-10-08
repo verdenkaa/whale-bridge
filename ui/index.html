@@ -16,6 +16,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Whale Bridge</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- Стили xterm.js (этап C3). Подключает их сам ui/terminal.js при первом открытии
+       терминала: путь живёт в node_modules, а в тестовом окружении файла нет —
+       статичный <link> давал бы постоянный 404 в консоли. -->
+  <link rel="stylesheet" id="xterm-css">
 </head>
 <body>
   <!-- Раскладка (итог ручной проверки этапа B):
@@ -52,6 +56,11 @@
         <div class="vsplit" id="vsplit-left" title="Ширина левой панели" role="separator" aria-orientation="vertical"></div>
 
         <section class="editor-panel" aria-label="Редактор">
+          <!-- .ed-content — всё, что занимает место редактора (режимы панели), вместе
+               с оверлеями и тостом. Терминал (§2.1) живёт НИЖЕ, внутри .editor-panel:
+               он виден в любом режиме панели и никогда не наезжает на чат — чат
+               занимает свою колонку на полную высоту. -->
+          <div class="ed-content" id="ed-content">
           <div id="ed-tabs" class="ed-tabs"></div>
           <!-- Monaco создаётся один раз и живёт в #ed-host постоянно (§7): режимы панели
                переключаются классом hidden, DOM-контейнер редактора не пересоздаётся. -->
@@ -86,10 +95,24 @@
           </div>
           <div id="ed-status" class="ed-status"></div>
 
-          <!-- Оверлеи и тосты — только внутри IDE-области: WebContentsView с DeepSeek
-               перекрывает любые CSS-слои, поверх чата не нарисуется ничего (§24). -->
+          <!-- Оверлеи и тосты — только внутри области редактора: WebContentsView с
+               DeepSeek перекрывает любые CSS-слои, поверх чата не нарисуется ничего
+               (§24). Внутри .ed-content они к тому же не перекрывают терминал. -->
           <div id="ed-overlay" class="ed-overlay hidden"></div>
           <div id="toast" role="status" aria-live="polite"></div>
+          </div><!-- /.ed-content -->
+
+          <!-- Терминал (этап C3, §2.1): нижняя панель внутри колонки редактора.
+               Независима от режимов центральной панели — видна и когда открыт код,
+               и когда открыт просмотр/diff/«Промпт». Высота перетаскивается
+               (#hsplit-term) и сохраняется в layout (termH). -->
+          <div class="hsplit" id="hsplit-term" title="Высота терминала" role="separator" aria-orientation="horizontal"></div>
+          <div id="term-panel" class="term-panel hidden">
+            <!-- toolbar (состояние и кнопки ▶ ■ ↻ 📋 🗑 ✕) рисует ui/app.js -->
+            <div id="term-bar" class="term-bar"></div>
+            <!-- xterm создаётся один раз и переживает перерисовки (§7, как Monaco) -->
+            <div id="term-host" class="term-host"></div>
+          </div>
         </section>
       </div>
       <div class="vsplit" id="vsplit-chat" title="Ширина чата" role="separator" aria-orientation="vertical"></div>
@@ -111,12 +134,23 @@
        математика принятия ханков — src/hunks.js (UMD, window.WhaleDiff/WhaleHunks) -->
   <script src="../src/diff.js"></script>
   <script src="../src/hunks.js"></script>
+  <!-- runlangs общий для main и renderer (UMD): классификатор опасных команд и
+       таблица языков обязаны быть одним правилом на два процесса (ТЗ C3 §3.1) -->
+  <script src="../src/runlangs.js"></script>
   <script src="dom.js"></script>
   <script src="layout.js"></script>
   <script src="editor-state.js"></script>
   <script src="languages/gdscript.js"></script>
   <script src="monaco.js"></script>
   <script src="editor.js"></script>
+  <!-- xterm.js грузится локально из node_modules (CSP не меняется: script-src 'self').
+       В packaged-сборке node_modules остаётся внутри asar — в отличие от Monaco,
+       которому нужен распакованный путь для воркеров, xterm — обычный скрипт без
+       воркеров, и относительный путь работает в обоих случаях. -->
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <!-- терминал до app.js: app.js использует window.WhaleTerminal при монтаже -->
+  <script src="terminal.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

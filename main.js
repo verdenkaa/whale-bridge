@@ -11,6 +11,11 @@ const editorfs = require('./src/editorfs');
 const { resolveInProject } = require('./src/paths');
 const { extractFencedBlocks } = require('./src/parser');
 const pg = require('./src/promptgen');
+// Этап C3 «Запуск»: планирование языков (чистое ядро), поиск инструментов и
+// оркестратор сессий. runlangs общий с renderer (UMD) — правила одни на два процесса.
+const runlangs = require('./src/runlangs');
+const { createToolchain } = require('./src/toolchain');
+const { createRunner } = require('./src/runner');
 const { pathToFileURL } = require('url');
 // Правила раскладки общие с renderer (UMD): sanitize сохранённых ширин и нормализация
 // прямоугольника чата должны совпадать с тем, что считает ui/layout.js в интерфейсе.
@@ -46,6 +51,8 @@ let win = null;
 let chatView = null;
 let store = null;
 let proposals = null;
+let runner = null;      // оркестратор сессий запуска (создаётся после store.load)
+let toolchain = null;   // автопоиск инструментов в PATH
 let currentChatId = null;
 let pendingProjectId = null;
 let watcher = null;
@@ -70,6 +77,7 @@ const sealAiBase = (chatId) => {
 
 // Слежение за папкой проекта: файлы, созданные/изменённые вне приложения, сразу попадают в дерево и в проверку путей
 function syncWatcher() {
+  if (watchPaused) return; // на время сессии запуска наблюдатель закрыт (resumeWatcher восстановит)
   const project = store.getProjectForChat(currentChatId);
   const target = project ? project.path : null;
   if (target === watchedPath) return;
@@ -90,6 +98,124 @@ function syncWatcher() {
   } catch (e) {
     console.warn('[watch] недоступно:', e.message); // запасной путь — обновление при фокусе окна
   }
+}
+
+// ---------- запуск (этап C3, ТЗ §3) ----------
+
+// node-pty грузим лениво и с try/catch: нативный модуль может не подняться (другая
+// платформа без пребилда, повреждённая установка), а всё остальное приложение обязано
+// работать. Ошибка всплывёт в момент первого запуска — понятным тостом, не падением.
+let pty = null;
+let ptyError = null;
+function getPty() {
+  if (pty === null && ptyError === null) {
+    try {
+      pty = require('node-pty');
+    } catch (e) {
+      ptyError = e;
+      console.warn('[pty] node-pty недоступен:', e.message);
+    }
+  }
+  return pty;
+}
+
+/**
+ * Адаптер node-pty к интерфейсу раннера ({pid, write, resize, kill, onData, onExit}).
+ * Ошибки — исключениями: раннер ловит их в startStep и превращает в понятный ответ
+ * пользователю («не удалось запустить»), потому что типичная причина — битый путь
+ * инструмента, и ронять main из-за этого нельзя.
+ */
+function spawnPtyAdapter(opts) {
+  const ptyLib = getPty();
+  if (!ptyLib) {
+    throw new Error(ptyError
+      ? 'node-pty не загружен: ' + (ptyError.message || ptyError)
+      : 'node-pty не загружен');
+  }
+  const raw = ptyLib.spawn(opts.exe, opts.args, {
+    name: 'xterm-256color',
+    cols: opts.cols || 80,
+    rows: opts.rows || 24,
+    cwd: opts.cwd,
+    env: opts.env,
+  });
+  return {
+    pid: raw.pid,
+    write: (s) => raw.write(s),
+    resize: (c, r) => raw.resize(c, r),
+    kill: () => raw.kill(),
+    onData: (cb) => raw.onData(cb),
+    onExit: (cb) => raw.onExit(cb),
+  };
+}
+
+/**
+ * Убийство дерева процессов (handover §4.3: на Windows — отдельно от pty.kill).
+ * win32: taskkill /T /F снимает всё дерево (python-скрипт с subprocess умирает целиком);
+ * posix: процесс запущен лидером группы, поэтому SIGTERM группе (-pid), через 2 с SIGKILL.
+ */
+function killTree(pid, ptyHandle) {
+  if (pid) {
+    if (process.platform === 'win32') {
+      const { spawn } = require('child_process');
+      try {
+        // windowsHide: окно taskkill не должно мелькать поверх терминала
+        spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+          .on('error', () => { /* процесс мог уже завершиться */ });
+      } catch { /* процесс мог уже завершиться */ }
+    } else {
+      try { process.kill(-pid, 'SIGTERM'); } catch { /* уже завершился */ }
+      const t = setTimeout(() => {
+        try { process.kill(-pid, 'SIGKILL'); } catch { /* уже завершился */ }
+      }, 2000);
+      if (typeof t.unref === 'function') t.unref();
+    }
+  }
+  if (ptyHandle) { try { ptyHandle.kill(); } catch { /* уже завершён */ } }
+}
+
+/**
+ * Пауза наблюдения за файлами на время сессии (ТЗ §3.3): компиляция и запуск создают
+ * файлы (.ide_build, __pycache__), и наблюдатель не должен захлёбываться. Закрываем
+ * watcher и сбрасываем watchedPath; по завершении syncWatcher() гарантированно
+ * пересоздаст наблюдатель для текущего проекта (target !== watchedPath === null).
+ * Пока сессия идёт, syncWatcher() из state:get/focus/смены чата — холостой:
+ * флаг watchPaused не даёт возобновить наблюдение до onEnd.
+ */
+let watchPaused = false;
+function pauseWatcher() {
+  if (watchPaused) return;
+  watchPaused = true;
+  if (watcher) { try { watcher.close(); } catch { /* ignore */ } watcher = null; }
+  watchedPath = null;
+}
+function resumeWatcher() {
+  if (!watchPaused) return;
+  watchPaused = false;
+  // watchedPath сброшен в pauseWatcher, поэтому syncWatcher() гарантированно
+  // пересоздаст наблюдатель для текущего проекта (target !== null === watchedPath)
+  syncWatcher();
+}
+
+function createAppRunner() {
+  toolchain = createToolchain({});
+  runner = createRunner({
+    spawnPty: spawnPtyAdapter,
+    killTree,
+    // События терминала уходят через локальный send с литеральными именами каналов:
+    // обвязочные тесты сверяют run:data/run:exit/run:state в main.js с белым списком
+    // preload буквально, поэтому каналы обязаны быть видны в тексте main.js.
+    send: (channel, payload) => {
+      if (channel === 'run:data') send('run:data', payload);
+      else if (channel === 'run:exit') send('run:exit', payload);
+      else send('run:state', payload);
+    },
+    getRunConfig: () => store.config.run,
+    toolchain,
+    onStart: () => pauseWatcher(),
+    onEnd: () => resumeWatcher(),
+    onError: (e) => console.warn('[run]', e && e.message ? e.message : e),
+  });
 }
 
 async function updateChatFromUrl() {
@@ -265,6 +391,20 @@ ipcMain.on('chat:blocks', (event, payload) => {
     proposals.ingest(chatId.toLowerCase(), clean);
     sealAiBase(chatId.toLowerCase());
   }
+});
+
+// ---- терминал: ввод и размер (этап C3) ----
+// Fire-and-forget, как chat:set-bounds: нажатие клавиши обязано уходить в pty мгновенно,
+// round-trip invoke здесь только добавил бы задержку ввода.
+ipcMain.on('run:input', (event, text) => {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
+  if (typeof text !== 'string' || !text) return;
+  runner.input(text.slice(0, 4096));
+});
+ipcMain.on('run:resize', (event, size) => {
+  if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
+  if (!size || typeof size !== 'object') return;
+  runner.resize(size.cols, size.rows);
 });
 
 function projectOr(id) {
@@ -589,10 +729,39 @@ function registerIpc() {
   // main не считает геометрию: renderer присылает готовые ширины панелей, а позицию чата
   // задаёт прямоугольником в chat:set-bounds (ниже, в ipcMain.on).
   handle('layout:save', async ({ layout }) => {
-    const winW = win && !win.isDestroyed() ? win.getContentSize()[0] : null;
-    store.config.layout = layoutMath.sanitize(layout, winW);
+    const [winW, winH] = win && !win.isDestroyed() ? win.getContentSize() : [null, null];
+    store.config.layout = layoutMath.sanitize(layout, winW, winH);
     await store.saveConfig();
     return store.config.layout;
+  });
+
+  // ---- запуск (этап C3, ТЗ §3.4) ----
+  handle('run:start', async ({ projectId, target, input, cols, rows }) => {
+    const project = store.getProject(String(projectId || ''));
+    if (!project) return { ok: false, reason: 'no-project', message: 'Сначала выберите проект для этого чата' };
+    // payload — из renderer, поэтому чистим так же строго, как chat:blocks
+    const clean = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+    const t = target && typeof target === 'object' ? target : {};
+    // Инструменты могли появиться в PATH после прошлого запуска («установил gcc →
+    // запустил»), а кеш живёт до смены настроек — перед каждым стартом сбрасываем.
+    toolchain.clearCache();
+    const r = await runner.start({
+      project,
+      target: t.kind === 'cmd'
+        ? { kind: 'cmd', command: clean(t.command, 4000) }
+        : { kind: 'file', rel: clean(t.rel, 1000) },
+      input: clean(input, 65536),
+      cols: Number.isFinite(cols) ? cols : undefined,
+      rows: Number.isFinite(rows) ? rows : undefined,
+    });
+    return r;
+  });
+  handle('run:stop', () => runner.stop());
+  handle('run:copy-report', () => {
+    const r = runner.report();
+    if (!r.ok) return r;
+    clipboard.writeText(r.text);
+    return { ok: true, length: r.text.length };
   });
 }
 
@@ -627,6 +796,10 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc();
     buildMenu();
     createWindow();
+    // Раннер создаётся после store: ему нужны config.run и путь проекта.
+    createAppRunner();
+    // Не оставляем сирот: дерево процессов запуска умирает вместе с приложением
+    app.on('before-quit', () => { if (runner) runner.stopAll(); });
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 

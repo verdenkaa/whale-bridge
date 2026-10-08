@@ -92,11 +92,13 @@
     // Сохранённые размеры панелей (config.json) → CSS-переменные, вкладка левой панели
     // и режим редактора. sanitize защищает и от мусора в конфиге, и от окна, ставшего
     // уже минимумов, и мигрирует прежние схемы раскладки (см. ui/layout.js).
-    S.layout = L.sanitize(st.layout, window.innerWidth);
+    S.layout = L.sanitize(st.layout, window.innerWidth, window.innerHeight);
     applyLayout();
     if (!panelInit) { // только первый запуск: дальше режимом владеют действия пользователя
       panelInit = true;
       if (S.layout.promptOpen) { S.panel = 'prompt'; renderPromptPanel(); }
+      // Терминал был открыт в прошлый сеанс — открываем снова (§2.1)
+      if (S.layout.termOpen) setTermVisible(true);
     }
     if (projectChanged) {
       P.loaded = false;
@@ -118,6 +120,158 @@
   function applyLayout() {
     const vars = L.cssVars(S.layout);
     for (const k of Object.keys(vars)) document.documentElement.style.setProperty(k, vars[k]);
+  }
+
+  // ---------- терминал и запуск (этап C3, ТЗ §2) ----------
+  // Панель терминала — нижняя часть колонки редактора: видна в любом режиме панели
+  // и никогда не наезжает на чат. Кнопки и состояния рисует renderTermBar(),
+  // экземпляр xterm живёт в ui/terminal.js и создаётся один раз.
+  const RUN = {
+    running: false,
+    sessionId: null,
+    status: '',      // подпись состояния в панели
+    statusKind: '',  // '' | 'run' | 'ok' | 'err' — цвет подписи
+    lastTarget: null, // {kind, rel?, command?} — для кнопки «↻ Повторить»
+  };
+
+  function termPanel() { return $('#term-panel'); }
+  function fitTerm() { if (window.WhaleTerminal && window.WhaleTerminal.fit) window.WhaleTerminal.fit(); }
+  function termWrite(text) { if (window.WhaleTerminal) window.WhaleTerminal.writeLocal(text); }
+
+  /** Показать/скрыть панель терминала. termOpen живёт в layout и переживает перезапуск. */
+  function setTermVisible(open) {
+    const panel = termPanel();
+    const split = $('#hsplit-term');
+    S.layout = { ...S.layout, termOpen: !!open };
+    if (panel && panel.classList) panel.classList.toggle('hidden', !open);
+    if (split && split.classList) split.classList.toggle('hidden', !open);
+    applyLayout();
+    if (open) {
+      fitTerm(); // панель только что получила размер — xterm подгоняется под неё
+      renderTermBar();
+    }
+  }
+
+  async function openTerm() {
+    if (S.layout.termOpen) return;
+    setTermVisible(true);
+    await call('layout:save', { layout: S.layout });
+  }
+
+  async function toggleTerm() {
+    setTermVisible(!S.layout.termOpen);
+    await call('layout:save', { layout: S.layout });
+  }
+
+  /**
+   * ✕ на панели терминала = остановить процесс (если идёт) и скрыть панель —
+   * требование «прервать выполнение закрытием терминала» (§2.1).
+   */
+  async function closeTerm() {
+    if (RUN.running) await stopRun(true);
+    setTermVisible(false);
+    await call('layout:save', { layout: S.layout });
+  }
+
+  /** Toolbar панели терминала: состояние слева, действия справа (§2.1). */
+  function renderTermBar() {
+    const bar = $('#term-bar');
+    if (!bar) return;
+    bar.replaceChildren(
+      h('span', { class: 'term-title' }, 'ТЕРМИНАЛ'),
+      h('span', { class: 'term-status ' + RUN.statusKind, title: RUN.status || null }, RUN.status || ''),
+      h('span', { class: 'grow' }),
+      h('button', {
+        class: 'btn tiny', type: 'button', title: 'Запустить активный файл ещё раз (F5)',
+        onclick: () => runActiveFile(),
+      }, '▶ Запустить'),
+      h('button', {
+        class: 'btn tiny', type: 'button', title: 'Остановить процесс (убивает дерево процессов)',
+        onclick: () => stopRun(false),
+      }, '■ Стоп'),
+      h('button', {
+        class: 'btn tiny', type: 'button', title: 'Повторить последний запуск',
+        onclick: () => repeatRun(),
+      }, '↻ Повторить'),
+      h('button', {
+        class: 'btn tiny', type: 'button',
+        title: 'Скопировать отчёт о прогоне (файл, команда, ввод, вывод, код возврата) — для вставки в чат',
+        onclick: copyRunReport,
+      }, '📋 Отчёт'),
+      h('button', {
+        class: 'btn tiny', type: 'button', title: 'Очистить терминал',
+        onclick: () => { if (window.WhaleTerminal) window.WhaleTerminal.clear(); },
+      }, '🗑 Очистить'),
+      h('button', {
+        class: 'btn ghost tiny', type: 'button',
+        title: 'Остановить процесс (если идёт) и скрыть панель',
+        onclick: closeTerm,
+      }, '✕'),
+    );
+  }
+
+  /** Запустить активный файл: F5 и кнопка «▶ Запустить» в строке вкладок. */
+  async function runActiveFile() {
+    if (!S.project) { toast('Сначала выберите проект для этого чата', 'err'); return; }
+    const ed = window.WhaleEditor;
+    const f = ed && ed.activeFile ? ed.activeFile() : null;
+    if (!f || !f.rel) { toast('Откройте файл, который нужно запустить', 'err'); return; }
+    if (f.projectId && f.projectId !== S.project.id) {
+      toast('Активный файл из другого проекта — откройте файл текущего проекта', 'err');
+      return;
+    }
+    // §2.2, шаг 1: программа обязана видеть несохранённые правки. Другого пути записи
+    // на диск нет: сохраняем через file:write, любая ошибка отменяет запуск.
+    if (ed && ed.saveAllDirty && !(await ed.saveAllDirty())) {
+      toast('Запуск отменён: не удалось сохранить изменения', 'err');
+      return;
+    }
+    await startRun({ kind: 'file', rel: f.rel }, null);
+  }
+
+  /** Повторить последний запуск (кнопка «↻ Повторить»). */
+  async function repeatRun() {
+    if (!RUN.lastTarget) { toast('Ещё не было запусков', 'err'); return; }
+    const t = RUN.lastTarget;
+    await startRun({ kind: t.kind, rel: t.rel, command: t.command }, t.input || null);
+  }
+
+  async function startRun(target, input) {
+    await openTerm();
+    const t = window.WhaleTerminal;
+    if (t) t.fit();
+    RUN.lastTarget = { kind: target.kind, rel: target.rel, command: target.command, input: input || '' };
+    const size = t && t.size ? t.size() : null;
+    const r = await call('run:start', {
+      projectId: S.project ? S.project.id : null,
+      target: target.kind === 'cmd' ? { kind: 'cmd', command: target.command } : { kind: 'file', rel: target.rel },
+      input: input || undefined,
+      cols: size ? size.cols : undefined, rows: size ? size.rows : undefined,
+    });
+    if (!r) return; // ошибка уже показана тостом (call)
+    if (!r.ok) {
+      if (r.message) termWrite(r.message + '\r\n');
+      toast(r.message || 'Запуск не состоялся', 'err');
+      return;
+    }
+    RUN.running = true;
+    RUN.sessionId = r.sessionId;
+    RUN.status = 'Запуск: ' + (target.kind === 'cmd' ? target.command : target.rel);
+    RUN.statusKind = 'run';
+    renderTermBar();
+    if (window.WhaleTerminal) window.WhaleTerminal.focus();
+  }
+
+  async function stopRun(silent) {
+    if (!RUN.running) { if (!silent) toast('Нет активного процесса', 'err'); return; }
+    await call('run:stop');
+    // Состояние обновят события run:exit/run:state от main
+  }
+
+  async function copyRunReport() {
+    const r = await call('run:copy-report');
+    if (!r) return;
+    toast(r.ok ? 'Отчёт скопирован — вставьте в чат' : (r.error || 'Не удалось собрать отчёт'), r.ok ? 'ok' : 'err');
   }
 
   async function closeView() {
@@ -174,6 +328,12 @@
         title: COPY_REMINDER_TITLE,
         onclick: copyFormatReminder,
       }, '⧗ Напомнить формат'),
+      // Переключатель терминала (этап C3, §2.1): нижняя панель колонки редактора
+      h('button', {
+        class: 'btn mode' + (S.layout.termOpen ? ' on' : ''), type: 'button',
+        title: S.layout.termOpen ? 'Скрыть терминал (Ctrl+`)' : 'Показать терминал (Ctrl+`)',
+        onclick: toggleTerm,
+      }, 'Терминал'),
     );
     const pending = S.projects.find((p) => p.id === S.pendingProjectId);
     if (!S.chatId && pending) head.append(h('div', { class: 'hint' }, `Выбран «${pending.name}». Он будет автоматически привязан после первого сообщения.`));
@@ -1097,6 +1257,7 @@
     pushTreeExtras();
     renderLeftPane();
     renderEditorArea();
+    renderTermBar();
   }
 
   /**
@@ -1683,7 +1844,7 @@
       if (!el || !el.addEventListener) return;
       el.addEventListener('pointerdown', (e) => {
         if (e.button != null && e.button !== 0) return;
-        drag = { which, startX: e.clientX, startLayout: { ...S.layout } };
+        drag = { which, startX: e.clientX, startY: e.clientY, startLayout: { ...S.layout } };
         // Захват указателя: движение мыши приходит самому разделителю, даже когда
         // курсор ушёл далеко в сторону (проверено практикой прежнего разделителя).
         if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
@@ -1696,7 +1857,9 @@
       });
       el.addEventListener('pointermove', (e) => {
         if (!drag || drag.which !== which) return;
-        S.layout = L.drag(drag.startLayout, which, e.clientX - drag.startX, window.innerWidth);
+        // Терминальный разделитель горизонтальный — тянем по вертикали (вверх = выше)
+        const delta = which === 'term' ? e.clientY - drag.startY : e.clientX - drag.startX;
+        S.layout = L.drag(drag.startLayout, which, delta, { w: window.innerWidth, h: window.innerHeight });
         applyLayout();
       });
       const end = () => {
@@ -1713,6 +1876,8 @@
         // Monaco пересчитывает размеры сам (automaticLayout), но явный layout() после
         // перетаскивания — дешёвая страховка: spike показал, что в Grid он иногда «залипает».
         if (window.WhaleEditor.layout) window.WhaleEditor.layout();
+        // Терминал подгоняем явно: xterm без fit() продолжил бы рисовать старый размер
+        if (which === 'term') fitTerm();
         saveLayout();
       };
       el.addEventListener('pointerup', end);
@@ -1720,13 +1885,15 @@
     }
     setup('left', '#vsplit-left');
     setup('chat', '#vsplit-chat');
+    setup('term', '#hsplit-term');
 
-    // Окно стало уже: панели ужимаются в порядке left → chat (ui/layout.js), ширина чата
-    // не превышает 60% окна. Сохраняем ширины с задержкой.
+    // Окно стало уже/ниже: панели ужимаются в порядке left → chat (ui/layout.js),
+    // ширина чата не превышает 60% окна, высота терминала — запас окна.
+    // Сохраняем ширины с задержкой.
     if (window.addEventListener) {
       window.addEventListener('resize', () => {
-        const fitted = L.fitToWindow(S.layout, window.innerWidth);
-        if (fitted.leftW !== S.layout.leftW || fitted.chatW !== S.layout.chatW) {
+        const fitted = L.fitToWindow(S.layout, window.innerWidth, window.innerHeight);
+        if (fitted.leftW !== S.layout.leftW || fitted.chatW !== S.layout.chatW || fitted.termH !== S.layout.termH) {
           S.layout = fitted;
           applyLayout();
           saveLayoutSoon();
@@ -1741,6 +1908,80 @@
     const btn = $('#prompt-close');
     if (btn && btn.addEventListener) btn.addEventListener('click', () => closePrompt());
   })();
+
+  // ---------- события запуска (этап C3, ТЗ §3.4) ----------
+  api.on('run:data', (p) => {
+    if (!p || (RUN.sessionId && p.sessionId && p.sessionId !== RUN.sessionId)) return; // устаревшая сессия
+    if (typeof p.text === 'string' && p.text) termWrite(p.text);
+  });
+  api.on('run:exit', (p) => {
+    if (!p) return;
+    const mine = !RUN.sessionId || !p.sessionId || p.sessionId === RUN.sessionId;
+    // Перезапуск одной кнопкой: предыдущий процесс остановлен — печатаем разделитель
+    if (p.reason === 'stopped' && mine && RUN.running) termWrite('\r\n── предыдущий процесс остановлен ──\r\n');
+    if (!mine) return;
+    if (p.nextStep) { // двухшаговый план: компиляция успешна, дальше запуск (§2.2, шаг 5)
+      termWrite('\r\n── запуск ──\r\n');
+      RUN.status = p.nextStep.kind === 'build' ? 'компиляция…' : 'выполняется…';
+      RUN.statusKind = 'run';
+      renderTermBar();
+      return;
+    }
+    const notes = {
+      timeout: '[процесс остановлен: таймаут бездействия]',
+      'output-limit': '[вывод превысил лимит 4 МБ — процесс остановлен]',
+      stopped: '[процесс остановлен]',
+      'spawn-failed': '[не удалось запустить процесс]',
+    };
+    if (p.reason && notes[p.reason]) termWrite('\r\n' + notes[p.reason] + '\r\n');
+    if (p.error) termWrite(p.error + '\r\n');
+    if (typeof p.code === 'number') {
+      RUN.status = 'Код возврата: ' + p.code;
+      RUN.statusKind = p.code === 0 ? 'ok' : 'err';
+    } else {
+      RUN.status = '';
+      RUN.statusKind = '';
+    }
+    renderTermBar();
+  });
+  api.on('run:state', (p) => {
+    RUN.running = !!(p && p.active);
+    if (p && p.active && p.active.state === 'running' && !RUN.status) {
+      RUN.status = 'Запуск: ' + p.active.label;
+      RUN.statusKind = 'run';
+    }
+    renderTermBar();
+  });
+
+  // Кнопка «▶ Запустить» живёт в строке вкладок редактора (#ed-tabs, справа): вкладки
+  // рисует editor.js, поэтому передаём узел через setTabsExtras (§2.1).
+  function pushRunButton() {
+    const ed = window.WhaleEditor;
+    if (!ed || !ed.setTabsExtras) return;
+    ed.setTabsExtras([
+      h('button', {
+        class: 'btn tiny ed-run-btn', type: 'button',
+        title: 'Запустить активный файл (F5). Поддерживаются: Python, JavaScript/TypeScript, C++, C, Java',
+        onclick: () => runActiveFile(),
+      }, '▶ Запустить'),
+    ]);
+  }
+
+  // Горячие клавиши запуска: F5 — активный файл, Ctrl+` — терминал (§2.1).
+  // Проверяем defaultPrevented: Monaco и editor.js могли обработать сочетание раньше.
+  if (window.addEventListener) {
+    window.addEventListener('keydown', (e) => {
+      if (e.defaultPrevented) return;
+      if (e.key === 'F5') { e.preventDefault(); runActiveFile(); return; }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'Backquote') {
+        e.preventDefault();
+        toggleTerm();
+      }
+    });
+  }
+
+  // Кнопки панели терминала (включая ✕ = стоп + скрыть) рисует renderTermBar() —
+  // статичных узлов в разметке нет, отдельные привязки не нужны.
 
   // ---------- события от главного процесса ----------
   api.on('chat:changed', loadState);
@@ -1811,6 +2052,7 @@
       },
     });
     pushTreeExtras();
+    pushRunButton();
     renderEditorArea(); // начальный режим панели: редактор (или «Промпт», если был открыт)
   })();
 

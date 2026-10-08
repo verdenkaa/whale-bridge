@@ -42,6 +42,9 @@
   // контекста, последние откатимые операции, предложения модели + колбэки кнопок.
   // Правила соединения с состоянием редактора — чистая ES.treeRowMarks (тестируется в Node).
   let extras = { manual: new Set(), undo: new Map(), proposals: new Map(), callbacks: {} };
+  // Доп. узлы строки вкладок (этап C3): кнопку «▶ Запустить» рисует app.js —
+  // у редактора нет доступа к run-каналам, а вкладкам нужен единый ряд.
+  let tabsExtras = [];
   let projectId = null;
   let visible = false;
   let toast = () => {};
@@ -272,6 +275,32 @@
     }
     if (!ES.isDirty(f)) { toast('Изменений нет', 'ok'); return false; }
     return savePath(state.active, false);
+  }
+
+  /**
+   * Сохранить ВСЕ dirty-буферы перед запуском (ТЗ C3 §2.2, шаг 1): программа обязана
+   * видеть то, что пользователь напечатал, а путь записи на диск единственный —
+   * file:write. Дисковый конфликт (drift) сохраняем принудительно: запуск важнее,
+   * но любая ошибка (файл удалён, отказ записи) отменяет запуск — решает caller.
+   * @returns {Promise<boolean>} true — несохранённых буферов не осталось
+   */
+  async function saveAllDirty() {
+    for (const p of ES.dirtyPaths(state)) {
+      const f = ES.get(state, p);
+      if (!f) continue;
+      // eslint-disable-next-line no-await-in-loop — порядок важен: сохраняем по одному,
+      // чтобы конфликт первого файла не потерялся за ошибками остальных
+      const ok = await savePath(p, ES.isDrifted(f) || ES.isMissing(f));
+      if (!ok) return false;
+    }
+    return true;
+  }
+
+  /** Активный файл для кнопки «▶ Запустить»: projectId + относительный путь. */
+  function activeFile() {
+    const f = ES.active(state);
+    if (!f) return null;
+    return { projectId: f.projectId, rel: f.path, name: f.name };
   }
 
   /**
@@ -774,7 +803,13 @@
         class: 'ed-tab-close', title: 'Закрыть вкладку (Ctrl+W)', 'aria-label': `Закрыть ${f.name}`,
         onclick: (e) => { e.stopPropagation(); closePath(f.path); },
       }, '×'));
-    }));
+    }), ...tabsExtras);
+  }
+
+  /** app.js передаёт узлы, которые живут в строке вкладок справа (кнопка «▶ Запустить»). */
+  function setTabsExtras(nodes) {
+    tabsExtras = Array.isArray(nodes) ? nodes : [];
+    renderTabs();
   }
 
   function renderStatus() {
@@ -991,8 +1026,8 @@
 
   window.WhaleEditor = {
     mount, setProject, setVisible, openPath, activate, closePath, closeActive,
-    nextTab, saveActive, showQuickOpen, refreshDisk, handleKey, ackCurrent,
-    setTreeExtras, refreshTree, layout: layoutEditors, showDiff, hideDiff,
+    nextTab, saveActive, saveAllDirty, activeFile, showQuickOpen, refreshDisk, handleKey, ackCurrent,
+    setTreeExtras, setTabsExtras, refreshTree, layout: layoutEditors, showDiff, hideDiff,
     getText, acceptIntoBuffer, stagedProposals,
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),

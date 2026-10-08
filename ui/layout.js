@@ -34,6 +34,11 @@
     chatW: 420,     // чат DeepSeek
     promptOpen: false, // «Промпт» открыт вместо редактора
     leftTab: 'files',
+    // Терминал (этап C3, ТЗ §2.1): нижняя панель внутри колонки редактора.
+    // termH — высота панели вместе с её toolbar'ом; чат всегда полная высота,
+    // терминал на него не наезжает.
+    termOpen: false,
+    termH: 260,
   });
 
   const LIMITS = Object.freeze({
@@ -41,6 +46,8 @@
     chatMin: 320,    // чат уже — нечитаемо
     editorMin: 240,  // редактор
     chatMaxRatio: 0.6, // чат не шире 60% окна
+    termMin: 120,    // терминал ниже — нечитаемо
+    termReserve: 300, // минимальный запас высоты окна редактору и topbar
   });
 
   const num = (v, fallback) => (typeof v === 'number' && isFinite(v) ? v : fallback);
@@ -59,6 +66,7 @@
   const copy = (l) => ({
     leftW: l.leftW, chatW: l.chatW,
     promptOpen: !!l.promptOpen, leftTab: leftTab(l.leftTab),
+    termOpen: !!l.termOpen, termH: l.termH,
   });
 
   /**
@@ -66,10 +74,11 @@
    * Мигрирует прежние схемы: leftW берётся из leftW → filesW (дерево) → sideW
    * (боковая панель 0012), но не уже 280px: панель стала показывать ещё и списки
    * предложений, узкое дерево для них не годится. chatSide/bottomH/promptW прежних
-   * схем просто игнорируются — чат теперь всегда справа, нижней панели нет.
-   * winW неизвестна (null/undefined) — ограничиваемся абсолютными минимумами.
+   * схем просто игнорируются — чат теперь всегда справа, а нижняя панель этапа B
+   * удалена (терминал C3 — новая панель внутри колонки редактора, termH/termOpen).
+   * winW/winH неизвестны (null/undefined) — ограничиваемся абсолютными минимумами.
    */
-  function sanitize(raw, winW) {
+  function sanitize(raw, winW, winH) {
     const src = raw && typeof raw === 'object' ? raw : {};
     const legacyLeft = Math.max(280, num(src.filesW, num(src.sideW, DEFAULTS.leftW)));
     return fitToWindow({
@@ -77,7 +86,9 @@
       chatW: Math.round(num(src.chatW, DEFAULTS.chatW)),
       promptOpen: bool(src.promptOpen, DEFAULTS.promptOpen),
       leftTab: leftTab(src.leftTab),
-    }, winW);
+      termOpen: bool(src.termOpen, DEFAULTS.termOpen),
+      termH: Math.round(num(src.termH, DEFAULTS.termH)),
+    }, winW, winH);
   }
 
   /**
@@ -85,8 +96,13 @@
    * если места не хватает, панели урезаются в порядке: левая → чат. Чат жмётся последним:
    * это рабочий инструмент, а не вспомогательная панель.
    */
-  function fitToWindow(l, winW) {
+  function fitToWindow(l, winW, winH) {
     const out = copy(l);
+    // Высота терминала ограничена и без знания окна — абсолютным минимумом
+    out.termH = Math.max(LIMITS.termMin, Math.round(num(out.termH, DEFAULTS.termH)));
+    if (typeof winH === 'number' && isFinite(winH) && winH > 0) {
+      out.termH = Math.min(out.termH, Math.max(LIMITS.termMin, Math.round(winH - LIMITS.termReserve)));
+    }
     if (typeof winW !== 'number' || !isFinite(winW) || winW <= 0) {
       out.leftW = Math.max(LIMITS.leftMin, out.leftW);
       out.chatW = Math.max(LIMITS.chatMin, out.chatW);
@@ -107,9 +123,9 @@
   /**
    * Изменение размеров при перетаскивании разделителя.
    * @param {object} l текущая раскладка
-   * @param {'left'|'chat'} which какой разделитель тянут
-   * @param {number} delta сдвиг мыши в px (вправо — положительно)
-   * @param {{w:number}|number} win ширина содержимого окна
+   * @param {'left'|'chat'|'term'} which какой разделитель тянут
+   * @param {number} delta сдвиг мыши в px (вправо/вниз — положительно)
+   * @param {{w:number,h:number}|number} win ширина содержимого окна (h — для терминала)
    *
    * Редактор поглощает изменение, поэтому каждое движение ограничено двумя рамками:
    * минимум своей панели и минимум редактора. Чатовый разделитель стоит СЛЕВА от чата
@@ -133,6 +149,16 @@
       const hi = Math.min(chatMax - out.chatW, ew - LIMITS.editorMin);
       const lo = LIMITS.chatMin - out.chatW;
       out.chatW += lo > hi ? lo : clamp(d, lo, hi);
+    } else if (which === 'term') {
+      // Горизонтальный разделитель над терминалом: тянем ВВЕРХ (delta<0) — выше.
+      // Верхняя рамка — запас высоты окна редактору (termReserve), нижняя — termMin.
+      const d = -d0;
+      const winH = num(win && typeof win === 'object' ? win.h : NaN, NaN);
+      const hi = isFinite(winH) && winH > 0
+        ? Math.max(LIMITS.termMin, Math.round(winH - LIMITS.termReserve)) - out.termH
+        : Infinity;
+      const lo = LIMITS.termMin - out.termH;
+      out.termH += lo > hi ? lo : clamp(d, lo, hi);
     }
     return out;
   }
@@ -160,6 +186,7 @@
     return {
       '--left-w': l.leftW + 'px',
       '--chat-w': l.chatW + 'px',
+      '--term-h': l.termH + 'px',
     };
   }
 

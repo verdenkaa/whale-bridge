@@ -9,6 +9,9 @@ const MAX_READ_BYTES = 5 * 1024 * 1024;
 const IGNORE_DIRS = new Set([
   '.git', 'node_modules', '.godot', '.import', '__pycache__', '.venv', 'venv',
   'Library', 'Temp', 'obj', '.mono', '.gradle',
+  // артефакты компиляции этапа «Запуск» (ТЗ C3): бинарники и байт-код не должны
+  // попадать ни в дерево файлов, ни в промпт-генератор
+  '.ide_build',
 ]);
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');

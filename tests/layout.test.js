@@ -7,14 +7,15 @@ const assert = require('node:assert/strict');
 const L = require('../ui/layout');
 
 const WIN = 1500;
-const base = () => ({ leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' });
+const WINH = 900;
+const base = () => ({ leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files', termOpen: false, termH: 260 });
 
 test('layout: sanitize возвращает дефолты на мусоре и сохраняет валидное', () => {
   assert.deepEqual(L.sanitize(null, WIN), L.DEFAULTS);
   assert.deepEqual(L.sanitize(undefined), L.DEFAULTS);
   assert.deepEqual(L.sanitize({ leftW: 'широко', chatW: NaN, leftTab: null }, WIN), L.DEFAULTS);
   assert.deepEqual(L.sanitize({ leftW: 300, chatW: 500, promptOpen: true, leftTab: 'history' }, WIN),
-    { leftW: 300, chatW: 500, promptOpen: true, leftTab: 'history' });
+    { leftW: 300, chatW: 500, promptOpen: true, leftTab: 'history', termOpen: false, termH: 260 });
   // неизвестная вкладка и не-логический флаг нормализуются
   assert.equal(L.sanitize({ leftTab: 'промпт' }, WIN).leftTab, 'files');
   assert.equal(L.sanitize({ promptOpen: 'да' }, WIN).promptOpen, false);
@@ -31,7 +32,7 @@ test('layout: миграция прежних схем — leftW из filesW/sid
   assert.equal(L.sanitize({ leftW: 250, filesW: 220, sideW: 380 }, WIN).leftW, 250);
   // поля прежних схем не протекают в новую раскладку
   const m = L.sanitize({ chatSide: 'right', bottomH: 900, promptW: 460, bottomCollapsed: true }, WIN);
-  assert.deepEqual(m, { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' });
+  assert.deepEqual(m, { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files', termOpen: false, termH: 260 });
 });
 
 test('layout: минимумы не опускаются ниже LIMITS', () => {
@@ -119,7 +120,57 @@ test('layout: normalizeRect — целые, неотрицательные, бе
 });
 
 test('layout: cssVars — px-строки для :root', () => {
-  assert.deepEqual(L.cssVars(base()), { '--left-w': '320px', '--chat-w': '420px' });
+  assert.deepEqual(L.cssVars(base()), { '--left-w': '320px', '--chat-w': '420px', '--term-h': '260px' });
+});
+
+// ---------- терминал (этап C3, §2.1): termOpen/termH ----------
+
+test('layout: терминал — sanitize хранит termOpen/termH и нормализует мусор', () => {
+  const l = L.sanitize({ termOpen: true, termH: 380 }, WIN, WINH);
+  assert.equal(l.termOpen, true);
+  assert.equal(l.termH, 380);
+  // не-логический флаг и не-число возвращаются к дефолтам
+  assert.equal(L.sanitize({ termOpen: 'открыт' }, WIN, WINH).termOpen, false);
+  assert.equal(L.sanitize({ termH: 'высоко' }, WIN, WINH).termH, L.DEFAULTS.termH);
+  assert.equal(L.sanitize({ termH: 300.4 }, WIN, WINH).termH, 300);
+  // старые конфиги без терминальных полей получают дефолты
+  const old = L.sanitize({ leftW: 300, chatW: 420 }, WIN, WINH);
+  assert.equal(old.termOpen, false);
+  assert.equal(old.termH, L.DEFAULTS.termH);
+});
+
+test('layout: терминал — высота не ниже минимума и не съедает окно', () => {
+  // ниже termMin не опускается даже при явном мусоре
+  assert.equal(L.sanitize({ termH: 10 }, WIN, WINH).termH, L.LIMITS.termMin);
+  assert.equal(L.fitToWindow({ ...base(), termH: 1 }, WIN, WINH).termH, L.LIMITS.termMin);
+  // выше «окно − запас» не поднимается: редактору и topbar остаётся termReserve
+  assert.equal(L.fitToWindow({ ...base(), termH: 5000 }, WIN, WINH).termH, WINH - L.LIMITS.termReserve);
+  assert.equal(L.sanitize({ termH: 5000 }, WIN, WINH).termH, WINH - L.LIMITS.termReserve);
+  // низкое окно: минимум важнее запаса (иначе termH стал бы отрицательным)
+  assert.equal(L.fitToWindow({ ...base(), termH: 5000 }, WIN, 300).termH, L.LIMITS.termMin);
+  // winH неизвестна — ограничиваемся абсолютным минимумом
+  assert.equal(L.fitToWindow({ ...base(), termH: 5000 }, WIN).termH, 5000);
+});
+
+test('layout: терминал — drag за разделитель: вверх выше, вниз ниже, с упорами', () => {
+  // тянем ВВЕРХ (delta<0) — терминал выше
+  let l = L.drag(base(), 'term', -100, { w: WIN, h: WINH });
+  assert.equal(l.termH, 360);
+  assert.equal(l.leftW, base().leftW, 'ширины панелей не двигаются');
+  assert.equal(l.chatW, base().chatW);
+  // упор в запас окна: 900 − 300 = 600
+  l = L.drag(base(), 'term', -5000, { w: WIN, h: WINH });
+  assert.equal(l.termH, WINH - L.LIMITS.termReserve);
+  // вниз — ниже, до termMin
+  l = L.drag(base(), 'term', 5000, { w: WIN, h: WINH });
+  assert.equal(l.termH, L.LIMITS.termMin);
+  // без высоты окна верхний упор бесконечный, но минимум работает
+  l = L.drag(base(), 'term', -5000, WIN);
+  assert.equal(l.termH, 260 + 5000);
+  l = L.drag(base(), 'term', 5000, WIN);
+  assert.equal(l.termH, L.LIMITS.termMin);
+  // неизвестный разделитель по-прежнему ничего не меняет
+  assert.deepEqual(L.drag(base(), 'bottom', 100, { w: WIN, h: WINH }), base());
 });
 
 test('layout: editorWidth считает остаток с двумя разделителями', () => {

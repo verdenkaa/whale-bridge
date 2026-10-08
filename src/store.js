@@ -2,6 +2,8 @@
 const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+// Правила запуска (этап C3) живут в src/runlangs.js — одном на main и renderer
+const { sanitizeRunConfig } = require('./runlangs');
 
 const DEFAULTS = () => ({
   version: 1, projects: [], sessions: {}, lastProjectId: null,
@@ -11,6 +13,11 @@ const DEFAULTS = () => ({
   // Этап B (ТЗ §5, §28): ширины панелей в px и сторона чата. Геометрию считает renderer
   // (ui/layout.js), main только хранит последнее сохранённое значение. null — первый запуск.
   layout: null,
+  // Запуск (этап C3, ТЗ §3.9): инструменты языков, доп. аргументы, таймаут бездействия.
+  // tools: null = автопоиск в PATH, строка = абсолютный путь к исполняемому файлу.
+  // shellWin зафиксирован на 'cmd': оболочка &CMD: на Windows — только cmd.exe
+  // (решение пользователя, PowerShell не внедряем).
+  run: sanitizeRunConfig(null),
   promptDraft: null, // текущие поля генератора промптов
   promptPresets: [], // [{id, name, sections}]
   promptTreeOff: {}, // projectId -> [относительные пути, исключённые из структуры]
@@ -63,6 +70,8 @@ class Store {
     // layout приводится к допустимому виду там, где живут правила раскладки (ui/layout.js), —
     // здесь только грубая защита от мусора в config.json
     if (this.config.layout !== null && (typeof this.config.layout !== 'object' || Array.isArray(this.config.layout))) this.config.layout = null;
+    // config.run — через sanitizeRunConfig: чужой или битый config.json не роняет запуск
+    this.config.run = sanitizeRunConfig(this.config.run);
     const h = await readJson(this.historyPath, []);
     // Прежние отметки «модель знает версию» переносим в журнал контекста — и сразу
     // сохраняем, иначе устаревшее поле modelSynced навсегда осталось бы в config.json.

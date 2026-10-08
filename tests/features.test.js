@@ -282,6 +282,27 @@ test('промпт: поля по умолчанию, пропуск пусты�
   assert.ok(!text.includes('# СТРУКТУРА ПРОЕКТА')); // без проекта структуры нет
 });
 
+test('дерево: артефакты запуска .ide_build не видны в дереве и промпте (этап C3)', async (t) => {
+  const { root, project } = await setup(t);
+  await fs.mkdir(path.join(root, '.ide_build', 'classes'), { recursive: true });
+  await fs.writeFile(path.join(root, '.ide_build', 'app.exe'), 'binary');
+  await fs.writeFile(path.join(root, '.ide_build', 'classes', 'Main.class'), 'binary');
+  await fs.mkdir(path.join(root, '__pycache__'));
+  await fs.writeFile(path.join(root, '__pycache__', 'main.cpython-312.pyc'), 'binary');
+  await fs.writeFile(path.join(root, 'main.py'), 'print(1)');
+  fileops.invalidateIndex();
+  const tree = await fileops.getTree(root);
+  const rels = tree.nodes.map((n) => n.rel);
+  assert.ok(rels.includes('main.py'), 'обычные файлы на месте');
+  assert.ok(!rels.includes('.ide_build'), 'артефакты сборки скрыты из дерева');
+  assert.ok(!rels.includes('__pycache__'), 'кеш python скрыт из дерева');
+  // промпт-генератор видит то же дерево — артефакты не утекают модели
+  const secs = pg.defaultSections().filter((s) => s.type === 'tree');
+  const full = pg.buildPrompt({ sections: secs, project, tree, excluded: new Set() });
+  assert.ok(!full.text.includes('.ide_build'));
+  assert.ok(!full.text.includes('Main.class'));
+});
+
 test('промпт: дерево проекта, отключение папок и приписка о неполной структуре', async (t) => {
   const { root, project } = await setup(t);
   await fs.mkdir(path.join(root, 'scripts'));

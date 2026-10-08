@@ -151,6 +151,10 @@ test('обвязка: деструктурированные импорты main
     './src/diff': require('../src/diff'),
     './src/patch': require('../src/patch'),
     './src/versions': require('../src/versions'),
+    // этап C3 «Запуск»: чистое ядро языков, поиск инструментов и оркестратор сессий
+    './src/runlangs': require('../src/runlangs'),
+    './src/toolchain': require('../src/toolchain'),
+    './src/runner': require('../src/runner'),
   };
   const checked = [];
   for (const m of mainSrc.matchAll(/const\s*\{([^}]+)\}\s*=\s*require\('(\.\/src\/[\w./-]+)'\)/g)) {
@@ -207,4 +211,78 @@ test('wiring: сохранение принятых ханков связано 
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'proposals.js'), 'utf8'),
     /const \{ merge3 \} = require\('\.\/hunks'\)/,
     'proposals.js использует то же слияние, что и renderer — правило одно');
+});
+
+test('wiring: запуск (C3) связан на всех сторонах — main, preload, ui, упаковка', () => {
+  const runnerMod = require('../src/runner');
+  const toolchainMod = require('../src/toolchain');
+  const termSrc = read('ui/terminal.js');
+  const htmlSrc = read('ui/index.html');
+  const pkg = JSON.parse(read('package.json'));
+
+  // main: обработчики, fire-and-forget приём, события и жизненный цикл сессии
+  for (const c of ['run:start', 'run:stop', 'run:copy-report']) {
+    assert.match(mainSrc, new RegExp(`handle\\('${c}'`), `в main.js нет handle('${c}')`);
+  }
+  assert.match(mainSrc, /ipcMain\.on\('run:input'/, 'main не слушает run:input');
+  assert.match(mainSrc, /ipcMain\.on\('run:resize'/, 'main не слушает run:resize');
+  for (const c of ['run:data', 'run:exit', 'run:state']) {
+    assert.match(mainSrc, new RegExp(`send\\('${c}'`), `main никогда не отправляет ${c}`);
+  }
+  assert.match(mainSrc, /runner\.start\(/, 'main не запускает сессии через runner.start');
+  assert.match(mainSrc, /runner\.stop\(/, 'main не останавливает сессии через runner.stop');
+  assert.match(mainSrc, /runner\.stopAll\(/, 'перед выходом приложение обязано убивать процессы');
+  assert.match(mainSrc, /before-quit/, 'kill дерева на выходе вешается на before-quit');
+  assert.match(mainSrc, /runner\.input\(/, 'ввод терминала обязан доходить до раннера');
+  assert.match(mainSrc, /runner\.resize\(/, 'размер терминала обязан доходить до раннера');
+  assert.match(mainSrc, /toolchain\.clearCache\(/, 'кеш инструментов сбрасывается перед запуском');
+  assert.match(mainSrc, /taskkill/, 'kill дерева на Windows — taskkill /T /F (handover §4.3)');
+  assert.match(mainSrc, /pauseWatcher/, 'на время сессии наблюдение за файлами приостановлено');
+  assert.match(mainSrc, /node-pty/, 'main использует node-pty для псевдотерминала');
+  assert.match(mainSrc, /asarUnpack|spawnPtyAdapter/, 'адаптер pty на месте');
+
+  // фабрики модулей действительно возвращают то, что зовёт main
+  const r = runnerMod.createRunner({ spawnPty: () => { throw new Error('не используется'); }, send() {} });
+  for (const m of ['start', 'stop', 'stopAll', 'input', 'resize', 'report']) {
+    assert.equal(typeof r[m], 'function', `runner не предоставляет ${m}`);
+  }
+  const tc = toolchainMod.createToolchain({ isFile: () => false });
+  for (const m of ['findOnPath', 'toolVersion', 'detect', 'clearCache']) {
+    assert.equal(typeof tc[m], 'function', `toolchain не предоставляет ${m}`);
+  }
+
+  // артефакты сборки не попадают в дерево файлов
+  assert.ok(fileops.IGNORE_DIRS.has('.ide_build'), '.ide_build обязан быть в IGNORE_DIRS');
+
+  // ui: терминал отправляет ввод/размер fire-and-forget и слушает события потока
+  assert.match(termSrc, /post\('run:input'/, 'терминал не отправляет ввод в main');
+  assert.match(termSrc, /post\('run:resize'/, 'терминал не отправляет размер в main');
+  for (const c of ['run:data', 'run:exit', 'run:state']) {
+    assert.match(read('ui/app.js'), new RegExp(`api\\.on\\('${c}'`), `app.js не слушает ${c}`);
+  }
+  assert.match(read('ui/app.js'), /saveAllDirty/, 'перед запуском сохраняются все dirty-буферы');
+  assert.match(read('ui/editor.js'), /saveAllDirty/, 'editor.js предоставляет saveAllDirty');
+  assert.match(read('ui/editor.js'), /setTabsExtras/, 'кнопка запуска живёт в строке вкладок');
+  assert.match(read('ui/app.js'), /F5/, 'горячая клавиша запуска — F5');
+  assert.match(read('ui/app.js'), /Backquote/, 'горячая клавиша терминала — Ctrl+`');
+
+  // разметка: панель терминала внутри колонки редактора, порядок скриптов
+  for (const id of ['term-panel', 'term-bar', 'term-host', 'hsplit-term', 'ed-content']) {
+    assert.ok(htmlSrc.includes(`id="${id}"`), `в index.html нет #${id}`);
+  }
+  const at = (needle) => {
+    const i = htmlSrc.indexOf(needle);
+    assert.ok(i >= 0, `в index.html нет ${needle}`);
+    return i;
+  };
+  assert.ok(at('@xterm/xterm/lib/xterm.js') < at('"terminal.js"'), 'xterm грузится до terminal.js');
+  assert.ok(at('"terminal.js"') < at('"app.js"'), 'terminal.js грузится до app.js');
+  assert.ok(at('src/runlangs.js') < at('"app.js"'), 'runlangs грузится до app.js');
+
+  // упаковка: нативный node-pty обязан лежать на диске, не внутри asar (ТЗ §8)
+  assert.ok(pkg.build.asarUnpack.includes('node_modules/node-pty/**'),
+    'node-pty не распаковывается из asar — ConPTY не запустится');
+  assert.ok(pkg.dependencies['node-pty'], 'node-pty не объявлен в dependencies');
+  assert.ok(pkg.dependencies['@xterm/xterm'], '@xterm/xterm не объявлен в dependencies');
+  assert.ok(pkg.dependencies['@xterm/addon-fit'], '@xterm/addon-fit не объявлен в dependencies');
 });

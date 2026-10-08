@@ -37,8 +37,11 @@ class El {
   append(...k) { for (const x of k.flat(Infinity)) { if (x == null) continue; this.children.push(toNode(x)); } }
   replaceChildren(...k) { this.children = []; this.append(...k); }
   setAttribute(k, v) { this.attrs[k] = v; }
+  getAttribute(k) { return this.attrs[k] ?? null; }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   setPointerCapture() {}
+  // addon-fit измеряет контейнер через getBoundingClientRect
+  getBoundingClientRect() { return { width: 600, height: 200, x: 0, y: 0 }; }
   set textContent(v) { this.children = [new TextNode(String(v))]; }
   get textContent() { return this.children.map((c) => c.textContent).join(''); }
 }
@@ -56,7 +59,8 @@ test('UI: левая панель, режимы редактора, геомет
     'vsplit-left', 'vsplit-chat', 'files-head', 'files-banner', 'prompt-close',
     'view-host', 'diff-host', 'diff-bar', 'diff-notices', 'hunk-strip', 'diff-editor',
     'prompt-host', 'prompt-body',
-    'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay']) { roots[id] = new El('div'); }
+    'ed-tree', 'ed-tabs', 'ed-host', 'ed-empty', 'ed-status', 'ed-overlay',
+    'ed-content', 'hsplit-term', 'term-panel', 'term-bar', 'term-host', 'xterm-css']) { roots[id] = new El('div'); }
   global.document = {
     createElement: (t) => new El(t),
     createTextNode: (t) => new TextNode(t),
@@ -123,6 +127,10 @@ test('UI: левая панель, режимы редактора, геомет
       rows: [{ type: 'del', oldNo: 1, text: 'a' }, { type: 'add', newNo: 1, text: 'b' }],
     },
     'fs:list': { items: [{ name: 'a.gd', rel: 'a.gd', isDir: false }, { name: 'n.gd', rel: 'n.gd', isDir: false }] },
+    // запуск (этап C3): успешный старт, остановка и отчёт
+    'run:start': { ok: true, sessionId: 's1' },
+    'run:stop': { ok: true },
+    'run:copy-report': { ok: true, length: 42 },
   };
   global.window = {
     innerWidth: 1500,
@@ -140,11 +148,35 @@ test('UI: левая панель, режимы редактора, геомет
   };
   global.confirm = () => true;
   global.requestAnimationFrame = (f) => setTimeout(f, 0);
+  global.self = global.window; // UMD-обёртки (xterm, runlangs) в браузере используют self
+
+  // Имитация xterm.js: пишущийся «терминал» и считаемые fit-размеры. Настоящий
+  // @xterm/xterm требует DOM и canvas — здесь достаточно контракта (write/clear/
+  // focus/onData/loadAddon/cols/rows), чтобы проверить СВЯЗИ app.js и terminal.js.
+  const termState = { writes: [], clears: 0, focuses: 0, dataCb: null, cols: 100, rows: 30 };
+  global.window.Terminal = class {
+    constructor() { this.cols = termState.cols; this.rows = termState.rows; }
+    open() {}
+    write(s) { termState.writes.push(s); }
+    clear() { termState.clears++; }
+    focus() { termState.focuses++; }
+    onData(cb) { termState.dataCb = cb; }
+    loadAddon() {}
+  };
+  global.window.FitAddon = { FitAddon: class { fit() {} } };
 
   // заглушка редактора: smoke-тест проверяет СВЯЗИ в app.js, а не внутренности editor.js
-  const ed = { mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null, layoutCalls: 0, diffs: [], hideDiff: 0, diffOk: true, getTextValue: null, staged: new Map() };
+  const ed = {
+    mount: 0, els: null, setVisible: [], setProject: [], refreshDisk: 0, refreshTree: 0, extras: null,
+    layoutCalls: 0, diffs: [], hideDiff: 0, diffOk: true, getTextValue: null, staged: new Map(),
+    // запуск (этап C3): сохранение dirty-буферов, активный файл, кнопка во вкладках
+    saveAll: [], activeFileValue: { projectId: 'p1', rel: 'main.py', name: 'main.py' }, tabsExtras: null,
+  };
   global.window.WhaleEditor = {
     mount: (els, hooks) => { ed.mount++; ed.els = els; ed.hooks = hooks; },
+    saveAllDirty: async () => { const r = ed.saveAll.length ? ed.saveAll.shift() : true; return r; },
+    activeFile: () => ed.activeFileValue,
+    setTabsExtras: (nodes) => { ed.tabsExtras = nodes; },
     setProject: (p) => ed.setProject.push(p ? p.id : null),
     setVisible: (v) => ed.setVisible.push(v),
     refreshDisk: async () => { ed.refreshDisk++; },
@@ -174,6 +206,11 @@ test('UI: левая панель, режимы редактора, геомет
   require(path.join(__dirname, '..', 'src', 'diff.js'));
   require(path.join(__dirname, '..', 'src', 'hunks.js'));
   assert.ok(global.window.WhaleHunks && typeof global.window.WhaleHunks.toHunks === 'function');
+  // src/runlangs.js и ui/terminal.js грузятся index.html до app.js — повторяем порядок
+  require(path.join(__dirname, '..', 'src', 'runlangs.js'));
+  assert.ok(global.window.WhaleRunLangs && typeof global.window.WhaleRunLangs.classifyCommand === 'function');
+  require(path.join(__dirname, '..', 'ui', 'terminal.js'));
+  assert.ok(global.window.WhaleTerminal && typeof global.window.WhaleTerminal.write === 'function');
   require(path.join(__dirname, '..', 'ui', 'app.js'));
   await tick(60);
 
@@ -567,6 +604,123 @@ test('UI: левая панель, режимы редактора, геомет
   assert.deepEqual(sent.filter(([ch]) => ch === 'chat:set-visible').map(([, v]) => v), [false, true]);
   save = log.filter(([ch]) => ch === 'layout:save').pop();
   assert.equal(save[1].layout.chatW, 480); // 420 + 60
+
+  // ---------- терминал и запуск (этап C3, §2) ----------
+  // Разметка index.html объявляет панель и разделитель скрытыми (class="hidden") —
+  // имитация DOM повторяет стартовое состояние разметки.
+  roots['term-panel'].classList.add('hidden');
+  roots['hsplit-term'].classList.add('hidden');
+  assert.equal(hidden(roots['term-panel']), true, 'терминал закрыт до первого действия');
+  assert.equal(hidden(roots['hsplit-term']), true);
+
+  // кнопка «Терминал» в шапке открывает панель и сохраняет раскладку
+  await click(btn(roots.head, 'Терминал'));
+  await tick(40);
+  assert.equal(hidden(roots['term-panel']), false, 'панель терминала открыта');
+  assert.equal(hidden(roots['hsplit-term']), false);
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.termOpen, true);
+  // xterm создан один раз, стили подключены при первом открытии
+  assert.equal(global.window.WhaleTerminal.isMounted(), true);
+  assert.match(roots['term-host'].getAttribute('href') || '', /^$/); // сам host — не <link>
+  const xtermCss = global.document.querySelector('#xterm-css');
+  assert.match(xtermCss.getAttribute('href'), /xterm\.css$/);
+
+  // кнопка «▶ Запустить» передаётся в строку вкладок редактора
+  assert.ok(Array.isArray(ed.tabsExtras) && ed.tabsExtras.length === 1, 'кнопка запуска добавлена во вкладки');
+  const runBtn = ed.tabsExtras[0];
+  assert.equal(text(runBtn), '▶ Запустить');
+
+  // запуск активного файла: сохранение dirty-буферов → run:start → статус в toolbar'е
+  ed.activeFileValue = { projectId: 'p1', rel: 'main.py', name: 'main.py' };
+  await click(runBtn);
+  await tick(60);
+  const startCall = log.filter(([ch]) => ch === 'run:start').pop();
+  assert.ok(startCall, 'run:start отправлен');
+  assert.deepEqual(startCall[1].target, { kind: 'file', rel: 'main.py' });
+  assert.equal(startCall[1].projectId, 'p1');
+  assert.match(text(roots['term-bar']), /Запуск: main\.py/);
+
+  // вывод процесса приходит событием run:data и попадает в xterm как есть
+  handlers['run:data']({ sessionId: 's1', step: 0, text: 'Результат: 10\r\n' });
+  await tick(10);
+  assert.ok(termState.writes.includes('Результат: 10\r\n'), 'вывод записан в терминал');
+
+  // двухшаговый план: run:exit с nextStep печатает разделитель локально
+  handlers['run:exit']({ sessionId: 's1', code: 0, step: 0, nextStep: { index: 1, kind: 'run' } });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('── запуск ──')), 'разделитель шагов напечатан');
+
+  // завершение: код возврата 0 — зелёным в статусе.
+  // Порядок событий как в жизни: run:exit, затем run:state(active:null)
+  handlers['run:exit']({ sessionId: 's1', code: 0, step: 1, reason: null });
+  handlers['run:state']({ active: null });
+  await tick(10);
+  assert.match(text(roots['term-bar']), /Код возврата: 0/);
+  const okStatus = findAll(roots['term-bar'], (e) => e.className === 'term-status ok');
+  assert.equal(okStatus.length, 1, 'нулевой код подсвечен');
+
+  // «■ Стоп» без процесса — честная ошибка, «📋 Отчёт» — копия в буфер
+  await click(btn(roots['term-bar'], '■ Стоп'));
+  await tick(30);
+  assert.match(text(roots.toast), /Нет активного процесса/);
+  await click(btn(roots['term-bar'], '📋 Отчёт'));
+  await tick(30);
+  assert.ok(log.some(([ch]) => ch === 'run:copy-report'));
+  assert.match(text(roots.toast), /Отчёт скопирован/);
+
+  // «🗑 Очистить» очищает xterm
+  const clearsBefore = termState.clears;
+  await click(btn(roots['term-bar'], '🗑 Очистить'));
+  await tick(20);
+  assert.equal(termState.clears, clearsBefore + 1);
+
+  // повторный запуск: процесс идёт — «■ Стоп» отправляет run:stop
+  canned['run:start'] = { ok: true, sessionId: 's2' };
+  await click(runBtn);
+  await tick(40);
+  await click(btn(roots['term-bar'], '■ Стоп'));
+  await tick(30);
+  assert.ok(log.some(([ch]) => ch === 'run:stop'), 'остановка отправлена в main');
+  // main ответил run:exit(reason:'stopped') — служебная строка в терминале
+  handlers['run:exit']({ sessionId: 's2', code: -1, step: 0, reason: 'stopped' });
+  handlers['run:state']({ active: null });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('остановлен')), 'остановка показана');
+
+  // неуспешный запуск: ошибка печатается в терминал и в тост
+  canned['run:start'] = { ok: false, reason: 'tool-missing', message: 'Не найден python в PATH.' };
+  await click(runBtn);
+  await tick(40);
+  assert.ok(termState.writes.some((w) => w.includes('Не найден python')), 'ошибка инструмента в терминале');
+  assert.match(text(roots.toast), /Не найден python/);
+  canned['run:start'] = { ok: true, sessionId: 's3' };
+
+  // ✕ = остановить процесс (если идёт) и скрыть панель (§2.1)
+  await click(runBtn);
+  await tick(40);
+  await click(btn(roots['term-bar'], '✕'));
+  await tick(40);
+  assert.ok(log.some(([ch]) => ch === 'run:stop'), '✕ остановил процесс');
+  assert.equal(hidden(roots['term-panel']), true, '✕ скрыл панель');
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.termOpen, false);
+
+  // ввод с клавиатуры терминала уходит в main fire-and-forget (run:input)
+  sent.length = 0;
+  termState.dataCb('x\r');
+  assert.deepEqual(sent.filter(([ch]) => ch === 'run:input').map(([, v]) => v), ['x\r']);
+
+  // разделитель высоты терминала: тянем вверх на 60px — панель выше
+  const spt = roots['hsplit-term'];
+  await click(btn(roots.head, 'Терминал')); // снова открыть
+  await tick(30);
+  for (const f of spt.listeners.pointerdown) f({ button: 0, clientX: 10, clientY: 500, pointerId: 1, preventDefault() {} });
+  for (const f of spt.listeners.pointermove) f({ clientX: 10, clientY: 440 });
+  for (const f of spt.listeners.pointerup) f({});
+  await tick(40);
+  save = log.filter(([ch]) => ch === 'layout:save').pop();
+  assert.equal(save[1].layout.termH, 260 + 60, 'высота терминала сохранена');
 
   console.error = origErr;
   assert.deepEqual(errors, []);

@@ -11,12 +11,17 @@ const INVOKE = new Set([
   'prompt:get', 'prompt:tree', 'prompt:save-draft', 'prompt:set-excluded', 'prompt:build', 'prompt:copy', 'prompt:copy-reminder', 'prompt:copy-files',
   'prompt:preset-save', 'prompt:preset-load', 'prompt:preset-delete', 'prompt:reset', 'proposals:report', 'manual:view', 'manual:copy', 'context:list', 'context:ack', 'context:ack-all', 'context:known', 'proposal:merge',
   'layout:save',
+  // запуск (этап C3): старт/остановка сессии и отчёт в буфер обмена
+  'run:start', 'run:stop', 'run:copy-report',
 ]);
-const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound']);
+// run:data/run:exit/run:state — поток вывода терминала и состояние сессии (ТЗ C3 §3.4)
+const EVENTS = new Set(['chat:changed', 'proposals:changed', 'projects:changed', 'files:changed', 'project:auto-bound', 'run:data', 'run:exit', 'run:state']);
 // Fire-and-forget (ipcRenderer.send): геометрия чата меняется каждый кадр перетаскивания
 // разделителя, и invoke с его round-trip только бы отставал (ТЗ §4). Ответ не нужен —
 // main просто применяет прямоугольник к WebContentsView.
-const SEND = new Set(['chat:set-bounds', 'chat:set-visible']);
+// run:input/run:resize — ввод с клавиатуры и размер терминала: та же причина,
+// нажатие обязано уходить в pty мгновенно, без round-trip.
+const SEND = new Set(['chat:set-bounds', 'chat:set-visible', 'run:input', 'run:resize']);
 
 // В sandbox-преалоде доступен только process.argv: так main передаёт то, что требует fs
 // (например, абсолютный путь к AMD-сборке Monaco в dev и в app.asar.unpacked).
