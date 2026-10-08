@@ -159,6 +159,27 @@ test('runlangs: planShell — кавычки и кодировка консол�
   assert.equal(RL.UTF8_CONSOLE_PREFIX, 'chcp 65001>nul & ');
 });
 
+test('runlangs: рецепт PowerShell из правила 15 доезжает до cmd.exe дословно', () => {
+  // Команду берём прямо из правил промпта (src/promptgen, пункт 15): тест обязан
+  // доказывать, что рецепт, которому мы учим модель, проходит наш собственный конвейер.
+  // В нём всё, что ломалось раньше, сразу: кириллица, вложенные кавычки и pipe.
+  const pg = require('../src/promptgen');
+  const m = pg.DEFAULT_RULES.match(/# &CMD:(powershell[^»]*)»/);
+  assert.ok(m, 'в правилах есть пример команды PowerShell');
+  const cmd = m[1];
+  assert.ok(cmd.includes('|'), 'pipe в примере на месте');
+  assert.ok(cmd.includes("'Светит'"), 'образец с кириллицей на месте');
+
+  const plan = RL.planShell(cmd, 'win32');
+  assert.equal(plan.exe, 'cmd.exe');
+  assert.equal(plan.verbatim, true, 'команда уходит строкой: cmd.exe не понимает «\\\"»');
+  assert.equal(plan.args[3], RL.UTF8_CONSOLE_PREFIX + cmd,
+    'команда осталась одним аргументом — pipe внутри кавычек не резался');
+  assert.equal(RL.ptySpawnArgs(plan.args, 'win32', plan.verbatim), '/d /s /c ' + plan.args[3]);
+  // Чтение файла — не опасное действие: карточка не требует отдельного подтверждения
+  assert.equal(RL.classifyCommand(cmd, 'win32').level, 'safe');
+});
+
 test('runlangs: ptySpawnArgs — на Windows команда оболочки одной строкой', () => {
   const args = ['/d', '/s', '/c', 'chcp 65001>nul & findstr "fn main" poem.rs'];
   // win32 + verbatim: строка — node-pty кладёт её в командную строку дословно

@@ -584,28 +584,62 @@ test('промпт: правила 13–14 учат модель маркера�
   assert.ok(r.includes('&DELETE:'), 'эвристика LEGACY_RULES не сломана');
 });
 
+test('промпт: правило 15 — кириллица в командах Windows уходит через PowerShell', () => {
+  const r = pg.DEFAULT_RULES;
+  // причина названа точно: аргументы старых утилит, а не кодировка вывода консоли
+  assert.match(r, /15\. Файлы проекта записаны в UTF-8/);
+  assert.match(r, /findstr, sort, more, fc/);
+  assert.match(r, /«findstr \/c:"Светит" poem\.rs» не найдёт строку, которая в файле есть/);
+  // готовый рецепт: однострочник PowerShell с явным -Encoding UTF8
+  const m = r.match(/# &CMD:(powershell[^»]*)»/);
+  assert.ok(m, 'в правилах есть пример команды PowerShell');
+  assert.match(m[1], /^powershell -NoProfile -Command "Get-Content poem\.rs -Encoding UTF8 \| Select-String 'Светит'"$/);
+  assert.match(r, /-EncodedCommand не используй/);
+  // командам без кириллицы прежний синтаксис не запрещён
+  assert.match(r, /оставайся на обычном синтаксисе cmd/);
+  // нумерация сплошная: 15 пунктов подряд
+  for (let i = 1; i <= 15; i++) assert.ok(r.includes(`\n${i}. `), `в правилах есть пункт ${i}`);
+  // пример из правила разбирается нашим парсером как команда и ничем не искажается
+  const parsed = parseBlock('# &CMD:' + m[1] + '\n');
+  assert.equal(parsed.marker.op, 'cmd');
+  assert.equal(parsed.marker.command, m[1]);
+  assert.deepEqual(parsed.issues, []);
+});
+
 test('промпт: устаревшие правила — нетронутые обновляются молча, правленые предлагаются кнопкой', () => {
-  // прежний текст по умолчанию (правила 1–12, без &RUN:/&CMD:) лежит в LEGACY_RULES:
-  // пользователь его не правил, поэтому замена автоматическая
+  // Каждый прежний текст по умолчанию лежит в LEGACY_RULES: пользователь его не правил,
+  // поэтому замена автоматическая. Последний — правила с пунктами 1–14 (без пункта про
+  // кодировки Windows), предпоследний — правила до этапа C3c (без &RUN:/&CMD:).
   const prev = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 1];
-  assert.ok(prev.includes('&DELETE:') && !prev.includes('&RUN:'), 'в списке устаревших — правила до этапа C3c');
+  const older = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 2];
+  assert.ok(prev.includes('&RUN:') && !prev.includes('powershell'), 'в списке устаревших — правила до пункта 15');
+  assert.ok(older.includes('&DELETE:') && !older.includes('&RUN:'), 'и правила до этапа C3c');
   const upgraded = pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: prev }]);
   assert.equal(upgraded[0].text, pg.DEFAULT_RULES, 'нетронутые прежние правила заменены молча');
+  assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: older }])[0].text,
+    pg.DEFAULT_RULES, 'правила на два выпуска старше — тоже');
   assert.equal(pg.rulesNeedUpgrade(prev), false, 'для них кнопка не предлагается — они уже обновлены');
 
   // актуальный текст не считается устаревшим
   assert.equal(pg.rulesNeedUpgrade(pg.DEFAULT_RULES), false);
 
   // пользователь дописал правила сам (оба маркера на месте) — не трогаем
-  const own = pg.DEFAULT_RULES + '\n15. Моё правило.';
+  const own = pg.DEFAULT_RULES + '\n16. Моё правило.';
   assert.equal(pg.rulesNeedUpgrade(own), false);
   assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: own }])[0].text, own);
 
   // правленый текст прежних правил: молча перезаписывать нельзя, предлагается кнопка
-  const edited = prev.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
+  const edited = older.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
   assert.equal(pg.rulesNeedUpgrade(edited), true, 'устаревшие правленые правила — обновить кнопкой');
   assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: edited }])[0].text, edited,
     'без нажатия кнопки текст пользователя не меняется');
+
+  // Правленые правила с пунктами 1–14: маркеры &RUN:/&CMD: на месте, поэтому текст
+  // считается авторским и кнопкой не дёргается. Осознанный компромисс: обновление
+  // перезаписало бы чужой текст, а пункт 15 такой пользователь допишет сам.
+  const editedV14 = prev.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
+  assert.equal(pg.rulesNeedUpgrade(editedV14), false);
+  assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: editedV14 }])[0].text, editedV14);
 
   // авторский текст, на наши правила не похожий, не предлагается трогать
   assert.equal(pg.rulesNeedUpgrade('Пиши код на Python и комментируй по-русски.'), false);
