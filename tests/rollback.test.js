@@ -18,7 +18,7 @@ async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-rb-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-rbd-'));
   const trashDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-rbt-'));
-  t.after(() => Promise.all([root, data, trashDir].map((d) => fs.rm(d, { recursive: true, force: true }))));
+  t.after(() => Promise.all([root, data, trashDir].map((d) => fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);

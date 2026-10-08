@@ -339,3 +339,61 @@ test('wiring: настройки запуска (C3b) связаны на все
   assert.ok(!/shellWin\s*:/.test(appSrc), 'renderer не подбирает оболочку — она фиксирована');
   assert.equal(rs.nextConfig({ shellWin: 'powershell' }, {}).shellWin, 'cmd');
 });
+
+test('wiring: предложения запуска и команд (C3c) связаны на всех сторонах', () => {
+  const appSrc = read('ui/app.js');
+  const parser = require('../src/parser');
+  const proposalsSrc = read('src/proposals.js');
+  const runlangs = require('../src/runlangs');
+  const pg = require('../src/promptgen');
+
+  // parser: оба якоря разбираются, старые маркеры целы
+  assert.equal(parser.parseBlock('# &RUN:a.py\n5\n').marker.op, 'run');
+  assert.equal(parser.parseBlock('# &CMD:dir\n').marker.op, 'cmd');
+  assert.equal(parser.parseBlock('# &DELETE:a.py\n').marker.op, 'delete');
+  assert.equal(parser.parseBlock('# &NEW:a.py\nx\n').marker.op, 'create');
+
+  // proposals: kind, решение «выполнено» и риск считаются, а не рисуются на глаз
+  assert.match(proposalsSrc, /kindOf\(/, 'тип предложения определяется в proposals');
+  assert.match(proposalsSrc, /markExecuted/, 'предложение запуска помечается выполненным');
+  assert.match(proposalsSrc, /runlangs\.classifyCommand\(/, 'риск команды считается общим классификатором');
+  assert.match(proposalsSrc, /p\.kind !== 'file'/, 'apply не применяется к запуску и команде');
+  const pmProto = ProposalManager.prototype;
+  for (const m of ['markExecuted', 'view', 'list', 'reject', 'dismiss', 'ingest']) {
+    assert.equal(typeof pmProto[m], 'function', `ProposalManager не предоставляет ${m}`);
+  }
+  // хэш файловых предложений не менялся: прежние решения в config.json остаются в силе
+  const fileHash = (text) => {
+    const pm = new ProposalManager({ store: { getProposalDecision: () => null, contextSeen: () => ({}), saveContext: async () => {} } });
+    pm.ingest('c1', [{ key: 'k', text }]);
+    return [...pm.map.values()][0].contentHash;
+  };
+  assert.equal(fileHash('# &a.py\nx\n'), fileHash('# &a.py\nx\n'), 'хэш стабилен');
+  assert.notEqual(fileHash('# &RUN:a.py\nx\n'), fileHash('# &a.py\nx\n'), 'запуск — отдельное предложение');
+
+  // renderer: карточки обоих типов, риск-бейдж, подтверждение опасной команды, ввод
+  assert.match(appSrc, /p\.kind === 'run' \|\| p\.kind === 'cmd'/, 'app.js различает карточки запуска и команды');
+  assert.match(appSrc, /RISK_LABEL/, 'уровни риска подписаны');
+  assert.match(appSrc, /risk-danger|danger-note/, 'красный уровень показывает баннер');
+  assert.match(appSrc, /Я понимаю риск и хочу выполнить команду/, 'опасная команда требует подтверждения');
+  assert.match(appSrc, /Сначала примите предложение, создающее файл/, 'запуск несозданного файла заблокирован подсказкой');
+  assert.match(appSrc, /saveAllDirty/, 'перед запуском из карточки буферы сохраняются');
+  assert.match(appSrc, /call\('proposal:executed'/, 'renderer помечает выполнение');
+  assert.match(appSrc, /↻ Повторить/, 'выполненное предложение можно повторить');
+
+  // классификатор один на два процесса: renderer берёт его из UMD-ядра
+  assert.equal(runlangs.classifyCommand('rmdir /s build', 'win32').level, 'danger');
+  assert.equal(runlangs.classifyCommand('grep -rn x src', 'win32').level, 'safe');
+
+  // обучение модели: правила и памятка знают про оба якоря
+  assert.match(pg.DEFAULT_RULES, /&RUN:/);
+  assert.match(pg.DEFAULT_RULES, /&CMD:/);
+  assert.match(pg.FORMAT_REMINDER, /&RUN:/);
+  assert.match(pg.FORMAT_REMINDER, /&CMD:/);
+  assert.equal(typeof pg.rulesNeedUpgrade, 'function', 'есть признак устаревших правил');
+  assert.match(mainSrc, /rulesNeedUpgrade/, 'main сообщает renderer' + 'у об устаревших правилах');
+  assert.match(appSrc, /Обновить правила до текущей версии/, 'в «Промпте» есть кнопка обновления правил');
+
+  // main: обработчик пометки и его аргументы
+  assert.match(mainSrc, /handle\('proposal:executed'/, 'в main.js есть handle(proposal:executed)');
+});

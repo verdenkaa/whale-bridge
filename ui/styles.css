@@ -136,6 +136,24 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .badge.warn { color: var(--warn); border-color: var(--warn); }
 .badge.bad { color: var(--del); border-color: var(--del); }
 
+/* карточки запуска и команд (этап C3c, ТЗ §2.5) */
+/* В отличие от файловой карточки это не <button>: внутри свои кнопки, а вложенные
+   кнопки в HTML недопустимы. Курсор обычный — кликом карточка никуда не открывает. */
+.card.run-card { cursor: default; }
+.card.run-card.danger { border-color: var(--del); }
+.cmd-line { font-family: var(--mono); font-size: 12px; color: var(--text); background: #191919;
+  border: 1px solid var(--line); border-radius: 5px; padding: 4px 7px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.card-actions { display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+.danger-note { margin-top: 5px; padding: 6px 8px; border-radius: 6px; font-size: 11.5px;
+  color: var(--del); background: var(--del-bg); border: 1px solid var(--del); }
+.run-input { margin: 5px 0 0; max-height: 160px; overflow: auto; }
+/* бейдж-кнопка «ввод: N стр.» — тот же бейдж, но кликабельный */
+.badge.link { cursor: pointer; background: transparent; font: inherit; }
+.badge.link:hover { border-color: var(--accent); color: var(--accent); }
+.badge.risk-safe { color: var(--add); border-color: transparent; background: var(--add-bg); }
+.badge.risk-caution { color: var(--warn); border-color: var(--warn); }
+.badge.risk-danger { color: var(--del); border-color: var(--del); background: var(--del-bg); }
+
 /* просмотр diff */
 .view-head { display: grid; gap: 4px; margin-bottom: 10px; }
 .view-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }

@@ -244,10 +244,16 @@ class Store {
     return this.config.proposalDecisions?.[chatId]?.[contentHash] || null;
   }
 
-  async setProposalDecision(chatId, contentHash, status, historyId = null) {
-    if (!chatId || !contentHash || !['applied', 'rejected', 'dismissed'].includes(status)) return;
+  async setProposalDecision(chatId, contentHash, status, historyId = null, exitCode = null) {
+    // 'executed' — статус предложений запуска и команд (этап C3c): у них нет записи
+    // в историю и резервных копий, есть только факт выполнения и код возврата.
+    if (!chatId || !contentHash || !['applied', 'rejected', 'dismissed', 'executed'].includes(status)) return;
     if (!this.config.proposalDecisions[chatId]) this.config.proposalDecisions[chatId] = {};
-    this.config.proposalDecisions[chatId][contentHash] = { status, historyId: historyId || null, ts: Date.now() };
+    const rec = { status, historyId: historyId || null, ts: Date.now() };
+    // Код возврата храним только у выполненных: по нему карточка после перезапуска
+    // показывает «Выполнено (код N)», а не просто «Выполнено».
+    if (status === 'executed') rec.exitCode = Number.isFinite(exitCode) ? exitCode : null;
+    this.config.proposalDecisions[chatId][contentHash] = rec;
     const entries = Object.entries(this.config.proposalDecisions[chatId]);
     if (entries.length > 5000) {
       entries.sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));

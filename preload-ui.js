@@ -6,6 +6,8 @@ const INVOKE = new Set([
   'fs:list', 'file:open',
   'file:read', 'file:write', 'file:hashes',
   'proposals:list', 'proposal:dismiss', 'proposals:dismissAll', 'proposal:get', 'proposal:retarget', 'proposal:apply', 'proposal:reject', 'proposal:fromClipboard',
+  // пометка «выполнено» для предложений запуска и команд (&RUN:/&CMD:)
+  'proposal:executed',
   'history:list', 'history:view', 'history:revert',
   'backups:stats', 'backups:clear',
   'prompt:get', 'prompt:tree', 'prompt:save-draft', 'prompt:set-excluded', 'prompt:build', 'prompt:copy', 'prompt:copy-reminder', 'prompt:copy-files',

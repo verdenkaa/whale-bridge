@@ -553,6 +553,13 @@ function registerIpc() {
   handle('proposal:retarget', ({ id, relPath, op }) => proposals.retarget(String(id), { relPath, op }));
   handle('proposal:reject', ({ id }) => { proposals.reject(String(id)); proposals.dismiss(String(id)); });
   handle('proposal:dismiss', ({ id }) => proposals.dismiss(String(id)));
+  // Пометка «выполнено» для предложений запуска и команд (&RUN:/&CMD:, этап C3c).
+  // Вызывается renderer'ом дважды: со стартом сессии и по run:exit — с кодом возврата.
+  // Записи в историю и резервных копий не создаёт: запуск не меняет файлы проекта.
+  handle('proposal:executed', ({ id, exitCode, error }) => proposals.markExecuted(String(id), {
+    exitCode: Number.isFinite(exitCode) ? exitCode : null,
+    error: typeof error === 'string' ? error.slice(0, 500) : null,
+  }));
   handle('proposals:dismissAll', ({ includeHistorical }) => {
     if (currentChatId) proposals.dismissAll(currentChatId, !!includeHistorical);
   });
@@ -616,12 +623,23 @@ function registerIpc() {
       excluded: new Set(project ? store.getTreeOff(project.id) : []),
     });
   }
-  handle('prompt:get', ({ projectId }) => ({
-    sections: store.config.promptDraft ? pg.upgradeLegacy(pg.sanitizeSections(store.config.promptDraft)) : pg.defaultSections(),
-    presets: [...pg.builtinPresets().map(({ id, name, builtin }) => ({ id, name, builtin })), ...store.listPresets()],
-    excluded: projectId ? store.getTreeOff(String(projectId)) : [],
-    defaults: pg.defaultTexts(),
-  }));
+  handle('prompt:get', ({ projectId }) => {
+    const sections = store.config.promptDraft ? pg.upgradeLegacy(pg.sanitizeSections(store.config.promptDraft)) : pg.defaultSections();
+    const rules = sections.find((s) => s.key === 'rules' && s.type === 'text');
+    return {
+      sections,
+      presets: [...pg.builtinPresets().map(({ id, name, builtin }) => ({ id, name, builtin })), ...store.listPresets()],
+      excluded: projectId ? store.getTreeOff(String(projectId)) : [],
+      defaults: pg.defaultTexts(),
+      // Правила в черновике устарели (в них нет &RUN:/&CMD:, поэтому модель не будет
+      // предлагать запуски и команды). Молча не перезаписываем: текст мог быть
+      // отредактирован пользователем, поэтому отдаём признак и актуальный текст,
+      // а интерфейс показывает явную кнопку «Обновить правила» (ТЗ §3.8).
+      rulesUpgrade: rules && pg.rulesNeedUpgrade(rules.text)
+        ? { needed: true, text: pg.DEFAULT_RULES }
+        : { needed: false, text: null },
+    };
+  });
   handle('prompt:tree', ({ projectId }) => {
     const p = store.getProject(String(projectId));
     return p ? fileops.getTree(p.path) : null;

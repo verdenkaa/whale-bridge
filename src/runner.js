@@ -47,9 +47,22 @@ function createRunner(deps) {
 
   const sendState = () => send('run:state', {
     active: active
-      ? { kind: active.kind, label: active.label, state: active.state, sessionId: active.id }
+      ? {
+        kind: active.kind, label: active.label, state: active.state, sessionId: active.id,
+        // Фаза нужна renderer'у для подписи («Компиляция: app.cpp» против «Запуск: …»)
+        // и для служебной строки «── компиляция ──». Событие уходит ДО старта pty,
+        // поэтому строка гарантированно оказывается раньше вывода компилятора —
+        // run:data может обогнать ответ invoke.
+        step: active.step,
+        stepKind: stepKindOf(active),
+      }
       : null,
   });
+
+  /** Фаза текущего шага сессии: 'build' | 'run' | null. */
+  const stepKindOf = (s) => (s && s.plan && s.plan.steps && s.plan.steps[s.step]
+    ? s.plan.steps[s.step].kind
+    : null);
 
   // ---------- watchdog бездействия ----------
   // Любой вывод или ввод сбрасывает таймер: долгая компиляция с прогрессом не
@@ -386,7 +399,7 @@ function createRunner(deps) {
     sendState();
     startStep(session, 0);
     if (session.spawnError) return { ok: false, reason: 'spawn-failed', message: session.spawnError };
-    return { ok: true, sessionId: session.id };
+    return { ok: true, sessionId: session.id, stepKind: stepKindOf(session) };
   }
 
   /** Остановить активную сессию (kill дерева). */

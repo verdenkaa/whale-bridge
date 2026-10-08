@@ -12,7 +12,7 @@ const { sanitizeRunConfig } = require('../src/runlangs');
 
 async function setup(t, configJson) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aiws-cfg-'));
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   if (configJson !== undefined) {
     await fsp.writeFile(path.join(dir, 'config.json'), typeof configJson === 'string' ? configJson : JSON.stringify(configJson, null, 2));
   }

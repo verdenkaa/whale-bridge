@@ -50,7 +50,7 @@ class FakePty {
 
 async function setup(t, cfg) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aiws-run-'));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  t.after(() => fsp.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   const c = cfg || {};
 
   fs.writeFileSync(path.join(root, 'main.py'), 'print("hi")\n');
@@ -255,12 +255,28 @@ test('runner: cpp на win32 — суффикс .exe в плане и в зап�
   const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'app.cpp' } });
   assert.equal(r.ok, true);
   assert.deepEqual(s.ptys[0].opts.args, ['app.cpp', '-o', '.ide_build/app.exe']);
+  // фаза видна в ответе run:start и в run:state: по ним renderer подписывает
+  // «Компиляция: app.cpp» и печатает «── компиляция ──» до вывода компилятора
+  assert.equal(r.stepKind, 'build');
+  const st = s.statesOf().find((x) => x.active && x.active.sessionId === r.sessionId);
+  assert.equal(st.active.stepKind, 'build');
+  assert.equal(st.active.step, 0);
+  assert.equal(st.active.label, 'app.cpp');
   s.ptys[0].exit(0);
   assert.equal(s.ptys.length, 2);
   assert.equal(s.ptys[1].opts.exe, joinFor('win32', s.root, '.ide_build/app.exe'));
   // отчёт показывает команду читаемо: артефакт — относительным путём
   s.ptys[1].exit(0);
   assert.match(s.runner.report().text, /\.ide_build[/\\]app\.exe/);
+});
+
+test('runner: у интерпретируемого языка фаза сразу run', async (t) => {
+  const s = await setup(t);
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'main.py' } });
+  assert.equal(r.stepKind, 'run', 'у python один шаг — запуск');
+  const c = await setup(t);
+  const rc = await c.runner.start({ project: c.project, target: { kind: 'cmd', command: 'dir' } });
+  assert.equal(rc.stepKind, 'run');
 });
 
 test('runner: провал компиляции обрывает сессию — второй шаг не выполняется', async (t) => {
@@ -431,6 +447,11 @@ test('runner: папка инструмента из настроек попад
   // Ручной путь к g++ при пустом PATH: сам компилятор найдётся, а вот собранному
   // .exe нужны libstdc++-6.dll и libgcc_s_seh-1.dll из папки MinGW — без добавления
   // этой папки в PATH запуск упал бы с ошибкой про отсутствующую DLL.
+  //
+  // Ключ PATH ищем без учёта регистра: process.env в Windows регистронезависим, а его
+  // копия (Object.assign) — обычный объект с родным регистром ключа, то есть 'Path'.
+  // Тест, читающий env.PATH, на Windows падал, хотя поведение было правильным.
+  const pathKeyOf = (o) => Object.keys(o).find((k) => k.toUpperCase() === 'PATH');
   const pathBefore = process.env.PATH;
   const s = await setup(t, {
     platform: 'win32',
@@ -438,14 +459,18 @@ test('runner: папка инструмента из настроек попад
   });
   await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'app.cpp' } });
   const env = s.ptys[0].opts.env;
-  assert.ok(env.PATH.startsWith('C:\\mingw64\\bin;'), 'папка инструмента — первая в PATH');
-  assert.ok(env.PATH.endsWith(pathBefore || ''), 'прежний PATH сохранён за ней');
-  assert.equal(env.Path, undefined, 'второй ключ PATH/Path не появился');
+  const key = pathKeyOf(env);
+  assert.ok(key, 'переменная PATH в окружении процесса есть');
+  assert.ok(env[key].startsWith('C:\\mingw64\\bin;'), 'папка инструмента — первая в PATH');
+  assert.ok(env[key].endsWith(pathBefore || ''), 'прежний PATH сохранён за ней');
+  assert.equal(Object.keys(env).filter((k) => k.toUpperCase() === 'PATH').length, 1,
+    'второго ключа PATH/Path не появилось');
 
   // инструмент из PATH ничего не добавляет: его папка там уже есть
   const p = await setup(t, { tools: { python: { found: true, exe: '/usr/bin/python3', source: 'path' } } });
   await p.runner.start({ project: p.project, target: { kind: 'file', rel: 'main.py' } });
-  assert.equal(p.ptys[0].opts.env.PATH, process.env.PATH, 'для PATH-инструмента окружение не меняется');
+  const penv = p.ptys[0].opts.env;
+  assert.equal(penv[pathKeyOf(penv)], process.env.PATH, 'для PATH-инструмента окружение не меняется');
 
   // окружение главного процесса не мутируется
   assert.equal(process.env.PATH, pathBefore, 'process.env родителя не изменён');
@@ -550,7 +575,7 @@ test('runner: журнал контекста и история не трога�
 
 test('runner: папка .ide_build создаётся перед компиляцией, если её нет', async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aiws-run2-'));
-  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  t.after(() => fsp.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   fs.writeFileSync(path.join(root, 'p.c'), 'int main(){}\n');
   const runner = createRunner({
     platform: 'linux',

@@ -20,7 +20,7 @@ const S = 's'.repeat(64);
 async function setup(t, { bind = true } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-v-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-vd-'));
-  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(data, { recursive: true, force: true })]));
+  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }), fs.rm(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })]));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);

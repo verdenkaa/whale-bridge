@@ -3,6 +3,9 @@ const crypto = require('crypto');
 const fs = require('fs/promises');
 const path = require('path');
 const { parseBlock } = require('./parser');
+// Языки запуска и классификатор опасных команд (UMD-ядро этапа C3): renderer рисует
+// теми же правилами риск-бейдж карточки, поэтому правило одно на два процесса.
+const runlangs = require('./runlangs');
 const { resolveInProject, normalizeRel } = require('./paths');
 const { diffLines, diffStats, toRows, toUnifiedDiff } = require('./diff');
 const fileops = require('./fileops');
@@ -37,6 +40,30 @@ const MAX_COPY_CHARS = 4_000_000;
 
 const MAX_ROWS = 4000;
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 24);
+
+/**
+ * Тип предложения (ТЗ C3 §3.7): 'file' — правка файла (все прежние), 'run' — запуск
+ * файла из &RUN:, 'cmd' — команда оболочки из &CMD:. У run/cmd нет ни diff'а, ни
+ * aiBaseHash, ни retarget/merge: это не запись файла, а чтение мира.
+ */
+const kindOf = (marker) => {
+  const op = marker && marker.op;
+  return op === 'run' ? 'run' : op === 'cmd' ? 'cmd' : 'file';
+};
+
+/**
+ * Хэш содержимого предложения — ключ дедупликации и памяти решений (proposalDecisions).
+ * Формула файловых предложений НЕ меняется: по этому хэшу в config.json уже лежат
+ * прежние решения, и любая правка формулы оставила бы их сиротами (карточки, которые
+ * пользователь отклонил, вернулись бы как новые).
+ */
+function hashOf(chatId, parsed) {
+  const m = parsed.marker;
+  if (m.op === 'cmd') return sha([chatId, 'cmd', m.command || '', parsed.content].join('\0'));
+  if (m.op === 'run') return sha([chatId, 'run', m.path || '', (m.args || []).join('\u0001'), parsed.content].join('\0'));
+  return sha([chatId, m.op, m.path, parsed.content].join('\0'));
+}
+
 const countLines = (t) => (t === '' ? 0 : t.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n').length);
 // Модель иногда пишет путь вместе с именем корневой папки («myproject/test.py»), хотя она уже в корне.
 // Отбрасываем это имя, если внутри проекта нет настоящей подпапки с таким названием.
@@ -67,7 +94,8 @@ class ProposalManager {
     for (const b of blocks) {
       const parsed = parseBlock(b.text);
       if (!parsed.marker) continue;
-      const hash = sha([chatId, parsed.marker.op, parsed.marker.path, parsed.content].join('\0'));
+      const hash = hashOf(chatId, parsed);
+      const kind = kindOf(parsed.marker);
       const k = `${chatId}:${b.key}`;
       const ex = this.map.get(this.byKey.get(k));
       // Блок, который мы уже разбирали в этом чате, новым стать не может. Без этого при
@@ -80,9 +108,11 @@ class ProposalManager {
         if (ex.contentHash === hash) continue;
         if (ex.status === 'pending') {
           // тот же DOM-блок дописывается/меняется — обновляем предложение
-          const same = ex.marker.op === parsed.marker.op && ex.marker.path === parsed.marker.path;
+          const same = ex.marker.op === parsed.marker.op && ex.marker.path === parsed.marker.path
+            && (ex.marker.command || null) === (parsed.marker.command || null);
           Object.assign(ex, {
             marker: parsed.marker,
+            kind,
             content: parsed.content,
             mode: parsed.mode,
             edits: parsed.edits,
@@ -112,6 +142,7 @@ class ProposalManager {
         chatId,
         key: b.key,
         marker: parsed.marker,
+        kind,
         content: parsed.content,
         mode: parsed.mode,
         edits: parsed.edits,
@@ -119,7 +150,15 @@ class ProposalManager {
         patchOpen: parsed.open,
         incomplete: parsed.incomplete,
         contentHash: hash,
-        status: decision?.status || 'pending', // pending | applied | rejected
+        // pending | applied | rejected | dismissed — файловые; у run/cmd вместо applied
+        // статус executed (ТЗ C3 §3.7). Решение берётся из памяти по contentHash, поэтому
+        // при догрузке старых сообщений чата отработанная карточка не всплывает как новая.
+        status: decision?.status || 'pending',
+        // Код возврата выполненного запуска/команды — из сохранённого решения: после
+        // перезапуска карточка показывает «Выполнено (код N)», а не просто «Выполнено».
+        exitCode: decision && Number.isFinite(decision.exitCode) ? decision.exitCode : null,
+        executedAt: decision?.status === 'executed' ? (decision.ts || null) : null,
+        lastError: null,
         historical: !!b.initial || seenBefore,
         // Stage 0 (ТЗ §37): версия файла, которую видела модель. Заполняется из sealAiBase()
         // сразу после ingest — сам ingest синхронный и диск не читает.
@@ -157,6 +196,8 @@ class ProposalManager {
     let sealed = 0;
     for (const p of this.map.values()) {
       if (p.chatId !== chatId || p.status !== 'pending' || p.historical) continue;
+      // У запуска и команды нет «версии файла, которую видела модель»: файл не меняется
+      if (p.kind !== 'file') continue;
       if (p.aiBaseHash !== null) continue;
       const h = await this._readAiBaseHash(p);
       if (h === undefined) continue; // проект не привязан или путь не проходит проверку — повторим позже
@@ -255,10 +296,90 @@ class ProposalManager {
     return ev;
   }
 
+  /**
+   * Предложение запуска (&RUN:) и команды оболочки (&CMD:) — ТЗ C3 §3.7.
+   *
+   * Ни diff'а, ни версий файла, ни aiBaseHash: запуск не пишет файл проекта, поэтому
+   * journal контекста и история операций его не касаются. Проверяется только то, что
+   * нужно честной карточке:
+   *   &CMD: — команда не пуста, проект привязан, уровень риска из classifyCommand;
+   *   &RUN: — путь строго внутри проекта, расширение поддерживается, файл существует
+   *           (иначе «сначала примите предложение, создающее файл»).
+   * Статусы: pending → executed | rejected | dismissed.
+   */
+  async _evaluateRun(p) {
+    const m = p.marker;
+    const out = {
+      id: p.id,
+      kind: p.kind,
+      status: p.status,
+      op: m.op,
+      relPath: null,
+      historical: p.historical,
+      mode: 'full',
+      patchBlocks: 0,
+      incomplete: [],
+      shrink: null,
+      suggestions: [],
+      state: p.status,
+      contentHash: p.contentHash,
+      historyId: null,
+      aiBaseHash: null,
+      // Тело блока — ввод для stdin. Хвостовые переводы строк убираем: раннер сам
+      // добавляет завершитель последней строке, а лишний пустой ввод выглядел бы как
+      // нажатие Enter, которого пользователь не делал.
+      input: String(p.content || '').replace(/\n+$/, ''),
+      args: m.op === 'run' && Array.isArray(m.args) ? m.args.slice() : [],
+      command: m.op === 'cmd' ? String(m.command || '') : null,
+      risk: null,
+      lang: null,
+      langLabel: null,
+      exitCode: p.exitCode === undefined ? null : p.exitCode,
+      executedAt: p.executedAt || null,
+      lastError: p.lastError || null,
+    };
+
+    if (m.op === 'cmd') {
+      // Риск считается той же чистой функцией, которой renderer рисует бейдж: уровень
+      // в карточке и уровень, по которому требуется подтверждение, не могут разойтись.
+      out.risk = runlangs.classifyCommand(out.command, process.platform);
+      if (p.status !== 'pending') return out;
+      if (!out.command) return { ...out, state: 'empty-command' };
+      const project = this.store.getProjectForChat(p.chatId);
+      if (!project) return { ...out, state: 'no-project' };
+      out.projectId = project.id;
+      return { ...out, state: 'cmd' };
+    }
+
+    const project = this.store.getProjectForChat(p.chatId);
+    if (!project) return { ...out, state: p.status === 'pending' ? 'no-project' : p.status };
+    out.projectId = project.id;
+    // Модель может написать путь вместе с именем корневой папки — как у файловых маркеров
+    const stripped = await stripRootPrefix(project.path, m.path || '');
+    if (stripped) out.pathFixed = { from: m.path, to: stripped };
+    const r = await resolveInProject(project.path, stripped || (m.path || ''));
+    if (!r.ok) return { ...out, state: 'invalid-path', error: r.error };
+    out.relPath = r.rel;
+    const dot = r.rel.lastIndexOf('.');
+    const lang = runlangs.langByExt(dot > 0 ? r.rel.slice(dot) : '');
+    out.lang = lang ? lang.id : null;
+    out.langLabel = lang ? lang.label : null;
+    if (p.status !== 'pending') return { ...out, state: p.status };
+    // Порядок проверок важен: неподдерживаемое расширение важнее отсутствия файла,
+    // потому что принятие предложения в этом случае всё равно не поможет запустить.
+    if (!lang) return { ...out, state: 'unsupported-ext' };
+    if (!r.exists || !r.isFile) return { ...out, state: 'missing-file' };
+    return { ...out, state: 'run' };
+  }
+
   async _evaluate(p) {
+    // Запуск файла и команда оболочки оцениваются отдельно: у них нет ни версии файла,
+    // ни diff'а, ни резервных копий (ТЗ C3 §3.7) — только проверки для честной карточки.
+    if (p.kind === 'run' || p.kind === 'cmd') return this._evaluateRun(p);
     const target = p.override || p.marker;
     const out = {
       id: p.id,
+      kind: 'file',
       status: p.status,
       op: target.op,
       relPath: target.path,
@@ -369,6 +490,7 @@ class ProposalManager {
       const ev = await this.evaluate(p);
       out.push({
         id: ev.id, status: ev.status, state: ev.state, op: ev.op, relPath: ev.relPath,
+        kind: ev.kind || 'file',
         mode: ev.mode, patchBlocks: ev.patchBlocks, pathFixed: !!ev.pathFixed, toRelPath: ev.toRelPath || null,
         historical: ev.historical, stats: ev.stats || null,
         encodingWarning: ev.encodingWarning || null,
@@ -376,6 +498,15 @@ class ProposalManager {
         contextDiverged: !!ev.contextDiverged,
         knownVersion: ev.knownVersion || null,
         manualHistoryId: ev.manualHistoryId || null,
+        // Карточка запуска/команды (ТЗ C3 §2.5): что запускать, какой риск, чем кончилось.
+        // Текст ввода сюда не попадает — список ходит в IPC часто, ввод отдаёт view().
+        command: ev.command || null,
+        args: ev.args && ev.args.length ? ev.args : null,
+        lang: ev.lang || null,
+        risk: ev.risk ? { level: ev.risk.level, reasons: ev.risk.reasons } : null,
+        exitCode: ev.exitCode === undefined ? null : ev.exitCode,
+        executedAt: ev.executedAt || null,
+        inputLines: ev.input ? countLines(ev.input + '\n') : 0,
         warnings: ev.incomplete.length + (ev.shrink ? 1 : 0),
       });
     }
@@ -386,6 +517,16 @@ class ProposalManager {
     const p = this.get(id);
     if (!p) return null;
     const ev = await this.evaluate(p);
+    if (p.kind === 'run' || p.kind === 'cmd') {
+      // Ни строк диффа, ни текстов файла: карточка запуска показывает команду или файл
+      // с аргументами, ввод (тело блока), уровень риска и результат выполнения.
+      return {
+        ...ev,
+        rows: [], truncated: false,
+        newText: null, baseText: null, aiBaseText: null,
+        rawText: p.content, // тело блока как прислала модель — это ввод для stdin
+      };
+    }
     const rows = ev.ops ? toRows(ev.ops, 3) : [];
     delete ev.ops;
     // Тексты для Monaco DiffEditor (этап C). Читаются только здесь, а не в evaluate:
@@ -452,9 +593,45 @@ class ProposalManager {
     }
   }
 
+  /**
+   * Пометить предложение запуска/команды выполненным (ТЗ C3 §3.7).
+   *
+   * Решение сохраняется в proposalDecisions по contentHash вместе с кодом возврата,
+   * поэтому при догрузке старых сообщений DeepSeek уже отработанные карточки не
+   * всплывают заново, а после перезапуска приложения показывают прежний код.
+   *
+   * Вызывается дважды: со стартом сессии (exitCode null — «выполняется/выполнено»)
+   * и по run:exit (с кодом). Файловых предложений не касается: у них свой путь
+   * (apply → история и резервные копии).
+   */
+  markExecuted(id, arg) {
+    const p = this.get(id);
+    if (!p) return { ok: false, error: 'Предложение не найдено' };
+    if (p.kind !== 'run' && p.kind !== 'cmd') {
+      return { ok: false, error: 'Это предложение файла: оно выполняется кнопкой «Применить»' };
+    }
+    const a = arg && typeof arg === 'object' ? arg : {};
+    if (a.exitCode !== undefined && a.exitCode !== null) {
+      p.exitCode = Number.isFinite(a.exitCode) ? Math.trunc(a.exitCode) : null;
+    }
+    if (typeof a.error === 'string' && a.error) p.lastError = a.error.slice(0, 500);
+    else if (a.error === null) p.lastError = null;
+    p.status = 'executed';
+    p.executedAt = Date.now();
+    this.store.setProposalDecision(p.chatId, p.contentHash, 'executed', null, p.exitCode)
+      .catch((e) => console.error('[proposal decision]', e));
+    this.onChange();
+    return { ok: true, status: p.status, exitCode: p.exitCode };
+  }
+
   async apply(id, { baseHash, contentHash, allowIncomplete, createDirs }) {
     const p = this.get(id);
     if (!p || p.status !== 'pending') return { ok: false, code: 'state', error: 'Предложение уже обработано' };
+    // Запуск и команда — не запись файла: применять нечего, у них своя кнопка «Запустить».
+    // Без этой проверки apply упал бы на diff'е содержимого, которого у карточки нет.
+    if (p.kind !== 'file') {
+      return { ok: false, code: 'kind', error: 'Это предложение запуска: выполните его кнопкой «Запустить»' };
+    }
     if (contentHash !== p.contentHash) {
       return { ok: false, code: 'changed', error: 'Предложение изменилось, пока вы смотрели Diff. Проверьте заново.' };
     }
@@ -738,6 +915,21 @@ class ProposalManager {
     const lines = ['ОТЧЁТ WHALE BRIDGE ПО ИЗМЕНЕНИЯМ', ''];
     for (const p of items) {
       const ev = await this.evaluate(p);
+      // Запуск и команда файлов не меняют, поэтому в отчёте об изменениях идут одной
+      // строкой: модели полезно знать, что именно пользователь выполнил и чем кончилось.
+      if (ev.kind === 'run' || ev.kind === 'cmd') {
+        const done = p.status === 'executed';
+        const code = done && ev.exitCode !== null && ev.exitCode !== undefined ? ` (код ${ev.exitCode})` : '';
+        const what = ev.kind === 'run'
+          ? `Запуск ${ev.relPath || p.marker.path || '?'}${ev.args && ev.args.length ? ' ' + ev.args.join(' ') : ''}`
+          : `Команда «${ev.command}»`;
+        const verdict = done ? 'выполнено' + code
+          : p.status === 'rejected' ? 'отклонено'
+            : p.status === 'executed' ? 'выполнено' : 'не выполнено';
+        lines.push(`- ${what}: ${verdict}`);
+        lines.push('');
+        continue;
+      }
       let manualChanged = !!ev.manualChanged;
       let manualProjectId = ev.projectId || null;
       let manualRelPath = ev.relPath;

@@ -170,3 +170,26 @@ test('ipc: каналы настроек не дублируют каналы з
   // запись конфига — только через settings:save: renderer не умеет писать config.json напрямую
   assert.match(main, /handle\('settings:save'[\s\S]{0,400}sanitizeRunConfig/, 'settings:save чистит присланный конфиг');
 });
+
+// ---- этап C3c: каналы предложений запуска и команд (ТЗ §3.7) ----
+
+test('ipc: proposal:executed на месте во всех трёх местах', () => {
+  const c = 'proposal:executed';
+  assert.ok(INVOKE.has(c), `${c} не в белом списке INVOKE preload`);
+  assert.ok(handled.has(c), `${c} не обрабатывается в main`);
+  assert.ok(invoked.has(c), `${c} разрешён, но renderer его не вызывает`);
+  assert.ok(!EVENTS.has(c) && !SEND.has(c), `${c} не должен пересекаться с событиями и send`);
+  // пометка «выполнено» идёт через proposals.markExecuted, а не мимо менеджера
+  assert.match(main, /handle\('proposal:executed'[\s\S]{0,200}proposals\.markExecuted\(/,
+    'main помечает выполнение через ProposalManager');
+});
+
+test('ipc: каналов запуска файла и команды достаточно для карточек предложений', () => {
+  // карточка &RUN:/&CMD: запускает сессию существующим run:start и читает ввод через
+  // proposal:get — новых каналов потока для неё не появилось
+  for (const c of ['run:start', 'proposal:get', 'proposal:reject', 'proposal:dismiss']) {
+    assert.ok(INVOKE.has(c) && handled.has(c), `${c} обязан быть доступен renderer'у`);
+  }
+  assert.equal([...EVENTS].filter((c) => c.startsWith('proposal:')).length, 0,
+    'предложения не плодят события: список обновляется proposals:changed');
+});

@@ -83,7 +83,7 @@ test('patch: частичный SEARCH показывает реальный dif
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-p-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-d-'));
-  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(data, { recursive: true, force: true })]));
+  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }), fs.rm(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })]));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);
@@ -500,4 +500,64 @@ test('промпт: новые правила описывают REPLACE_BLOCK �
   const old = { id: '1', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: 'мой собственный текст' };
   assert.equal(pg.upgradeLegacy([old])[0].text, 'мой собственный текст');
   assert.equal(pg.upgradeLegacy(secs)[4].text, pg.DEFAULT_RULES);
+});
+
+test('промпт: правила 13–14 учат модель маркерам &RUN: и &CMD: (этап C3c)', () => {
+  const r = pg.DEFAULT_RULES;
+  // запуск файла: маркер, аргументы, тело как ввод, supported-языки
+  assert.match(r, /13\. Чтобы предложить мне запустить файл проекта/);
+  assert.match(r, /# &RUN:путь\/к\/файлу \[аргументы\]/);
+  assert.match(r, /Тело блока — ввод для программы/);
+  assert.match(r, /Python, JavaScript\/TypeScript, C\+\+, C и Java/);
+  // команда: оболочка, подтверждение, назначение «для чтения, а не для правки»
+  assert.match(r, /14\. Чтобы предложить команду терминала/);
+  assert.match(r, /# &CMD:команда/);
+  assert.match(r, /Windows — cmd\.exe/);
+  assert.match(r, /каждую команду я подтверждаю сам/);
+  assert.match(r, /Используй команды для чтения и поиска, а не для изменения файлов/);
+  // правило про блоки без маркера уточнено: команды без &CMD: не выполняются
+  assert.match(r, /Команды терминала, присланные без маркера &CMD:, приложение просто показывает — не выполняет/);
+  // нумерация не сломана: 14 пунктов подряд
+  for (let i = 1; i <= 14; i++) assert.ok(r.includes(`\n${i}. `), `в правилах есть пункт ${i}`);
+
+  // памятка формата дополнена теми же двумя маркерами
+  assert.match(pg.FORMAT_REMINDER, /# &RUN:/);
+  assert.match(pg.FORMAT_REMINDER, /# &CMD:/);
+
+  // примеры маркеров в правилах сами разбираются приложением
+  assert.equal(parseBlock('# &RUN:src/main.py\n5\n').marker.op, 'run');
+  assert.equal(parseBlock('# &CMD:grep -rn Player src\n').marker.op, 'cmd');
+  // легитимность старой эвристики (ТЗ §3.8): в правилах по-прежнему есть &DELETE:
+  assert.ok(r.includes('&DELETE:'), 'эвристика LEGACY_RULES не сломана');
+});
+
+test('промпт: устаревшие правила — нетронутые обновляются молча, правленые предлагаются кнопкой', () => {
+  // прежний текст по умолчанию (правила 1–12, без &RUN:/&CMD:) лежит в LEGACY_RULES:
+  // пользователь его не правил, поэтому замена автоматическая
+  const prev = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 1];
+  assert.ok(prev.includes('&DELETE:') && !prev.includes('&RUN:'), 'в списке устаревших — правила до этапа C3c');
+  const upgraded = pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: prev }]);
+  assert.equal(upgraded[0].text, pg.DEFAULT_RULES, 'нетронутые прежние правила заменены молча');
+  assert.equal(pg.rulesNeedUpgrade(prev), false, 'для них кнопка не предлагается — они уже обновлены');
+
+  // актуальный текст не считается устаревшим
+  assert.equal(pg.rulesNeedUpgrade(pg.DEFAULT_RULES), false);
+
+  // пользователь дописал правила сам (оба маркера на месте) — не трогаем
+  const own = pg.DEFAULT_RULES + '\n15. Моё правило.';
+  assert.equal(pg.rulesNeedUpgrade(own), false);
+  assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: own }])[0].text, own);
+
+  // правленый текст прежних правил: молча перезаписывать нельзя, предлагается кнопка
+  const edited = prev.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
+  assert.equal(pg.rulesNeedUpgrade(edited), true, 'устаревшие правленые правила — обновить кнопкой');
+  assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: edited }])[0].text, edited,
+    'без нажатия кнопки текст пользователя не меняется');
+
+  // авторский текст, на наши правила не похожий, не предлагается трогать
+  assert.equal(pg.rulesNeedUpgrade('Пиши код на Python и комментируй по-русски.'), false);
+  assert.equal(pg.rulesNeedUpgrade(''), false);
+  assert.equal(pg.rulesNeedUpgrade(null), false);
+  // другие секции не проверяются вовсе
+  assert.equal(pg.upgradeLegacy([{ id: 't', key: 'task', type: 'text', title: 'ЗАДАЧА', text: 'SEARCH/REPLACE' }])[0].text, 'SEARCH/REPLACE');
 });

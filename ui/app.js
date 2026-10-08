@@ -67,8 +67,17 @@
     exists: 'Файл уже существует', 'invalid-path': 'Небезопасный путь', 'no-project': 'Нет проекта',
     unreadable: 'Не прочитать', applied: 'Применено', rejected: 'Отклонено',
     'patch-failed': 'Правка не применяется', 'patch-open': 'Блок не закрыт',
+    // запуск и команды (этап C3c, ТЗ §2.5)
+    run: 'Готов к запуску', cmd: 'Готова к выполнению', executed: 'Выполнено',
+    'missing-file': 'Файл ещё не создан', 'unsupported-ext': 'Язык не поддерживается',
+    'empty-command': 'Пустая команда',
   };
-  const STATE_BAD = new Set(['missing', 'exists', 'invalid-path', 'unreadable', 'no-project', 'patch-failed', 'patch-open']);
+  const STATE_BAD = new Set(['missing', 'exists', 'invalid-path', 'unreadable', 'no-project', 'patch-failed', 'patch-open',
+    'missing-file', 'unsupported-ext', 'empty-command']);
+  // Риск команды (&CMD:) — уровень из общего классификатора (src/runlangs.js): та же
+  // функция рисует бейдж и решает, спрашивать ли подтверждение. Подписи здесь, потому
+  // что это текст интерфейса, а не правило классификации.
+  const RISK_LABEL = { safe: 'чтение', caution: 'осторожно', danger: 'опасная команда' };
 
   // ---------- состояние ----------
   const S = {
@@ -97,7 +106,12 @@
     prompt: {
       loaded: false, loading: false, sections: [], presets: [], excluded: new Set(), defaults: {}, tree: null,
       treeOpen: new Set(['']), preview: false, presetId: '', presetName: '',
+      rulesUpgrade: null, // {text} — в черновике устаревшие правила, предлагается обновление
     },
+    // Карточки запуска и команд (этап C3c): какие предпросмотры ввода раскрыты и
+    // догруженные тексты ввода (в списке предложений их нет — он ходит в IPC часто).
+    runExpanded: new Set(),
+    runInputs: {},
   };
   const P = S.prompt;
 
@@ -148,11 +162,21 @@
   const RUN = {
     running: false,
     sessionId: null,
+    label: null,     // что запущено: относительный путь файла или текст команды
     status: '',      // подпись состояния в панели
     statusKind: '',  // '' | 'run' | 'ok' | 'err' — цвет подписи
     lastTarget: null, // {kind, rel?, command?} — для кнопки «↻ Повторить»
     restarting: false, // идёт перезапуск: старую сессию убивает новый запуск, а не «■ Стоп»
+    phaseFor: null,  // id сессии, для которой служебная строка фазы уже напечатана
+    proposalId: null, // карточка &RUN:/&CMD:, из которой стартовала сессия (для кода возврата)
   };
+
+  /**
+   * Подпись фазы в строке состояния. Для компилируемых языков первая фаза — компиляция,
+   * и «Запуск: app.cpp» в этот момент вводило в заблуждение (замечание пользователя
+   * по итогам приёмки 0018): процесс ещё ничего не запускал, он собирал бинарник.
+   */
+  const statusFor = (label, stepKind) => (stepKind === 'build' ? 'Компиляция: ' : 'Запуск: ') + (label || '');
 
   function termPanel() { return $('#term-panel'); }
   function fitTerm() { if (window.WhaleTerminal && window.WhaleTerminal.fit) window.WhaleTerminal.fit(); }
@@ -253,10 +277,16 @@
   async function repeatRun() {
     if (!RUN.lastTarget) { toast('Ещё не было запусков', 'err'); return; }
     const t = RUN.lastTarget;
-    await startRun({ kind: t.kind, rel: t.rel, command: t.command }, t.input || null);
+    await startRun({ kind: t.kind, rel: t.rel, command: t.command }, t.input || null, t.proposalId || null);
   }
 
-  async function startRun(target, input) {
+  /**
+   * @param {{kind:'file'|'cmd', rel?:string, command?:string}} target
+   * @param {string|null} input ввод для stdin (тело блока &RUN:/&CMD:)
+   * @param {string|null} proposalId карточка предложения, из которой стартовали: по ней
+   *   run:exit дописывает код возврата в решение «выполнено»
+   */
+  async function startRun(target, input, proposalId) {
     await openTerm();
     const t = window.WhaleTerminal;
     if (t) {
@@ -270,7 +300,10 @@
     // run:exit(reason:'stopped') по старой сессии — флаг говорит обработчику, что это
     // не пользовательский «■ Стоп».
     RUN.restarting = !!RUN.running;
-    RUN.lastTarget = { kind: target.kind, rel: target.rel, command: target.command, input: input || '' };
+    // Привязка к карточке задаётся до старта: процесс может завершиться раньше,
+    // чем разрешится invoke, и run:exit придёт с ещё не установленным proposalId.
+    RUN.proposalId = proposalId || null;
+    RUN.lastTarget = { kind: target.kind, rel: target.rel, command: target.command, input: input || '', proposalId: RUN.proposalId };
     const size = t && t.size ? t.size() : null;
     const r = await call('run:start', {
       projectId: S.project ? S.project.id : null,
@@ -292,7 +325,11 @@
     }
     RUN.running = true;
     RUN.sessionId = r.sessionId;
-    RUN.status = 'Запуск: ' + (target.kind === 'cmd' ? target.command : target.rel);
+    RUN.label = target.kind === 'cmd' ? target.command : target.rel;
+    // Служебная строка «── компиляция ──» печатается по run:state (оно приходит раньше
+    // ответа invoke и раньше вывода компилятора); здесь — только подпись, и та же,
+    // чтобы состояние не мигало, если события придут в другом порядке.
+    RUN.status = statusFor(RUN.label, r.stepKind);
     RUN.statusKind = 'run';
     renderTermBar();
     if (window.WhaleTerminal) window.WhaleTerminal.focus();
@@ -751,6 +788,9 @@
   }
 
   function proposalCard(p, versions) {
+    // Запуск файла и команда оболочки — свои карточки (ТЗ C3 §2.5): у них нет диффа,
+    // а есть команда, ввод и уровень риска, и открывать их кликом некуда.
+    if (p.kind === 'run' || p.kind === 'cmd') return runCard(p);
     const title = p.op === 'create' ? `➕ Create ${base(p.relPath)}` : `🔍 Diff & Update ${base(p.relPath)}`;
     const done = p.status !== 'pending';
     const card = h('button', { class: 'card' + (done ? ' done' : ''), onclick: () => openProposal(p.id) },
@@ -773,6 +813,148 @@
         p.historical && h('span', { class: 'badge' }, 'из истории чата')));
     return h('div', { class: 'card-wrap' }, card,
       h('button', { class: 'dismiss', title: 'Убрать из списка', 'aria-label': 'Убрать предложение из списка', onclick: () => onDismiss(p.id) }, '✕'));
+  }
+
+  // ---------- карточки запуска и команд (этап C3c, ТЗ §2.5) ----------
+
+  /**
+   * Карточка &RUN: / &CMD:. В отличие от файловой это не <button> целиком: внутри свои
+   * кнопки («▶ Запустить», «Отклонить»), а вложенные кнопки в HTML недопустимы — клик
+   * по внутренней сработал бы дважды.
+   *
+   * Текст ввода в список предложений не попадает (он ходит в IPC часто), поэтому
+   * предпросмотр догружается через proposal:get и кешируется в S.runInputs.
+   */
+  function runCard(p) {
+    const isCmd = p.kind === 'cmd';
+    const done = p.status === 'executed';
+    const rejected = p.status === 'rejected';
+    const risk = isCmd && p.risk ? p.risk : null;
+    const danger = !!(risk && risk.level === 'danger');
+    const expanded = S.runExpanded.has(p.id);
+    const code = done && (p.exitCode === 0 || p.exitCode) ? ` (код ${p.exitCode})` : '';
+    const stateLabel = done ? 'Выполнено' + code : (STATE_LABEL[p.state] || p.state);
+    const stateClass = 'badge'
+      + (STATE_BAD.has(p.state) && !done ? ' bad' : '')
+      + (done && p.exitCode === 0 ? ' add' : '')
+      + (done && p.exitCode !== 0 && p.exitCode !== null && p.exitCode !== undefined ? ' del' : '');
+
+    const actions = [];
+    if (!rejected) {
+      if (p.status === 'pending') {
+        actions.push(h('button', {
+          class: 'btn tiny primary', type: 'button',
+          title: isCmd ? 'Выполнить команду в терминале' : 'Запустить файл в терминале',
+          onclick: () => runFromCard(p),
+        }, isCmd ? '▶ Выполнить' : '▶ Запустить'));
+        actions.push(h('button', {
+          class: 'btn ghost tiny', type: 'button', title: 'Закрыть предложение и убрать из списка',
+          onclick: () => onReject(p),
+        }, 'Отклонить'));
+      } else if (done) {
+        actions.push(h('button', {
+          class: 'btn tiny', type: 'button', title: 'Выполнить ещё раз с тем же вводом',
+          onclick: () => runFromCard(p),
+        }, '↻ Повторить'));
+      }
+    }
+
+    const card = h('div', { class: 'card run-card' + (done || rejected ? ' done' : '') + (danger ? ' danger' : '') },
+      h('span', { class: 'card-title' }, isCmd ? '⌘ Команда' : `▶ Запуск ${base(p.relPath || p.command || '')}`),
+      isCmd
+        ? h('code', { class: 'cmd-line' }, p.command || '')
+        : h('span', { class: 'path' }, (p.relPath || '') + (p.args && p.args.length ? '  ' + p.args.join(' ') : '')),
+      h('span', { class: 'card-meta' },
+        h('span', { class: stateClass }, stateLabel),
+        !isCmd && p.lang && h('span', { class: 'badge' }, p.langLabel || p.lang),
+        risk && h('span', {
+          class: 'badge risk-' + risk.level,
+          title: (risk.reasons || []).join('; ') || 'уровень риска команды',
+        }, RISK_LABEL[risk.level] || risk.level),
+        p.inputLines > 0 && h('button', {
+          class: 'badge link', type: 'button',
+          title: expanded ? 'Скрыть ввод' : 'Показать ввод из тела блока',
+          onclick: () => toggleRunInput(p.id),
+        }, (expanded ? 'скрыть ввод' : `ввод: ${p.inputLines} стр.`)),
+        p.pathFixed && h('span', { class: 'badge', title: 'ИИ указал путь вместе с именем корневой папки — оно убрано' }, 'путь исправлен'),
+        p.historical && h('span', { class: 'badge' }, 'из истории чата')),
+      // Красный уровень — баннер с причинами: пользователь обязан понимать, что делает команда
+      danger && h('div', { class: 'danger-note' },
+        'Не выполняйте, если не понимаете, что делает эта команда: '
+        + ((risk.reasons || []).join('; ') || 'причины не определены') + '.'),
+      expanded && h('pre', { class: 'code run-input' }, S.runInputs[p.id] === undefined ? 'Загрузка…' : (S.runInputs[p.id] || '(пусто)')),
+      actions.length > 0 && h('div', { class: 'card-actions' }, actions));
+
+    return h('div', { class: 'card-wrap' }, card,
+      h('button', {
+        class: 'dismiss', title: 'Убрать из списка', 'aria-label': 'Убрать предложение из списка',
+        onclick: () => onDismiss(p.id),
+      }, '✕'));
+  }
+
+  /** Предпросмотр ввода: догружаем текст из proposal:get один раз и кешируем. */
+  async function toggleRunInput(id) {
+    if (S.runExpanded.has(id)) { S.runExpanded.delete(id); render(); return; }
+    if (S.runInputs[id] === undefined) {
+      const d = await call('proposal:get', { id });
+      S.runInputs[id] = d && typeof d.input === 'string' ? d.input : '';
+    }
+    S.runExpanded.add(id);
+    render();
+  }
+
+  /**
+   * Запуск из карточки предложения (ТЗ §5.2): dirty-буферы сохраняются единственным
+   * путём записи, опасная команда требует явного подтверждения, а предложение помечается
+   * выполненным — сначала со стартом сессии, затем с кодом возврата по run:exit.
+   */
+  async function runFromCard(p) {
+    const isCmd = p.kind === 'cmd';
+    if (!S.project) { toast('Сначала выберите проект для этого чата', 'err'); return; }
+    if (!isCmd) {
+      // Модель могла предложить создать файл и сразу запустить его, а создание ещё не
+      // принято: запускать нечего, и это надо сказать прямо, а не падать в терминале
+      if (p.status === 'pending' && p.state === 'missing-file') {
+        toast('Сначала примите предложение, создающее файл', 'err');
+        return;
+      }
+      if (p.status === 'pending' && p.state === 'unsupported-ext') {
+        toast('Запуск таких файлов не поддерживается: Python, JavaScript/TypeScript, C++, C, Java', 'err');
+        return;
+      }
+      if (p.status === 'pending' && p.state !== 'run') {
+        toast('Предложение не готово к запуску: ' + (STATE_LABEL[p.state] || p.state), 'err');
+        return;
+      }
+    } else if (p.status === 'pending' && p.state !== 'cmd') {
+      toast('Команда не готова к выполнению: ' + (STATE_LABEL[p.state] || p.state), 'err');
+      return;
+    }
+    if (isCmd && p.risk && p.risk.level === 'danger') {
+      const yes = confirm('Команда помечена как опасная.\n\n'
+        + (p.command || '') + '\n\n'
+        + 'Причины: ' + ((p.risk.reasons || []).join('; ') || 'не определены') + '\n\n'
+        + 'Я понимаю риск и хочу выполнить команду.');
+      if (!yes) return;
+    }
+    // Ввод (тело блока) в списке предложений не хранится — берём из view
+    const d = await call('proposal:get', { id: p.id });
+    if (!d) return;
+    const input = typeof d.input === 'string' && d.input ? d.input : null;
+    const ed = window.WhaleEditor;
+    if (ed && ed.saveAllDirty && !(await ed.saveAllDirty())) {
+      toast('Запуск отменён: не удалось сохранить изменения', 'err');
+      return;
+    }
+    const target = isCmd
+      ? { kind: 'cmd', command: d.command || p.command }
+      : { kind: 'file', rel: d.relPath || p.relPath };
+    await startRun(target, input, p.id);
+    if (!RUN.running) return; // старт не состоялся — причина уже в терминале и тосте
+    // «Выполнено» ставим сразу: если приложение закроют до конца процесса, карточка
+    // не вернётся в список как нерассмотренная. Код возврата допишет run:exit.
+    await call('proposal:executed', { id: p.id });
+    await loadProposals();
   }
 
   async function onDismiss(id) {
@@ -1291,6 +1473,9 @@
     P.presets = g.presets;
     P.excluded = new Set(g.excluded);
     P.defaults = g.defaults;
+    // Правила устарели (нет &RUN:/&CMD:) — main присылает признак и актуальный текст;
+    // обновляем только явным нажатием кнопки, чужой текст молча не перезаписываем.
+    P.rulesUpgrade = g.rulesUpgrade && g.rulesUpgrade.needed ? g.rulesUpgrade : null;
     P.tree = S.project ? await call('prompt:tree', { projectId: S.project.id }) : null;
     P.loaded = true;
   }
@@ -1300,6 +1485,22 @@
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => call('prompt:save-draft', { sections: P.sections }), 400);
     schedulePreview();
+  }
+
+  /**
+   * Кнопка «Обновить правила до текущей версии»: заменяет текст раздела «ПРАВИЛА РАБОТЫ»
+   * актуальным (с маркерами &RUN: и &CMD:). Только явным нажатием — черновик мог быть
+   * отредактирован пользователем, и его правки не должны исчезать молча (ТЗ §3.8).
+   */
+  function upgradeRulesText() {
+    if (!P.rulesUpgrade || !P.rulesUpgrade.text) return;
+    const s = P.sections.find((x) => x.key === 'rules' && x.type === 'text');
+    if (!s) { toast('В этом черновике нет раздела «ПРАВИЛА РАБОТЫ»', 'err'); return; }
+    s.text = P.rulesUpgrade.text;
+    P.rulesUpgrade = null;
+    touch();
+    renderPromptPanel();
+    toast('Правила обновлены: модель знает про &RUN: и &CMD:', 'ok');
   }
   function schedulePreview() {
     clearTimeout(previewTimer);
@@ -1480,6 +1681,17 @@
     box.append(
       h('div', { class: 'path' }, 'Заполните поля, при необходимости добавьте свои, и скопируйте промпт. Для задач под онлайн-судью используйте встроенный пресет «Судья» с полем «СРЕДА ВЫПОЛНЕНИЯ».'),
       presetBar());
+    // Правила в черновике старше маркеров &RUN:/&CMD: — модель не будет предлагать
+    // запуски и команды, пока текст не обновлён. Делаем это явной кнопкой: черновик
+    // мог быть отредактирован пользователем, и терять его правки молча нельзя (ТЗ §3.8).
+    if (P.rulesUpgrade) {
+      box.append(h('div', { class: 'notice warn' },
+        h('span', {}, 'Правила работы в этом черновике устарели: в них нет маркеров &RUN: (предложить запуск файла) и &CMD: (предложить команду терминала). Модель не будет их использовать.'),
+        h('button', {
+          class: 'btn tiny', type: 'button', title: 'Заменить текст раздела «ПРАВИЛА РАБОТЫ» актуальным',
+          onclick: () => upgradeRulesText(),
+        }, 'Обновить правила до текущей версии')));
+    }
     P.sections.forEach((s, i) => box.append(sectionCard(s, i)));
 
     const hasTree = P.sections.some((s) => s.type === 'tree');
@@ -2202,7 +2414,7 @@
     if (!mine) return;
     if (p.nextStep) { // двухшаговый план: компиляция успешна, дальше запуск (§2.2, шаг 5)
       termWrite('\r\n── запуск ──\r\n');
-      RUN.status = p.nextStep.kind === 'build' ? 'компиляция…' : 'выполняется…';
+      RUN.status = statusFor(RUN.label, p.nextStep.kind);
       RUN.statusKind = 'run';
       renderTermBar();
       return;
@@ -2223,11 +2435,32 @@
       RUN.statusKind = '';
     }
     renderTermBar();
+    // Сессия стартовала из карточки &RUN:/&CMD: — дописываем код возврата в решение
+    // «выполнено». Храним его в config.json, поэтому после перезапуска карточка
+    // показывает «Выполнено (код N)», а не просто «Выполнено».
+    if (RUN.proposalId) {
+      const pid = RUN.proposalId;
+      RUN.proposalId = null;
+      call('proposal:executed', {
+        id: pid,
+        exitCode: typeof p.code === 'number' ? p.code : null,
+        error: p.error || (p.reason && notes[p.reason] ? notes[p.reason] : null),
+      }).then((r) => { if (r && r.ok) loadProposals(); });
+    }
   });
   api.on('run:state', (p) => {
-    RUN.running = !!(p && p.active);
-    if (p && p.active && p.active.state === 'running' && !RUN.status) {
-      RUN.status = 'Запуск: ' + p.active.label;
+    const a = p && p.active;
+    RUN.running = !!a;
+    if (a && a.state === 'running') {
+      if (a.label) RUN.label = a.label;
+      // Служебная строка фазы — один раз на сессию. Печатается здесь, а не в startRun:
+      // main отправляет run:state до старта pty, поэтому «── компиляция ──» оказывается
+      // в терминале раньше вывода компилятора (run:data может обогнать ответ invoke).
+      if (a.sessionId && a.sessionId !== RUN.phaseFor) {
+        RUN.phaseFor = a.sessionId;
+        if (a.stepKind === 'build') termWrite('── компиляция ──\r\n');
+      }
+      RUN.status = statusFor(RUN.label, a.stepKind);
       RUN.statusKind = 'run';
     }
     renderTermBar();

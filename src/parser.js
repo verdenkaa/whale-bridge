@@ -1,5 +1,8 @@
 'use strict';
 const { hasPatchMarkers, parsePatch } = require('./patch');
+// tokenizeArgs — общий разбор аргументов командной строки (ТЗ C3 §3.1): один и тот же
+// для маркера &RUN: и для дополнительных аргументов в настройках запуска.
+const { tokenizeArgs } = require('./runlangs');
 // Разбор кодовых блоков: маркер файла в первой строке + эвристики «обрезанного» кода.
 // Не зависит ни от DOM DeepSeek, ни от Electron.
 
@@ -52,21 +55,45 @@ function parseBlock(rawText) {
   const m = matchMarker(lines[i]);
   if (!m) return { ...NONE, marker: null, content: text };
 
-  const p = m[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+  const rawP = m[2].trim();
+  const actionName = (rawP.match(/^(DELETE|MOVE|RUN|CMD)\s*:/i) || [])[1];
+  const opName = actionName ? actionName.toLowerCase() : null;
+  // У файловых маркеров модель иногда оборачивает путь в кавычки или бэктики — срезаем.
+  // У RUN и CMD НЕ срезаем: кавычки там часть синтаксиса («&CMD:echo "a b"»,
+  // «&RUN:main.py "два аргумента"»), а срезанная концевая кавычка сломала бы команду
+  // и превратила бы аргументы в кашу (ТЗ §3.6: «кавычки не срезаются»).
+  const p = opName === 'run' || opName === 'cmd'
+    ? rawP
+    : rawP.replace(/^[`'"]+|[`'"]+$/g, '');
   const body = lines.slice(i + 1).join('\n').replace(/\n+$/, '');
   const content = body === '' ? '' : body + '\n';
   let marker;
-  const action = p.match(/^(DELETE|MOVE)\s*:\s*(.*)$/i);
+  const action = p.match(/^(DELETE|MOVE|RUN|CMD)\s*:\s*([\s\S]*)$/i);
   if (action) {
     const op = action[1].toLowerCase();
+    const rest = action[2];
     if (op === 'delete') {
-      marker = { op: 'delete', path: action[2].trim() };
-    } else {
-      const parts = action[2].split(/\s*->\s*/);
+      marker = { op: 'delete', path: rest.trim() };
+    } else if (op === 'move') {
+      const parts = rest.split(/\s*->\s*/);
       marker = { op: 'move', path: parts[0].trim(), toPath: parts.slice(1).join('->').trim() };
+    } else if (op === 'run') {
+      // Первый токен — путь к файлу проекта (проверяется resolveInProject уже в
+      // proposals), остальные — аргументы командной строки с учётом кавычек.
+      const tokens = tokenizeArgs(rest.trim());
+      marker = { op: 'run', path: tokens.length ? tokens[0] : '', args: tokens.slice(1) };
+    } else {
+      // cmd: командная строка как есть. Путь не резолвится — команда живёт в корне
+      // проекта, но ссылаться может куда угодно: это осознанное действие пользователя.
+      marker = { op: 'cmd', path: null, command: rest.trim() };
     }
   } else {
     marker = { op: m[1] ? 'create' : 'update', path: p };
+  }
+  if (opName === 'run' || opName === 'cmd') {
+    // Тело блока — ввод для stdin, а не текст файла: SEARCH/REPLACE здесь неприменим,
+    // и эвристики «обрезанного кода» тоже (многоточие может быть легитимным вводом).
+    return { ...NONE, marker, content, incomplete: [] };
   }
   if (hasPatchMarkers(body)) {
     const patch = parsePatch(body);

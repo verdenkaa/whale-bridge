@@ -17,7 +17,7 @@ const H = (s) => fileops.sha256(Buffer.from(s, 'utf8'));
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-e-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-ed-'));
-  t.after(() => Promise.all([root, data].map((d) => fs.rm(d, { recursive: true, force: true }))));
+  t.after(() => Promise.all([root, data].map((d) => fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);

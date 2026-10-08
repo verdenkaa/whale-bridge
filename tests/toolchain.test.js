@@ -13,7 +13,7 @@ const { createToolchain, WIN_PATH_EXT } = require('../src/toolchain');
 
 async function mkTmp(t, name) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), name));
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   return dir;
 }
 

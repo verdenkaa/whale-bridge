@@ -66,7 +66,7 @@ test('paths: symlink наружу блокируется', async (t) => {
     // Ссылку снимаем отдельно и без рекурсии: удалять надо саму ссылку, а не то,
     // на что она указывает (для junction на Windows это особенно важно).
     try { await fs.rm(link, { recursive: false, force: true }); } catch { /* уже нет */ }
-    await Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(outside, { recursive: true, force: true })]);
+    await Promise.all([fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }), fs.rm(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })]);
   });
   try {
     await fs.symlink(outside, link, 'dir');
@@ -127,7 +127,7 @@ test('diff: удаление последней строки не превращ
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-proj-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-data-'));
-  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(data, { recursive: true, force: true })]));
+  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }), fs.rm(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })]));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);
@@ -303,7 +303,7 @@ test('удаление и перемещение CP1251-файла не треб
   await fs.writeFile(move, bytes);
 
   const trashDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-trash-cp1251-'));
-  t.after(() => fs.rm(trashDir, { recursive: true, force: true }));
+  t.after(() => fs.rm(trashDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   pm.trash = async (abs) => fs.rename(abs, path.join(trashDir, path.basename(abs)));
 
   pm.ingest(chat, [
@@ -359,7 +359,7 @@ test('proposals: DELETE показывает diff, отправляет файл
   const file = path.join(root, 'old.txt');
   await fs.writeFile(file, 'line 1\nline 2\n');
   const trashed = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-trash-')), 'old.txt');
-  t.after(() => fs.rm(path.dirname(trashed), { recursive: true, force: true }));
+  t.after(() => fs.rm(path.dirname(trashed), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   const oldTrash = pm.trash;
   pm.trash = async (abs) => { await fs.rename(abs, trashed); };
 
@@ -468,7 +468,7 @@ test('toUnifiedDiff: результат принимает git apply', async (t)
   if (!ok) { t.skip('git недоступен'); return; }
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-udiff-'));
-  t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
   execFileSync('git', ['-c', 'core.autocrlf=false', 'init', '-q', '.'], { cwd: dir });
   // Локальный core.autocrlf=true (дефолт Git for Windows) заставлял git apply писать
   // в f.txt CRLF, и проверка формата diff падала на ровном месте: тест обязан проверять

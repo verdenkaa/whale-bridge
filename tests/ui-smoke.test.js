@@ -102,6 +102,7 @@ test('UI: левая панель, режимы редактора, геомет
   const detectCalls = [];
   const pickCalls = [];
   const runSaveCalls = [];
+  const executedCalls = []; // proposal:executed — пометка «выполнено» для карточек &RUN:/&CMD:
   const canned = {
     'state:get': { projects: [PROJECT], chatId: CHAT, project: PROJECT, lastProjectId: 'p1', layout: { leftW: 320, chatW: 420, promptOpen: false, leftTab: 'files' } },
     'proposals:list': proposals,
@@ -715,6 +716,32 @@ test('UI: левая панель, режимы редактора, геомет
   const okStatus = findAll(roots['term-bar'], (e) => e.className === 'term-status ok');
   assert.equal(okStatus.length, 1, 'нулевой код подсвечен');
 
+  // компилируемый язык: первая фаза подписана «Компиляция», а не «Запуск» — процесс
+  // ещё ничего не запускал. Служебная строка печатается по run:state: main отправляет
+  // его до старта pty, поэтому строка оказывается раньше вывода компилятора.
+  canned['run:start'] = { ok: true, sessionId: 'scpp', stepKind: 'build' };
+  ed.activeFileValue = { projectId: 'p1', rel: 'app.cpp', name: 'app.cpp' };
+  termState.writes.length = 0;
+  await click(runBtn);
+  await tick(40);
+  handlers['run:state']({ active: { kind: 'file', label: 'app.cpp', state: 'running', sessionId: 'scpp', step: 0, stepKind: 'build' } });
+  await tick(10);
+  assert.ok(termState.writes.some((w) => w.includes('── компиляция ──')), 'фаза компиляции помечена в терминале');
+  assert.match(text(roots['term-bar']), /Компиляция: app\.cpp/);
+  // вторая фаза — запуск собранного бинарника
+  handlers['run:exit']({ sessionId: 'scpp', code: 0, step: 0, nextStep: { index: 1, kind: 'run' } });
+  await tick(10);
+  assert.match(text(roots['term-bar']), /Запуск: app\.cpp/);
+  // служебная строка фазы — один раз на сессию
+  handlers['run:state']({ active: { kind: 'file', label: 'app.cpp', state: 'running', sessionId: 'scpp', step: 1, stepKind: 'run' } });
+  await tick(10);
+  assert.equal(termState.writes.filter((w) => w.includes('── компиляция ──')).length, 1, 'строка фазы не дублируется');
+  handlers['run:exit']({ sessionId: 'scpp', code: 0, step: 1, reason: null });
+  handlers['run:state']({ active: null });
+  await tick(10);
+  canned['run:start'] = { ok: true, sessionId: 's1' };
+  ed.activeFileValue = { projectId: 'p1', rel: 'main.py', name: 'main.py' };
+
   // «■ Стоп» без процесса — честная ошибка, «📋 Отчёт» — копия в буфер
   await click(btn(roots['term-bar'], '■ Стоп'));
   await tick(30);
@@ -913,6 +940,145 @@ test('UI: левая панель, режимы редактора, геомет
   await tick(60);
   assert.equal(findAll(roots.toast, (e) => e.tag === 'button').length, 0, 'у ошибки без действия кнопки нет');
   canned['run:start'] = { ok: true, sessionId: 's9' };
+
+  // ---------- карточки запуска и команд (этап C3c, ТЗ §2.5) ----------
+  const RUNP = {
+    id: 'run1', kind: 'run', status: 'pending', state: 'run', op: 'run', relPath: 'main.py',
+    args: ['--fast'], lang: 'python', langLabel: 'Python', inputLines: 2, historical: false,
+    warnings: 0, pathFixed: false, exitCode: null, mode: 'full', patchBlocks: 0,
+  };
+  const RUN_MISSING = { ...RUNP, id: 'run2', relPath: 'new.py', state: 'missing-file', args: null, inputLines: 0 };
+  const CMD_SAFE = {
+    id: 'cmd1', kind: 'cmd', status: 'pending', state: 'cmd', op: 'cmd', relPath: null,
+    command: 'grep -rn "Player" src', risk: { level: 'safe', reasons: [] }, inputLines: 0,
+    historical: false, warnings: 0, exitCode: null, mode: 'full', patchBlocks: 0,
+  };
+  const CMD_DANGER = {
+    ...CMD_SAFE, id: 'cmd2', command: 'rmdir /s /q build', inputLines: 1,
+    risk: { level: 'danger', reasons: ['удаление или системная команда: rmdir'] },
+  };
+  const CMD_DONE = { ...CMD_SAFE, id: 'cmd3', command: 'dir', status: 'executed', state: 'executed', exitCode: 0 };
+  const VIEWS = {
+    run1: { ...RUNP, input: '5\nhello', rows: [], rawText: '5\nhello\n', baseText: null, aiBaseText: null },
+    run2: { ...RUN_MISSING, input: '', rows: [] },
+    cmd1: { ...CMD_SAFE, input: '', rows: [] },
+    cmd2: { ...CMD_DANGER, input: 'y', rows: [] },
+    cmd3: { ...CMD_DONE, input: '', rows: [] },
+  };
+  canned['proposals:list'] = [RUNP, RUN_MISSING, CMD_SAFE, CMD_DANGER, CMD_DONE];
+  canned['proposal:get'] = (arg) => VIEWS[arg && arg.id] || null;
+  canned['proposal:executed'] = (arg) => { executedCalls.push(arg); return { ok: true, status: 'executed' }; };
+  handlers['proposals:changed']();
+  await tick(60);
+  await click(leftTab('Предложения'));
+  await tick(40);
+
+  const cards = () => findAll(roots.body, (e) => typeof e.className === 'string' && e.className.startsWith('card run-card'));
+  assert.equal(cards().length, 5, 'карточка на каждое предложение запуска и команды');
+  // ищем карточку точным совпадением команды/пути: 'dir' иначе находится внутри
+  // 'rmdir /s /q build', и проверка попала бы не в ту карточку
+  const cardOf = (id) => {
+    const v = VIEWS[id];
+    return cards().find((c) => {
+      const line = findAll(c, (e) => e.className === 'cmd-line')[0];
+      if (line) return text(line) === v.command;
+      const pth = findAll(c, (e) => e.className === 'path')[0];
+      return !!pth && text(pth).split('  ')[0] === v.relPath;
+    });
+  };
+  const runCard = cardOf('run1');
+  const missCard = cardOf('run2');
+  const safeCard = cardOf('cmd1');
+  const dangerCard = cardOf('cmd2');
+  const doneCard = cardOf('cmd3');
+
+  // заголовки и содержимое
+  assert.match(text(runCard), /▶ Запуск main\.py/);
+  assert.match(text(runCard), /main\.py  --fast/, 'аргументы видны в карточке');
+  assert.match(text(safeCard), /⌘ Команда/);
+  const cmdLine = findAll(safeCard, (e) => e.className === 'cmd-line')[0];
+  assert.equal(cmdLine.tag, 'code', 'команда показана моноширинно');
+  assert.equal(text(cmdLine), 'grep -rn "Player" src');
+
+  // бейджи риска: зелёный «чтение», красный «опасная команда» + баннер с причинами
+  const badge = (card, cls) => findAll(card, (e) => typeof e.className === 'string' && e.className.split(' ').includes(cls))[0];
+  assert.equal(text(badge(safeCard, 'risk-safe')), 'чтение');
+  assert.equal(text(badge(dangerCard, 'risk-danger')), 'опасная команда');
+  const note = findAll(dangerCard, (e) => e.className === 'danger-note')[0];
+  assert.ok(note, 'у опасной команды есть баннер');
+  assert.match(text(note), /Не выполняйте, если не понимаете/);
+  assert.match(text(note), /удаление или системная команда: rmdir/, 'причины перечислены');
+  assert.equal(findAll(safeCard, (e) => e.className === 'danger-note').length, 0, 'у безопасной команды баннера нет');
+
+  // состояния и кнопки
+  assert.match(text(runCard), /Готов к запуску/);
+  assert.match(text(missCard), /Файл ещё не создан/);
+  assert.ok(badge(missCard, 'bad'), 'блокирующее состояние помечено');
+  assert.match(text(doneCard), /Выполнено \(код 0\)/);
+  assert.ok(btn(doneCard, '↻ Повторить'), 'выполненную команду можно повторить');
+  assert.equal(btn(doneCard, 'Отклонить'), undefined, 'у выполненной карточки нет «Отклонить»');
+  assert.ok(btn(runCard, '▶ Запустить') && btn(safeCard, '▶ Выполнить'), 'кнопки запуска на месте');
+
+  // предпросмотр ввода догружается через proposal:get
+  const inputBtn = findAll(runCard, (e) => e.tag === 'button' && text(e).startsWith('ввод:'))[0];
+  assert.equal(text(inputBtn), 'ввод: 2 стр.');
+  await click(inputBtn);
+  await tick(40);
+  const pre = findAll(roots.body, (e) => e.className === 'code run-input')[0];
+  assert.ok(pre, 'ввод раскрыт');
+  assert.equal(text(pre), '5\nhello');
+  const hideBtn = findAll(cards()[0], (e) => e.tag === 'button' && text(e) === 'скрыть ввод')[0];
+  assert.ok(hideBtn, 'предпросмотр можно свернуть');
+  await click(hideBtn);
+  await tick(30);
+
+  // запуск несозданного файла заблокирован подсказкой, сессия не стартует
+  const startsBefore = log.filter(([ch]) => ch === 'run:start').length;
+  await click(btn(cardOf('run2'), '▶ Запустить'));
+  await tick(40);
+  assert.match(text(roots.toast), /Сначала примите предложение, создающее файл/);
+  assert.equal(log.filter(([ch]) => ch === 'run:start').length, startsBefore, 'run:start не отправлен');
+
+  // опасная команда: отказ в подтверждении — запуск не стартует
+  const confirmWas = global.confirm;
+  global.confirm = () => false;
+  await click(btn(cardOf('cmd2'), '▶ Выполнить'));
+  await tick(40);
+  assert.equal(log.filter(([ch]) => ch === 'run:start').length, startsBefore, 'без подтверждения команда не выполняется');
+  // согласие — выполняется, ввод из тела блока уходит в run:start
+  let confirmText = '';
+  global.confirm = (msg) => { confirmText = msg; return true; };
+  canned['run:start'] = { ok: true, sessionId: 'sr1', stepKind: 'run' };
+  await click(btn(cardOf('cmd2'), '▶ Выполнить'));
+  await tick(60);
+  global.confirm = confirmWas;
+  assert.match(confirmText, /Я понимаю риск и хочу выполнить команду/, 'текст подтверждения понятный');
+  const startCmd = log.filter(([ch]) => ch === 'run:start').pop();
+  assert.deepEqual(startCmd[1].target, { kind: 'cmd', command: 'rmdir /s /q build' });
+  assert.equal(startCmd[1].input, 'y', 'ввод из тела блока подставлен');
+  assert.deepEqual(executedCalls[executedCalls.length - 1], { id: 'cmd2' }, 'предложение помечено выполненным со стартом');
+
+  // код возврата дописывается по run:exit
+  handlers['run:exit']({ sessionId: 'sr1', code: 3, step: 0, reason: null });
+  handlers['run:state']({ active: null });
+  await tick(60);
+  const last = executedCalls[executedCalls.length - 1];
+  assert.equal(last.id, 'cmd2');
+  assert.equal(last.exitCode, 3, 'код возврата ушёл в решение «выполнено»');
+
+  // безопасная команда выполняется без подтверждения
+  global.confirm = () => { throw new Error('для безопасной команды подтверждение не спрашивается'); };
+  await click(btn(cardOf('cmd1'), '▶ Выполнить'));
+  await tick(60);
+  global.confirm = confirmWas;
+  const startSafe = log.filter(([ch]) => ch === 'run:start').pop();
+  assert.deepEqual(startSafe[1].target, { kind: 'cmd', command: 'grep -rn "Player" src' });
+  assert.equal(startSafe[1].input, undefined, 'пустое тело блока — ввода нет');
+
+  // «Отклонить» на карточке команды
+  await click(btn(cardOf('cmd1'), 'Отклонить'));
+  await tick(40);
+  assert.ok(log.some(([ch, arg]) => ch === 'proposal:reject' && arg.id === 'cmd1'), 'отклонение отправлено в main');
 
   console.error = origErr;
   assert.deepEqual(errors, []);

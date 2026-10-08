@@ -20,7 +20,7 @@ const CHAT2 = '27b45023-2aba-4a1a-a966-17bbe41926eb';
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-ctx-'));
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-ctxd-'));
-  t.after(() => Promise.all([root, data].map((d) => fs.rm(d, { recursive: true, force: true }))));
+  t.after(() => Promise.all([root, data].map((d) => fs.rm(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))));
   const store = new Store(data);
   await store.load();
   const project = await store.addProject(root);
