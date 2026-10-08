@@ -19,6 +19,18 @@
   let mounted = false;
   let observer = null;
   const pending = []; // то, что пришло до создания xterm (панель ещё не открывали)
+  let lastSize = null;    // {cols, rows} — последний размер, отправленный в main
+  let resizeTimer = null; // дебаунс: всплеск ResizeObserver схлопывается в один fit
+
+  /** Сколько ждём спокойствия перед отправкой размера в main. */
+  const RESIZE_DEBOUNCE_MS = 40;
+
+  /**
+   * Уведомления о фокусе терминала: ConPTY запрашивает у терминала режим 1004, и
+   * xterm.js отвечает '\u001b[I' (фокус получен) / '\u001b[O' (потерян) на каждый клик.
+   * Запущенной программе они не нужны, а в журнале ввода отчёта выглядели как «[I[I1256».
+   */
+  const FOCUS_RE = /\u001b\[[IO]/g;
 
   /**
    * Отправить канал fire-and-forget через локальную ссылку: обвязочные тесты ищут
@@ -57,8 +69,12 @@
     for (const s of pending.splice(0)) term.write(s);
 
     // Набор текста в терминале — это ввод процесса: клавиши уходят в main → pty.
-    // Эхо рисует сам pty, поэтому локально текст не дублируем.
-    term.onData((data) => post('run:input', data));
+    // Эхо рисует сам pty, поэтому локально текст не дублируем. Уведомления о фокусе
+    // отфильтровываются: в pty они не нужны, а журнал ввода отчёта засоряли.
+    term.onData((data) => {
+      const s = typeof data === 'string' ? data.replace(FOCUS_RE, '') : '';
+      if (s) post('run:input', s);
+    });
 
     // Размер: панель тянется разделителем, окно меняется, панель открывается/скрывается.
     // ResizeObserver покрывает все три случая одним наблюдателем.
@@ -69,6 +85,15 @@
     return true;
   }
 
+  /** Отправить размер в main — только если он действительно изменился. */
+  function postResize() {
+    if (!term) return;
+    const size = { cols: term.cols, rows: term.rows };
+    if (lastSize && lastSize.cols === size.cols && lastSize.rows === size.rows) return;
+    lastSize = size;
+    post('run:resize', size);
+  }
+
   /** Подогнать размер xterm под панель и сообщить pty (колонки/строки). */
   function fitTerminal() {
     // Первый fit приходит от открытия панели — здесь же xterm и создаётся
@@ -76,7 +101,12 @@
     // Скрытая панель имеет нулевой размер — fit() бросил бы исключение
     if (!host.clientWidth || !host.clientHeight) return;
     try { fit.fit(); } catch { /* панель в transition или скрыта */ }
-    post('run:resize', { cols: term.cols, rows: term.rows });
+    // Холостой resize не безвреден: ConPTY на изменение геометрии перерисовывает экран
+    // из своего буфера, а у только что созданного pty он пуст — программа, ждущая ввода,
+    // «стирала» видимый терминал. Размер уходит в main только изменившимся и не чаще
+    // раза в RESIZE_DEBOUNCE_MS: перетаскивание разделителя даёт десятки событий подряд.
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(postResize, RESIZE_DEBOUNCE_MS);
   }
 
   /** Вывод процесса (run:data) и локальные служебные строки идут одним путём. */
@@ -87,9 +117,17 @@
     term.write(s);
   }
 
+  /**
+   * Полная очистка: экран, буфер прокрутки и курсор в начало (RIS, как '\x1bc').
+   * term.clear() в xterm.js оставляет текущую строку первой — а на ней как раз
+   * остаётся хвост предыдущего вывода без перевода строки, который следующий запуск
+   * продолжает писать. Пользователь ждёт от «🗑 Очистить» и от старта нового прогона
+   * чистого экрана, поэтому reset().
+   */
   function clear() {
     if (!ensure()) { pending.length = 0; return; }
-    term.clear();
+    term.reset();
+    pending.length = 0;
   }
 
   function focus() {

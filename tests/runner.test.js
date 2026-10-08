@@ -11,6 +11,13 @@ const path = require('path');
 
 const { createRunner, OUTPUT_LIMIT } = require('../src/runner');
 
+/**
+ * Ожидание пути, собранного раннером: пути он собирает модулем ЦЕЛЕВОЙ платформы
+ * (path.win32/path.posix из DI), а не хостовым path, — иначе тесты вели бы себя
+ * по-разному на Windows и в песочнице.
+ */
+const joinFor = (platform, ...parts) => (platform === 'win32' ? path.win32 : path.posix).join(...parts);
+
 // ---------- стенд ----------
 
 /** Фейковый pty: данные и выход вызываются тестом вручную. */
@@ -69,6 +76,9 @@ async function setup(t, cfg) {
   };
   const runner = createRunner({
     platform: c.platform || 'linux',
+    // ComSpec внедряется: на Windows он есть всегда, в песочнице нет, а поведение
+    // cmd-сессии обязано быть одинаковым на любой машине
+    comSpec: c.comSpec,
     spawnPty: (opts) => {
       if (c.spawnFails) throw new Error('spawn отказал');
       const p = new FakePty({ nextPid: 1000 + ptys.length }, opts);
@@ -199,9 +209,11 @@ test('runner: cpp — компиляция, разделитель, запуск
 
   s.ptys[0].emit('warning: ...\r\n');
   s.ptys[0].exit(0);
-  // второй шаг стартовал в том же терминале: литеральный exe бинарника
+  // второй шаг стартовал в том же терминале: бинарник из папки артефактов.
+  // Путь абсолютный: относительный '.ide_build/app' Windows разрешила бы относительно
+  // папки Electron, а не cwd процесса, — запуск не нашёл бы свежесобранный файл.
   assert.equal(s.ptys.length, 2);
-  assert.equal(s.ptys[1].opts.exe, '.ide_build/app');
+  assert.equal(s.ptys[1].opts.exe, joinFor('linux', s.root, '.ide_build/app'));
   assert.deepEqual(s.ptys[1].opts.args, []);
   // run:exit первого шага несёт nextStep — по нему renderer печатает «── запуск ──»
   const stepExits = s.exitsOf(r.sessionId).filter((e) => e.nextStep);
@@ -213,6 +225,21 @@ test('runner: cpp — компиляция, разделитель, запуск
   const final = s.exitsOf(r.sessionId).filter((e) => !e.nextStep);
   assert.equal(final.length, 1);
   assert.equal(final[0].code, 0);
+});
+
+test('runner: cpp на win32 — суффикс .exe в плане и в запуске бинарника', async (t) => {
+  // Платформа влияет на план (exeSuffix), поэтому она обязана доходить из раннера до
+  // planRun: без этого на Windows собирался и запускался '.ide_build/app' без '.exe'.
+  const s = await setup(t, { platform: 'win32' });
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'app.cpp' } });
+  assert.equal(r.ok, true);
+  assert.deepEqual(s.ptys[0].opts.args, ['app.cpp', '-o', '.ide_build/app.exe']);
+  s.ptys[0].exit(0);
+  assert.equal(s.ptys.length, 2);
+  assert.equal(s.ptys[1].opts.exe, joinFor('win32', s.root, '.ide_build/app.exe'));
+  // отчёт показывает команду читаемо: артефакт — относительным путём
+  s.ptys[1].exit(0);
+  assert.match(s.runner.report().text, /\.ide_build[/\\]app\.exe/);
 });
 
 test('runner: провал компиляции обрывает сессию — второй шаг не выполняется', async (t) => {
@@ -379,6 +406,19 @@ test('runner: resize доходит до pty с санитарными рамк�
   assert.deepEqual(s.ptys[0].resizes[2], [80, 24], 'мусор — к дефолту');
 });
 
+test('runner: холостой resize не доходит до pty', async (t) => {
+  // ConPTY на любое изменение геометрии перерисовывает экран из своего буфера, а у
+  // нового pty он пуст: программа, ждущая ввода, «стирала» терминал. Сессия стартует
+  // с размером из run:start, поэтому повтор того же размера обязан быть проигнорирован.
+  const s = await setup(t);
+  await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'main.py' }, cols: 100, rows: 30 });
+  assert.equal(s.ptys[0].opts.cols, 100);
+  s.runner.resize(100, 30);
+  assert.deepEqual(s.ptys[0].resizes, [], 'тот же размер — pty не дёргаем');
+  s.runner.resize(100, 31);
+  assert.deepEqual(s.ptys[0].resizes, [[100, 31]], 'настоящее изменение дошло');
+});
+
 test('runner: отчёт — файл, команда, папка, код, ввод и вывод', async (t) => {
   const s = await setup(t);
   await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'main.py' }, input: '5' });
@@ -387,7 +427,9 @@ test('runner: отчёт — файл, команда, папка, код, вв�
   const rep = s.runner.report();
   assert.equal(rep.ok, true);
   assert.match(rep.text, /Файл: main\.py/);
-  assert.match(rep.text, /Команда: \/bin\/fakepython -u main\.py/);
+  // в отчёте команда читаемая: путь к инструменту укорочен до имени (полный — в настройках)
+  assert.match(rep.text, /Команда: fakepython -u main\.py/);
+  assert.ok(!/Команда: .*[/\\]fakepython/.test(rep.text), 'полного пути к инструменту в отчёте нет');
   assert.match(rep.text, new RegExp('Папка проекта: ' + s.root.replace(/[\\/]/g, '[\\\\/]')));
   assert.match(rep.text, /Код возврата: 0/);
   assert.match(rep.text, /Ввод:/);
@@ -411,8 +453,10 @@ test('runner: cmd-сессия — оболочка платформы, кома
   assert.match(rep.text, /Команда: grep -rn "Player" src/);
   assert.ok(!rep.text.includes('Файл:'), 'у cmd-сессии нет строки «Файл»');
 
-  // windows: всегда cmd.exe (решение пользователя — PowerShell не внедряем)
-  const w = await setup(t, { platform: 'win32' });
+  // windows: всегда cmd.exe (решение пользователя — PowerShell не внедряем).
+  // ComSpec обнулён, чтобы ожидание не зависело от машины: на Windows он есть всегда,
+  // в песочнице его нет, а оболочка обязана быть одной и той же.
+  const w = await setup(t, { platform: 'win32', comSpec: '' });
   await w.runner.start({ project: w.project, target: { kind: 'cmd', command: 'dir' } });
   assert.equal(w.ptys[0].opts.exe, 'cmd.exe');
   assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'dir']);
@@ -421,6 +465,19 @@ test('runner: cmd-сессия — оболочка платформы, кома
   const bad = await s.runner.start({ project: s.project, target: { kind: 'cmd', command: '   ' } });
   assert.equal(bad.ok, false);
   assert.equal(bad.reason, 'empty-command');
+});
+
+test('runner: cmd на win32 берёт cmd.exe из ComSpec, на posix — игнорирует его', async (t) => {
+  // ComSpec надёжнее поиска cmd.exe в PATH: это полный путь к командному процессору.
+  const comSpec = 'C:\\WINDOWS\\system32\\cmd.exe';
+  const w = await setup(t, { platform: 'win32', comSpec });
+  await w.runner.start({ project: w.project, target: { kind: 'cmd', command: 'dir' } });
+  assert.equal(w.ptys[0].opts.exe, comSpec);
+  assert.deepEqual(w.ptys[0].opts.args, ['/d', '/s', '/c', 'dir']);
+  // 'C:\WINDOWS\…' содержит каталог и уже абсолютен — раннер его не пересобирает
+  const p = await setup(t, { platform: 'linux', comSpec });
+  await p.runner.start({ project: p.project, target: { kind: 'cmd', command: 'ls' } });
+  assert.equal(p.ptys[0].opts.exe, '/bin/sh', 'чужой ComSpec на posix не подставляется');
 });
 
 test('runner: данные и события чужой/устаревшей сессии не смешиваются', async (t) => {

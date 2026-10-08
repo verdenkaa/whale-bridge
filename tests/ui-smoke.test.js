@@ -151,14 +151,15 @@ test('UI: левая панель, режимы редактора, геомет
   global.self = global.window; // UMD-обёртки (xterm, runlangs) в браузере используют self
 
   // Имитация xterm.js: пишущийся «терминал» и считаемые fit-размеры. Настоящий
-  // @xterm/xterm требует DOM и canvas — здесь достаточно контракта (write/clear/
+  // @xterm/xterm требует DOM и canvas — здесь достаточно контракта (write/clear/reset/
   // focus/onData/loadAddon/cols/rows), чтобы проверить СВЯЗИ app.js и terminal.js.
-  const termState = { writes: [], clears: 0, focuses: 0, dataCb: null, cols: 100, rows: 30 };
+  const termState = { writes: [], clears: 0, resets: 0, focuses: 0, dataCb: null, cols: 100, rows: 30 };
   global.window.Terminal = class {
     constructor() { this.cols = termState.cols; this.rows = termState.rows; }
     open() {}
     write(s) { termState.writes.push(s); }
     clear() { termState.clears++; }
+    reset() { termState.resets++; }
     focus() { termState.focuses++; }
     onData(cb) { termState.dataCb = cb; }
     loadAddon() {}
@@ -612,10 +613,15 @@ test('UI: левая панель, режимы редактора, геомет
   roots['hsplit-term'].classList.add('hidden');
   assert.equal(hidden(roots['term-panel']), true, 'терминал закрыт до первого действия');
   assert.equal(hidden(roots['hsplit-term']), true);
+  // Хост терминала получает размер: без него fit() не вызывается вовсе, а нам нужно
+  // проверить, что размер уходит в main ровно один раз (холостой resize перерисовывает
+  // экран ConPTY и «стирает» терминал у программы, ждущей ввода).
+  roots['term-host'].clientWidth = 600;
+  roots['term-host'].clientHeight = 200;
 
   // кнопка «Терминал» в шапке открывает панель и сохраняет раскладку
   await click(btn(roots.head, 'Терминал'));
-  await tick(40);
+  await tick(60);
   assert.equal(hidden(roots['term-panel']), false, 'панель терминала открыта');
   assert.equal(hidden(roots['hsplit-term']), false);
   save = log.filter(([ch]) => ch === 'layout:save').pop();
@@ -626,19 +632,37 @@ test('UI: левая панель, режимы редактора, геомет
   const xtermCss = global.document.querySelector('#xterm-css');
   assert.match(xtermCss.getAttribute('href'), /xterm\.css$/);
 
+  // Размер терминала уходит в main один раз: повторный fit с той же геометрией
+  // run:resize не порождает. Холостой resize не безвреден — ConPTY перерисовывает экран
+  // из своего буфера, и программа, ждущая ввода, «стирала» видимый терминал.
+  const resizes = () => sent.filter(([ch]) => ch === 'run:resize').map(([, v]) => v);
+  assert.deepEqual(resizes(), [{ cols: 100, rows: 30 }], 'размер отправлен один раз');
+  global.window.WhaleTerminal.fit();
+  global.window.WhaleTerminal.fit();
+  await tick(80);
+  assert.deepEqual(resizes(), [{ cols: 100, rows: 30 }], 'тот же размер повторно не отправляется');
+
   // кнопка «▶ Запустить» передаётся в строку вкладок редактора
   assert.ok(Array.isArray(ed.tabsExtras) && ed.tabsExtras.length === 1, 'кнопка запуска добавлена во вкладки');
   const runBtn = ed.tabsExtras[0];
   assert.equal(text(runBtn), '▶ Запустить');
 
-  // запуск активного файла: сохранение dirty-буферов → run:start → статус в toolbar'е
+  // запуск активного файла: очистка терминала → сохранение dirty-буферов → run:start →
+  // статус в toolbar'е. Экран чистится ДО старта (каждый прогон начинается с чистого
+  // терминала), иначе вывод процесса успел бы прийти раньше очистки.
   ed.activeFileValue = { projectId: 'p1', rel: 'main.py', name: 'main.py' };
+  const resetsBefore = termState.resets;
   await click(runBtn);
   await tick(60);
+  assert.equal(termState.resets, resetsBefore + 1, 'терминал очищен перед запуском');
   const startCall = log.filter(([ch]) => ch === 'run:start').pop();
   assert.ok(startCall, 'run:start отправлен');
   assert.deepEqual(startCall[1].target, { kind: 'file', rel: 'main.py' });
   assert.equal(startCall[1].projectId, 'p1');
+  // геометрия передаётся сразу со стартом: pty рождается нужного размера, и первый
+  // resize после открытия панели становится не нужен
+  assert.equal(startCall[1].cols, 100);
+  assert.equal(startCall[1].rows, 30);
   assert.match(text(roots['term-bar']), /Запуск: main\.py/);
 
   // вывод процесса приходит событием run:data и попадает в xterm как есть
@@ -669,11 +693,12 @@ test('UI: левая панель, режимы редактора, геомет
   assert.ok(log.some(([ch]) => ch === 'run:copy-report'));
   assert.match(text(roots.toast), /Отчёт скопирован/);
 
-  // «🗑 Очистить» очищает xterm
-  const clearsBefore = termState.clears;
+  // «🗑 Очистить» очищает xterm целиком: reset(), а не clear() — clear() оставляет
+  // текущую строку, а на ней как раз лежит хвост вывода без перевода строки
+  const resetsBefore2 = termState.resets;
   await click(btn(roots['term-bar'], '🗑 Очистить'));
   await tick(20);
-  assert.equal(termState.clears, clearsBefore + 1);
+  assert.equal(termState.resets, resetsBefore2 + 1);
 
   // повторный запуск: процесс идёт — «■ Стоп» отправляет run:stop
   canned['run:start'] = { ok: true, sessionId: 's2' };
@@ -710,6 +735,15 @@ test('UI: левая панель, режимы редактора, геомет
   sent.length = 0;
   termState.dataCb('x\r');
   assert.deepEqual(sent.filter(([ch]) => ch === 'run:input').map(([, v]) => v), ['x\r']);
+
+  // Уведомления о фокусе ('\x1b[I' / '\x1b[O') в pty не уходят: ConPTY запрашивает
+  // режим 1004, xterm.js отвечает на каждый клик, а в отчёте это выглядело как «[I[I1256»
+  sent.length = 0;
+  termState.dataCb('\u001b[I');
+  termState.dataCb('\u001b[O');
+  assert.deepEqual(sent.filter(([ch]) => ch === 'run:input'), [], 'фокус-события отфильтрованы');
+  termState.dataCb('\u001b[I12\u001b[O');
+  assert.deepEqual(sent.filter(([ch]) => ch === 'run:input').map(([, v]) => v), ['12'], 'полезный ввод проходит');
 
   // разделитель высоты терминала: тянем вверх на 60px — панель выше
   const spt = roots['hsplit-term'];

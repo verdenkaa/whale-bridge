@@ -132,6 +132,7 @@
     status: '',      // подпись состояния в панели
     statusKind: '',  // '' | 'run' | 'ok' | 'err' — цвет подписи
     lastTarget: null, // {kind, rel?, command?} — для кнопки «↻ Повторить»
+    restarting: false, // идёт перезапуск: старую сессию убивает новый запуск, а не «■ Стоп»
   };
 
   function termPanel() { return $('#term-panel'); }
@@ -239,7 +240,17 @@
   async function startRun(target, input) {
     await openTerm();
     const t = window.WhaleTerminal;
-    if (t) t.fit();
+    if (t) {
+      t.fit();
+      // Каждый прогон начинается с чистого экрана (решение пользователя): хвост
+      // предыдущего вывода — особенно без перевода строки — не смешивается с новым.
+      // Чистим ДО run:start: вывод процесса может прийти раньше, чем разрешится invoke.
+      t.clear();
+    }
+    // Перезапуск: если процесс ещё идёт, main убьёт его внутри run:start и пришлёт
+    // run:exit(reason:'stopped') по старой сессии — флаг говорит обработчику, что это
+    // не пользовательский «■ Стоп».
+    RUN.restarting = !!RUN.running;
     RUN.lastTarget = { kind: target.kind, rel: target.rel, command: target.command, input: input || '' };
     const size = t && t.size ? t.size() : null;
     const r = await call('run:start', {
@@ -248,6 +259,7 @@
       input: input || undefined,
       cols: size ? size.cols : undefined, rows: size ? size.rows : undefined,
     });
+    RUN.restarting = false;
     if (!r) return; // ошибка уже показана тостом (call)
     if (!r.ok) {
       if (r.message) termWrite(r.message + '\r\n');
@@ -1917,8 +1929,13 @@
   api.on('run:exit', (p) => {
     if (!p) return;
     const mine = !RUN.sessionId || !p.sessionId || p.sessionId === RUN.sessionId;
-    // Перезапуск одной кнопкой: предыдущий процесс остановлен — печатаем разделитель
-    if (p.reason === 'stopped' && mine && RUN.running) termWrite('\r\n── предыдущий процесс остановлен ──\r\n');
+    // Перезапуск одной кнопкой: старую сессию убил новый запуск. Экран к этому моменту
+    // уже очищен, поэтому печатаем одну понятную строку и не трогаем статус — его
+    // поставит новая сессия (иначе мелькнул бы «Код возврата: -1»).
+    if (mine && RUN.restarting && p.reason === 'stopped') {
+      termWrite('── предыдущий процесс остановлен ──\r\n');
+      return;
+    }
     if (!mine) return;
     if (p.nextStep) { // двухшаговый план: компиляция успешна, дальше запуск (§2.2, шаг 5)
       termWrite('\r\n── запуск ──\r\n');

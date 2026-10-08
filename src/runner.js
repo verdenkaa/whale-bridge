@@ -7,7 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const runlangs = require('./runlangs');
-const { buildReport, createRing } = require('./runfmt');
+const { buildReport, createRing, shortToolName } = require('./runfmt');
 
 const OUTPUT_LIMIT = 4 * 1024 * 1024; // кольцевой буфер вывода на сессию, 4 МБ
 const INPUT_LIMIT = 64 * 1024;        // stdin из предложения — не больше 64 КБ
@@ -21,6 +21,16 @@ function createRunner(deps) {
   const getRunConfig = d.getRunConfig || (() => ({}));
   const toolchain = d.toolchain || null;
   const fsx = d.fs || fs;
+  // Платформа одна на весь раннер и всегда из DI (с честным запасом на хост):
+  // от неё зависят суффикс .exe в плане компиляции, разделители путей и оболочка
+  // для &CMD:. Читать process.platform по месту нельзя — иначе на Windows тесты,
+  // которым внедрён 'linux', получают поведение боевой машины (так и было).
+  const platform = d.platform || process.platform;
+  const isWin = platform === 'win32';
+  const pth = isWin ? path.win32 : path.posix;
+  // ComSpec — путь к cmd.exe из окружения Windows. Внедряется, чтобы тест не зависел
+  // от машины: на POSIX его просто нет, а на Windows он есть всегда.
+  const comSpec = d.comSpec === undefined ? process.env.ComSpec : d.comSpec;
   const limits = d.limits || {};
   const maxOutputBytes = Number.isFinite(limits.maxOutputBytes) && limits.maxOutputBytes > 0
     ? limits.maxOutputBytes : OUTPUT_LIMIT;
@@ -65,8 +75,22 @@ function createRunner(deps) {
   function startStep(session, index) {
     const step = session.plan.steps[index];
     session.step = index;
-    const exe = step.exe || session.exes[step.tool];
     const cwd = session.cwd;
+    // Исполняемый файл шага с каталогом в пути обязан быть абсолютным: на Windows
+    // CreateProcess ищет относительный путь относительно текущей папки РОДИТЕЛЯ
+    // (Electron), а не той, что передана в cwd, — второй шаг компилируемых языков
+    // ('.ide_build/app.exe') просто не находился. Голые имена ('cmd.exe' из запасного
+    // пути planShell) не трогаем: их Windows находит в PATH/System32 сам, а превращение
+    // в '<проект>\cmd.exe' только сломало бы запуск команд.
+    // В отчёте и в терминале пути остаются короткими: командная строка собирается отдельно.
+    const rawExe = step.exe || session.exes[step.tool] || '';
+    if (!rawExe) {
+      session.forced = 'spawn-failed';
+      session.spawnError = 'Не удалось определить исполняемый файл для шага запуска';
+      finish(session, -1);
+      return;
+    }
+    const exe = !pth.isAbsolute(rawExe) && /[\\/]/.test(rawExe) ? pth.join(cwd, rawExe) : rawExe;
     const env = Object.assign({}, process.env);
     if (session.plan.env) {
       for (const [k, v] of Object.entries(session.plan.env)) env[k] = String(v).replace('{root}', cwd);
@@ -203,6 +227,7 @@ function createRunner(deps) {
       nodeMajor = tools.node.version.major;
     }
     const plan = runlangs.planRun(lang.id, rel, {
+      platform,
       args: runlangs.tokenizeArgs(runCfg.args && runCfg.args[lang.id] ? runCfg.args[lang.id] : ''),
       fqcn: lang.id === 'java' ? runlangs.javaClassFqn(sourceText, base) : undefined,
       nodeMajor,
@@ -257,8 +282,10 @@ function createRunner(deps) {
       if (!cmd) return { ok: false, reason: 'empty-command', message: 'Пустая команда' };
       label = cmd;
       commandLine = cmd;
-      const shell = runlangs.planShell(cmd, d.platform || process.platform);
-      if (process.platform === 'win32' && process.env.ComSpec) shell.exe = process.env.ComSpec;
+      const shell = runlangs.planShell(cmd, platform);
+      // ComSpec — настоящий путь к cmd.exe ('C:\WINDOWS\system32\cmd.exe'): надёжнее,
+      // чем искать cmd.exe в PATH. Берётся только для целевой Windows-платформы.
+      if (isWin && comSpec) shell.exe = comSpec;
       plan = { steps: [{ kind: 'run', tool: null, exe: shell.exe, args: shell.args }], env: null, outDir: null };
       exes = {};
     } else if (target.kind === 'file') {
@@ -289,8 +316,14 @@ function createRunner(deps) {
       plan = prepared.plan;
       exes = prepared.exes;
       label = rel;
+      // Командная строка для отчёта — читаемой: путь к инструменту укорачивается до имени
+      // ('C:\…\python.exe' → 'python'), а артефакт сборки остаётся относительным
+      // ('.ide_build/app.exe'). Полный путь к инструменту виден в Настройках → Запуск.
       commandLine = plan.steps
-        .map((s) => [s.exe || exes[s.tool] || s.tool, ...(s.args || [])].join(' '))
+        .map((s) => [
+          s.exe || shortToolName(exes[s.tool] || s.tool, platform),
+          ...(s.args || []),
+        ].join(' '))
         .join('  →  ');
     } else {
       return { ok: false, reason: 'bad-target', message: 'Неизвестный тип запуска' };
@@ -359,6 +392,11 @@ function createRunner(deps) {
     };
     const c = norm(cols, 80);
     const r = norm(rows, 24);
+    // Холостой resize не безвреден: ConPTY на каждое изменение геометрии перерисовывает
+    // экран из своего буфера, а в буфере нового pty пусто — программа, ждущая ввода,
+    // «стирала» видимый терминал. Renderer дедуплицирует размер со своей стороны,
+    // здесь та же страховка со стороны main (и защита от чужих вызовов).
+    if (c === s.cols && r === s.rows) return;
     s.cols = c; s.rows = r;
     try { s.pty.resize(c, r); } catch { /* pty мог завершиться */ }
   }

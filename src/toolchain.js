@@ -21,11 +21,17 @@ function createToolchain(deps) {
   const isFile = d.isFile || ((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
   const exec = d.execFile || execFile;
   const pathSep = isWin ? ';' : ':';
-  // Пути собираем разделителем целевой платформы, а не хоста: поведение win32-режима
-  // одинаково на любой ОС (и проверяемо тестами из-под Linux/macOS).
+  // Все операции с путями — модулем ЦЕЛЕВОЙ платформы (path.win32/path.posix), а не
+  // хостовой path: иначе path.normalize('/usr/bin') на Windows превращает posix-путь в
+  // '\usr\bin', и тесты (а вместе с ними и поведение) начинают зависеть от того, где
+  // запущен сам тест. На боевой платформе это то же самое: win32-режим = path.win32.
+  const pth = isWin ? path.win32 : path.posix;
+  // Соединяем каталог и имя без удвоения разделителя: в PATH Windows сплошь и рядом
+  // встречаются записи с хвостовой косой ('C:\Python312\'), и 'C:\Python312\\python.exe'
+  // в отчёте и настройках выглядело бы опечаткой (NTFS лишнюю косую прощает, но люди нет).
   const join = isWin
-    ? (a, b) => a + '\\' + b
-    : (a, b) => path.join(a, b);
+    ? (a, b) => (/[\\/]$/.test(a) ? a + b : a + '\\' + b)
+    : (a, b) => (a.endsWith('/') ? a + b : a + '/' + b);
 
   /**
    * Аналог which: перебор PATH по кандидатам (порядок дескриптора сохраняется).
@@ -39,7 +45,10 @@ function createToolchain(deps) {
     const dirs = String(pathVar || '').split(pathSep).filter(Boolean);
     if (isWin) dirs.unshift('.'); // cmd.exe ищет и в текущей папке
     const exts = isWin
-      ? String(e.PATHEXT || WIN_PATH_EXT).split(';').filter(Boolean)
+      // Расширение берём в нижнем регистре: NTFS регистронезависима, а найденный путь
+      // потом виден пользователю (отчёт, настройки) — 'python.EXE' из PATHEXT выглядит
+      // чужеродно рядом с 'python.exe'.
+      ? String(e.PATHEXT || WIN_PATH_EXT).split(';').filter(Boolean).map((x) => x.toLowerCase())
       : [''];
     const hits = [];
     for (const name of names || []) {
@@ -125,7 +134,9 @@ function createToolchain(deps) {
         let entry = null;
         let brokenManual = false;
         if (manual) {
-          const manualExe = path.isAbsolute(manual) ? manual : path.resolve(manual);
+          // Абсолютность и разрешение относительного пути — правилами целевой платформы:
+          // 'C:\tools\python.exe' не является абсолютным путём для path.posix, и наоборот.
+          const manualExe = pth.isAbsolute(manual) ? manual : pth.resolve(manual);
           if (isFile(manualExe)) {
             // Ручной путь всегда побеждает автопоиск
             entry = {

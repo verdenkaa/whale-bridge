@@ -8,9 +8,43 @@
  * (заголовок окна, гиперссылки) и одиночный ESC. xterm их отрисовывает, а в отчёте
  * для чата они превратились бы в нечитаемый мусор.
  */
-const ANSI_RE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-Z\\-_]/g;
+const ANSI_RE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[NO][@-~]|\u001b[@-Z\\-_]/g;
 
 const stripAnsi = (s) => (typeof s === 'string' ? s.replace(ANSI_RE, '') : '');
+
+/**
+ * Управляющие символы, которым в отчёте не место: всё из C0 кроме табуляции (\t),
+ * перевода строки (\n) и возврата каретки (\r — обрабатывается отдельно), плюс DEL.
+ * Сюда попадают, например, Ctrl+C (\u0003) и остатки стрелок после снятия ESC-последовательностей.
+ */
+const CTRL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/**
+ * Ввод для отчёта. Три вещи, которые ломали читаемость:
+ *   1. ConPTY запрашивает у терминала уведомления о фокусе (режим 1004), xterm.js
+ *      отвечает '\u001b[I' / '\u001b[O' — в журнале ввода это выглядело как «[I[I1256»;
+ *   2. каждое нажатие Enter приходит как '\r', и без перевода в '\n' строки ввода
+ *      склеивались в одну ('12' + '56' → '1256');
+ *   3. прочие управляющие символы (DEL от Backspace, Ctrl+C) в чате нечитаемы.
+ * CRLF нормализуется к LF, хвостовые переводы строк убирает вызывающий.
+ */
+function cleanInput(text) {
+  const s = typeof text === 'string' ? text : '';
+  return stripAnsi(s).replace(/\r\n?/g, '\n').replace(CTRL_RE, '');
+}
+
+/**
+ * Короткое имя инструмента для отчёта: 'C:\Python312\python.exe' → 'python',
+ * '/usr/bin/gcc' → 'gcc'. На Windows суффикс .exe снимается — в строке, которую
+ * пользователь вставляет в чат, он только шумит. Артефакты сборки сюда не попадают:
+ * их раннер показывает относительным путём ('.ide_build/app.exe').
+ */
+function shortToolName(exe, platform) {
+  const raw = typeof exe === 'string' ? exe : (exe == null ? '' : String(exe));
+  if (!raw) return '';
+  const base = raw.split(/[\\/]/).pop();
+  return platform === 'win32' ? base.replace(/\.exe$/i, '') : base;
+}
 
 /** Сколько хвоста вывода попадает в отчёт (~200 КБ, ТЗ §2.3). */
 const REPORT_OUTPUT_LIMIT = 200_000;
@@ -35,9 +69,9 @@ function buildReport(s) {
   if (typeof src.exitCode === 'number') lines.push('Код возврата: ' + src.exitCode);
   else if (src.running) lines.push('Код возврата: процесс ещё выполняется');
 
-  const inputText = Array.isArray(src.inputLog) ? src.inputLog.join('') : String(src.inputLog || '');
+  const inputText = cleanInput(Array.isArray(src.inputLog) ? src.inputLog.join('') : String(src.inputLog || ''));
   if (inputText.trim()) {
-    lines.push('', 'Ввод:', inputText.replace(/\r/g, '').replace(/\n+$/, ''));
+    lines.push('', 'Ввод:', inputText.replace(/\n+$/, ''));
   }
 
   // pty отдаёт CRLF — в отчёте для чата переводы строк нормализуются к LF
@@ -90,4 +124,4 @@ function createRing(maxBytes) {
   };
 }
 
-module.exports = { stripAnsi, buildReport, createRing, REPORT_OUTPUT_LIMIT, ANSI_RE };
+module.exports = { stripAnsi, cleanInput, shortToolName, buildReport, createRing, REPORT_OUTPUT_LIMIT, ANSI_RE, CTRL_RE };

@@ -61,11 +61,19 @@ test('paths: нормализация и различие scripts/player.gd vs e
 test('paths: symlink наружу блокируется', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-root-'));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'aiws-out-'));
-  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(outside, { recursive: true, force: true })]));
+  const link = path.join(root, 'link');
+  t.after(async () => {
+    // Ссылку снимаем отдельно и без рекурсии: удалять надо саму ссылку, а не то,
+    // на что она указывает (для junction на Windows это особенно важно).
+    try { await fs.rm(link, { recursive: false, force: true }); } catch { /* уже нет */ }
+    await Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(outside, { recursive: true, force: true })]);
+  });
   try {
-    await fs.symlink(outside, path.join(root, 'link'), 'dir');
+    await fs.symlink(outside, link, 'dir');
   } catch {
-    return t.skip('symlink недоступен');
+    // Windows без режима разработчика не даёт создавать symlink, но junction для папок
+    // разрешён всем — для проверки блокировки выхода за проект этого достаточно.
+    try { await fs.symlink(outside, link, 'junction'); } catch { return t.skip('symlink недоступен'); }
   }
   const r = await resolveInProject(root, 'link/evil.txt');
   assert.equal(r.ok, false);
@@ -461,12 +469,17 @@ test('toUnifiedDiff: результат принимает git apply', async (t)
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wb-udiff-'));
   t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
-  execFileSync('git', ['init', '-q', '.'], { cwd: dir });
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'init', '-q', '.'], { cwd: dir });
+  // Локальный core.autocrlf=true (дефолт Git for Windows) заставлял git apply писать
+  // в f.txt CRLF, и проверка формата diff падала на ровном месте: тест обязан проверять
+  // наш формат, а не настройки git разработчика. Отключаем преобразование и конфигом,
+  // и атрибутом — двойная страховка.
+  await fs.writeFile(path.join(dir, '.gitattributes'), '* -text\n');
   const old = Array.from({ length: 30 }, (_, i) => `s${i + 1}`).join('\n') + '\n';
   const next = old.replace('s3', 'S3') + 's31\n';
   await fs.writeFile(path.join(dir, 'f.txt'), old);
   const patch = 'diff --git a/f.txt b/f.txt\n' + toUnifiedDiff(old, next, { oldLabel: 'a/f.txt', newLabel: 'b/f.txt' });
   await fs.writeFile(path.join(dir, 'd.patch'), patch);
-  execFileSync('git', ['apply', 'd.patch'], { cwd: dir });
+  execFileSync('git', ['-c', 'core.autocrlf=false', 'apply', 'd.patch'], { cwd: dir });
   assert.equal(await fs.readFile(path.join(dir, 'f.txt'), 'utf8'), next);
 });

@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { stripAnsi, buildReport, createRing, REPORT_OUTPUT_LIMIT } = require('../src/runfmt');
+const { stripAnsi, cleanInput, shortToolName, buildReport, createRing, REPORT_OUTPUT_LIMIT } = require('../src/runfmt');
 
 const ESC = '\u001b';
 
@@ -27,6 +27,37 @@ test('runfmt: stripAnsi — цвета компиляторов, курсор, �
   // мусор на входе
   assert.equal(stripAnsi(null), '');
   assert.equal(stripAnsi(42), '');
+});
+
+test('runfmt: cleanInput — фокус-события ConPTY, строки ввода и управляющие символы', () => {
+  // Реальный случай с Windows: ConPTY запрашивает у терминала уведомления о фокусе
+  // (режим 1004), xterm.js отвечает '\x1b[I' на каждый клик по терминалу, и в отчёте
+  // ввод выглядел как «[I[I1256» — две строки '12' и '56', склеенные без перевода.
+  assert.equal(cleanInput(`${ESC}[I${ESC}[I12\r56\r`), '12\n56\n');
+  // фокус-событие в середине набора текста
+  assert.equal(cleanInput(`1${ESC}[I2\r`), '12\n');
+  // ESC-последовательности стрелок и функциональных клавиш (CSI и SS3) не оставляют хвостов
+  const arrows = `${ESC}[A` + `${ESC}OA` + 'текст\r';
+  assert.equal(cleanInput(arrows), 'текст\n');
+  // Backspace (DEL) и Ctrl+C в чате нечитаемы — убираются
+  assert.equal(cleanInput('ab\u007f\u0003c\r'), 'abc\n');
+  // CRLF нормализуется к LF, табуляция и переводы строк сохраняются
+  assert.equal(cleanInput('a\tb\r\nc'), 'a\tb\nc');
+  // мусор на входе
+  assert.equal(cleanInput(null), '');
+  assert.equal(cleanInput(42), '');
+});
+
+test('runfmt: shortToolName — имя инструмента без каталога, .exe на Windows снимается', () => {
+  // реальный путь из отчёта пользователя
+  assert.equal(shortToolName('C:\\Users\\nikit\\AppData\\Local\\Programs\\Python\\Python312\\python.EXE', 'win32'), 'python');
+  assert.equal(shortToolName('C:\\mingw64\\bin\\g++.exe', 'win32'), 'g++');
+  assert.equal(shortToolName('/usr/bin/gcc', 'posix'), 'gcc');
+  // на posix .exe не снимается: там это часть имени файла
+  assert.equal(shortToolName('/usr/bin/tool.exe', 'posix'), 'tool.exe');
+  // мусор
+  assert.equal(shortToolName(null, 'win32'), '');
+  assert.equal(shortToolName('', 'win32'), '');
 });
 
 test('runfmt: отчёт файла — все секции по порядку (§2.3)', () => {
@@ -56,6 +87,21 @@ test('runfmt: отчёт команды — без строки «Файл»', (
   assert.ok(text.includes('Команда: grep -rn Player src'));
   assert.ok(text.includes('Код возврата: 1'));
   assert.ok(text.includes('(пусто)'), 'пустой вывод помечен явно');
+});
+
+test('runfmt: отчёт — ввод с фокус-событиями ConPTY читается как две строки', () => {
+  // a = int(input()); b = int(input()) — пользователь набрал 12 и 56, кликая по терминалу
+  const text = buildReport({
+    file: 'test.py', command: 'python -u test.py', exitCode: 0,
+    inputLog: [`${ESC}[I`, `${ESC}[I`, '1', '2', '\r', '5', '6', '\r'],
+    output: 'a =12\r\nb = 56\r\n68\r\n',
+  });
+  assert.ok(text.includes('Ввод:\n12\n56'), 'строки ввода разделены, мусора нет');
+  assert.ok(!text.includes(ESC), 'ESC-последовательностей в отчёте не осталось');
+  assert.ok(!text.includes('[I'), 'хвостов фокус-событий не осталось');
+  // ввод из одних фокус-событий секцию не создаёт
+  const empty = buildReport({ file: 'test.py', exitCode: 0, inputLog: [`${ESC}[I`, `${ESC}[O`], output: 'x' });
+  assert.ok(!empty.includes('Ввод:'));
 });
 
 test('runfmt: ввод отсутствует — секции «Ввод» нет; пустые строки ввода игнорируются', () => {

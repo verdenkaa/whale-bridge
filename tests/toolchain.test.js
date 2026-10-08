@@ -23,7 +23,7 @@ function harness(files, versions, platform) {
   // ОС-хосте приводим «диск» к тому же виду, чтобы имитация не зависела от хоста.
   // Файловая система Windows регистронезависима: PATHEXT даёт «.EXE», а файл может
   // лежать как «.exe» — имитация сравнивает в нижнем регистре, как настоящая NTFS.
-  const norm = (p) => (platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : path.normalize(p));
+  const norm = (p) => (platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : path.posix.normalize(p));
   const present = new Set(files.map(norm));
   const execCalls = [];
   const tc = createToolchain({
@@ -81,6 +81,23 @@ test('toolchain: Windows — PATHEXT, регистр переменной и п�
   assert.equal(tc2.findOnPath(['x'], { PATH: 'C:\\t', PATHEXT: '.exe' }), null);
   // дефолт PATHEXT — как у Windows
   assert.equal(WIN_PATH_EXT, '.COM;.EXE;.BAT;.CMD');
+  // запись PATH с хвостовой косой не даёт двойного разделителя, а расширение из PATHEXT
+  // приводится к нижнему регистру (NTFS регистронезависима): этот путь видит пользователь
+  // в отчёте и в настройках, и 'C:\Python312\\python.EXE' там выглядело бы опечаткой
+  const { tc: tc3 } = harness(['C:\\Python312\\python.exe'], {}, 'win32');
+  assert.equal(tc3.findOnPath(['python'], { PATH: 'C:\\Python312\\', PATHEXT: '.EXE' }), 'C:\\Python312\\python.exe');
+});
+
+test('toolchain: Windows — ручной путь распознаётся абсолютным по правилам win32', async () => {
+  // Абсолютность проверяется модулем целевой платформы: для path.posix строка
+  // 'C:\tools\python.exe' относительна, и ручной путь превратился бы в мусорный.
+  const exe = 'C:\\tools\\python.exe';
+  const { tc } = harness([exe], { [exe]: 'Python 3.12.4' }, 'win32');
+  const r = await tc.detect({ tools: { python: exe } }, { PATH: 'C:\\nowhere' });
+  assert.equal(r.python.source, 'manual');
+  assert.equal(r.python.exe, exe);
+  assert.equal(r.python.brokenManual, false);
+  assert.equal(r.python.version.text, '3.12.4');
 });
 
 test('toolchain: findAllOnPath возвращает все совпадения в порядке перебора', () => {
@@ -188,10 +205,15 @@ test('toolchain: detect — все пять языков в одном резу�
 });
 
 test('toolchain: detect — относительный ручной путь приводится к абсолютному', async () => {
-  const { tc } = harness([path.resolve('tools/gcc')], {});
+  // Ожидание собирается модулем целевой платформы (harness без platform — posix-режим),
+  // как это делает src/toolchain.js: хостовый path.resolve на Windows дал бы другой
+  // разделитель, и тест зависел бы от машины, на которой запущен.
+  const abs = path.posix.resolve('tools/gcc');
+  const { tc } = harness([abs], {});
   const r = await tc.detect({ tools: { c: 'tools/gcc' } }, { PATH: '' });
   assert.equal(r.c.source, 'manual');
-  assert.equal(r.c.exe, path.resolve('tools/gcc'));
+  assert.equal(r.c.exe, abs);
+  assert.notEqual(r.c.exe, 'tools/gcc', 'относительный путь приведён к абсолютному');
 });
 
 test('toolchain: toolVersion — таймаут и ошибка не роняют, вывод stderr учитывается', async () => {
