@@ -12,6 +12,10 @@ const { ipcRenderer } = require('electron');
   const SETTLE_MS = 1200; // блок «созрел», если текст не менялся столько времени
   const TICK_MS = 400;
   const BASELINE_MS = 2500; // всё, что появилось сразу после открытия чата, — «история»
+  // Сколько блоков уходит одним сообщением chat:blocks. Совпадает с лимитом проверки
+  // в main.js (blocks.length > 100 → пакет отбрасывается): больше — main не примет,
+  // а блоки будут помечены отправленными и потеряны навсегда. Сверяется тестом.
+  const SEND_CHUNK = 100;
 
   const nonce = Math.random().toString(36).slice(2, 10);
   const state = new WeakMap(); // pre -> {id, text, changedAt, sentText, initial}
@@ -56,7 +60,14 @@ const { ipcRenderer } = require('electron');
         pending++;
       }
     });
-    if (out.length) ipcRenderer.send('chat:blocks', { chatId, blocks: out });
+    // main принимает не больше SEND_CHUNK блоков в сообщении и отбрасывает пакет
+    // целиком, если блоков больше (защита от аномального DOM). Отправлять всё одним
+    // сообщением нельзя: при быстрой прокрутке длинного чата «дозревает» больше сотни
+    // блоков за такт, весь пакет молча терялся, а sentText уже помечал их отправленными —
+    // предложения из этих блоков не появлялись никогда. Поэтому режем на пакеты.
+    for (let i = 0; i < out.length; i += SEND_CHUNK) {
+      ipcRenderer.send('chat:blocks', { chatId, blocks: out.slice(i, i + SEND_CHUNK) });
+    }
     return pending;
   }
 

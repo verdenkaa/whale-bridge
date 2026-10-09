@@ -19,6 +19,11 @@
   let mounted = false;
   let observer = null;
   const pending = []; // то, что пришло до создания xterm (панель ещё не открывали)
+  // Предел буфера отложенного вывода. Штатно он живёт доли секунды (до первого открытия
+  // панели), но если xterm не поднялся (битая установка), ensure() всегда false и поток
+  // run:data копился бы здесь бесконечно — на всю сессию, до 4 МБ вывода и больше.
+  // Держим хвост: последние строки вывода важнее начала.
+  const PENDING_LIMIT = 500;
   let lastSize = null;    // {cols, rows} — последний размер, отправленный в main
   let resizeTimer = null; // дебаунс: всплеск ResizeObserver схлопывается в один fit
 
@@ -113,7 +118,11 @@
   function write(text) {
     const s = typeof text === 'string' ? text : String(text == null ? '' : text);
     if (!s) return;
-    if (!ensure()) { pending.push(s); return; }
+    if (!ensure()) {
+      pending.push(s);
+      if (pending.length > PENDING_LIMIT) pending.splice(0, pending.length - PENDING_LIMIT);
+      return;
+    }
     term.write(s);
   }
 

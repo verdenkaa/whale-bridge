@@ -457,7 +457,18 @@ class Store {
   // ---- история ----
   addHistory(entry) {
     this.history.push({ ...entry, source: normalizeSource(entry && entry.source) });
-    if (this.history.length > HISTORY_LIMIT) this.history.splice(0, this.history.length - HISTORY_LIMIT);
+    if (this.history.length > HISTORY_LIMIT) {
+      const dropped = this.history.splice(0, this.history.length - HISTORY_LIMIT);
+      // Копии вытесненных записей больше некому читать (откат и Diff ходят через
+      // журнал), а pruneFile работает только с оставшимися записями. Без удаления
+      // файлы в backups/ копились бы вечно — это утечка диска, а не памяти.
+      // Удаление асинхронное и best-effort: запись журнала не должна из-за него ждать диск.
+      for (const h of dropped) {
+        if (h && typeof h.id === 'string' && h.id) {
+          this._rmBackup(h.id).catch((e) => console.error('[prune]', e));
+        }
+      }
+    }
     return this.saveHistory();
   }
   getHistory(id) { return this.history.find((h) => h.id === id) || null; }

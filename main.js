@@ -47,8 +47,19 @@ const MONACO_VS = (() => {
   return null;
 })();
 
+// Расширения, которые shell.openPath ИСПОЛНЯЕТ через файловые ассоциации ОС, а не
+// открывает как документ. Файл в проекте мог создать ИИ, поэтому «Открыть» для таких
+// расширений заменяется показом в проводнике: запуск остаётся явным действием
+// (терминал, кнопка «Запустить»), а не побочным эффектом двойного клика.
+// Дополнено перед релизом: прежний список пропускал классические векторы Windows —
+// .hta (выполняется mshta), .py/.pyw (запускает интерпретатор; .pyw — без консоли),
+// .rb, .url/.scf/.lnk-подобные файлы проводника, .iso/.img (монтируются и дают
+// автозапуск), .cpl/.msc/.pif/.inf/.msp/.appref-ms (системные исполнители),
+// .chm, .desktop (Linux), а также документы Office с макросами (.docm/.xlsm/.pptm).
 const UNSAFE_OPEN_EXT = new Set([
-  '.exe', '.bat', '.cmd', '.com', '.msi', '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.lnk', '.scr', '.sh', '.app', '.jar', '.reg',
+  '.exe', '.bat', '.cmd', '.com', '.msi', '.msp', '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh',
+  '.lnk', '.scr', '.sh', '.app', '.jar', '.reg', '.hta', '.py', '.pyw', '.rb', '.cpl', '.msc', '.pif',
+  '.scf', '.url', '.inf', '.iso', '.img', '.appref-ms', '.chm', '.desktop', '.docm', '.xlsm', '.pptm',
 ]);
 
 let win = null;
@@ -229,6 +240,9 @@ function createAppRunner() {
 }
 
 async function updateChatFromUrl() {
+  // Страховка от гонки при закрытии окна: событие могло прийти, пока webContents
+  // уничтожается, — getURL() на нём бросил бы исключение в main-процессе.
+  if (!chatView || !chatView.webContents || chatView.webContents.isDestroyed()) return;
   const url = chatView.webContents.getURL();
   const previousChatId = currentChatId;
   const m = url.match(CHAT_URL_RE);
@@ -269,6 +283,16 @@ function createWindow() {
   });
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // Сбой renderer'а (crash/OOM) оставлял окно навсегда пустым: интерфейс живёт в этом
+  // webContents, и без перезагрузки приложение выглядело зависшим. Несохранившийся
+  // буфер редактора в любом случае потерян вместе с процессом — перезагрузка возвращает
+  // хотя бы рабочее приложение. 'clean-exit' не трогаем: это штатное завершение.
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.warn('[renderer] процесс UI завершился:', details && details.reason);
+    if (details && details.reason !== 'clean-exit' && win && !win.isDestroyed()) {
+      win.webContents.reload();
+    }
+  });
   win.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
   // Левая панель: официальный сайт DeepSeek в отдельном изолированном контексте
@@ -292,7 +316,15 @@ function createWindow() {
           action: 'allow',
           overrideBrowserWindowOptions: {
             width: 520, height: 720, autoHideMenuBar: true,
-            webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+            webPreferences: {
+              contextIsolation: true, nodeIntegration: false, sandbox: true,
+              // Popup — это окно авторизации (Google/Apple/Microsoft), и оно обязано
+              // делить сессию с чатом: без partition оно создаётся в дефолтной сессии,
+              // cookies входа туда и не доходят до chat.deepseek.com — логин через
+              // popup никогда не завершался. Заодно на popup распространяется
+              // обработчик разрешений этой сессии (setPermissionRequestHandler).
+              partition: PARTITION,
+            },
           },
         };
       }
@@ -306,6 +338,14 @@ function createWindow() {
   wc.on('did-navigate', updateChatFromUrl);
   wc.on('did-navigate-in-page', updateChatFromUrl);
   wc.on('did-finish-load', updateChatFromUrl);
+  // Сбой страницы чата (crash/OOM) — белый прямоугольник вместо DeepSeek. Возвращаем
+  // чат на стартовый URL: сессия (cookies) живёт в partition и переживает перезагрузку.
+  wc.on('render-process-gone', (_e, details) => {
+    console.warn('[chat] процесс страницы завершился:', details && details.reason);
+    if (details && details.reason !== 'clean-exit' && !wc.isDestroyed()) {
+      wc.loadURL(CHAT_URL).catch(() => { /* сеть может быть недоступна — чат перезагрузит пользователь */ });
+    }
+  });
   wc.loadURL(CHAT_URL);
 
   // Геометрию чата отдаёт renderer (chat:set-bounds), поэтому win.on('resize') не нужен:
@@ -409,7 +449,11 @@ ipcMain.on('chat:blocks', (event, payload) => {
 ipcMain.on('run:input', (event, text) => {
   if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
   if (typeof text !== 'string' || !text) return;
-  runner.input(text.slice(0, 4096));
+  // Лимит — защита от аномально больших IPC-сообщений, а не от вставки из буфера:
+  // прежние 4096 символов молча обрезали вставку текста в терминал (ввод программы
+  // терял хвост). 64 КБ совпадают с лимитом ввода run:start — вставка больше
+  // в терминалах не штатный сценарий. Журнал ввода в раннере ограничен отдельно.
+  runner.input(text.slice(0, 65536));
 });
 ipcMain.on('run:resize', (event, size) => {
   if (!win || win.isDestroyed() || event.sender !== win.webContents) return;
@@ -915,9 +959,26 @@ if (!app.requestSingleInstanceLock()) {
       },
     });
 
-    // Сайту DeepSeek не даём лишних разрешений (камера, геолокация и т.п.)
-    session.fromPartition(PARTITION).setPermissionRequestHandler((_wc, permission, cb) => {
-      cb(['clipboard-sanitized-write', 'fullscreen'].includes(permission));
+    // Сайту DeepSeek не даём лишних разрешений (камера, геолокация и т.п.).
+    // Check-обработчик — вторая линия той же политики: он отвечает на синхронные
+    // проверки разрешений (чтение буфера обмена, media и т.п.), которые минуют
+    // request-обработчик. Без него страница могла бы читать буфер обмена пользователя.
+    const chatSession = session.fromPartition(PARTITION);
+    const PERMISSIONS_ALLOWED = ['clipboard-sanitized-write', 'fullscreen'];
+    chatSession.setPermissionRequestHandler((_wc, permission, cb) => {
+      cb(PERMISSIONS_ALLOWED.includes(permission));
+    });
+    chatSession.setPermissionCheckHandler((_wc, permission) => PERMISSIONS_ALLOWED.includes(permission));
+
+    // Все вторичные webContents (popup авторизации, созданный setWindowOpenHandler)
+    // получают политику по умолчанию: никаких дальнейших popup и никакой навигации
+    // на локальные схемы (file:// и т.п. — удалённой странице там делать нечего).
+    // Для win и chatView createWindow тут же ставит свои обработчики поверх этих.
+    app.on('web-contents-created', (_e, contents) => {
+      contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      contents.on('will-navigate', (e, url) => {
+        if (!/^https?:/i.test(url)) e.preventDefault();
+      });
     });
 
     // Раннер и поиск инструментов создаются после store (нужны config.run и путь проекта)

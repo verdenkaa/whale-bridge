@@ -359,6 +359,12 @@
 
   async function loadProposals() {
     S.proposals = (await call('proposals:list', { includeHistorical: S.showHistorical })) || [];
+    // Кеш ввода и состояния раскрытия карточек &RUN:/&CMD: чистим по текущему списку:
+    // ключи — id предложений, а текст ввода бывает мегабайтным. Без чистки за долгую
+    // сессию (смена чатов, «Очистить список», догрузки истории) кеш рос бы навсегда.
+    const ids = new Set(S.proposals.map((p) => p.id));
+    for (const id of Object.keys(S.runInputs)) if (!ids.has(id)) delete S.runInputs[id];
+    for (const id of [...S.runExpanded]) if (!ids.has(id)) S.runExpanded.delete(id);
     await loadHistory();
     // Форма «Промпта» живёт в своей панели и здесь не пересобирается — фокус в полях не теряется
     render();

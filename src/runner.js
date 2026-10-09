@@ -18,6 +18,11 @@ const { buildReport, createRing, shortToolName } = require('./runfmt');
 
 const OUTPUT_LIMIT = 4 * 1024 * 1024; // кольцевой буфер вывода на сессию, 4 МБ
 const INPUT_LIMIT = 64 * 1024;        // stdin из предложения — не больше 64 КБ
+// Совокупный лимит журнала ввода на сессию. Вывод ограничен кольцевым буфером, а ввод
+// прежде копился без границы: долгая интерактивная сессия (или серия больших вставок)
+// росла в памяти main-процесса навсегда. Хвост ввода важнее начала — при переполнении
+// новые данные не добавляются, а отчёт честно помечает обрезание.
+const INPUT_LOG_LIMIT = 256 * 1024;
 // Окно досбора вывода после события выхода (см. onExit): pty сообщает о завершении
 // процесса раньше, чем последние байты доезжают до нас.
 const EXIT_DRAIN_MS = 150;
@@ -99,6 +104,28 @@ function createRunner(deps) {
   /** Снять отложенный finish (окно досбора вывода) — при остановке или перезапуске. */
   function clearDrain(session) { clearTimeout(session.drainTimer); session.drainTimer = null; }
 
+  /**
+   * Журнал ввода с бюджетом INPUT_LOG_LIMIT на сессию: прежде ввод копился без границы
+   * (каждое нажатие и каждая вставка), и долгая интерактивная сессия росла в памяти
+   * main-процесса навсегда. При переполнении новые данные не добавляются, а флаг
+   * обрезания уходит в отчёт — молча терять ввод в отчёте нельзя.
+   */
+  function logInput(session, text) {
+    const s = typeof text === 'string' ? text : '';
+    if (!s) return;
+    const used = session.inputLogBytes || 0;
+    if (used >= INPUT_LOG_LIMIT) { session.inputLogTruncated = true; return; }
+    const room = INPUT_LOG_LIMIT - used;
+    if (s.length > room) {
+      session.inputLog.push(s.slice(0, room));
+      session.inputLogBytes = INPUT_LOG_LIMIT;
+      session.inputLogTruncated = true;
+      return;
+    }
+    session.inputLog.push(s);
+    session.inputLogBytes = used + s.length;
+  }
+
   // ---------- шаги ----------
 
   function startStep(session, index) {
@@ -158,13 +185,14 @@ function createRunner(deps) {
     pty.onExit(({ exitCode, signal }) => onExit(session, exitCode, signal));
     // Ввод из предложения (тело &RUN:/&CMD:) пишется сразу: интерактивные сценарии
     // не ломаются — пользователь может дописывать ввод вручную. Написанное уходит
-    // и в журнал ввода: отчёт обязан показывать ВСЁ, что получила программа (§2.3).
+    // и в журнал ввода: отчёт показывает всё, что получила программа (§2.3), вплоть
+    // до лимита журнала (INPUT_LOG_LIMIT) — обрезание оговаривается в отчёте явно.
     if (index === 0 && typeof session.input === 'string' && session.input) {
       const payload = session.input.endsWith('\n') || session.input.endsWith('\r')
         ? session.input : session.input + '\n';
       try {
         pty.write(payload.replace(/\n/g, '\r'));
-        session.inputLog.push(payload);
+        logInput(session, payload);
       } catch { /* процесс мог не стартовать */ }
     }
     armWatchdog(session);
@@ -523,7 +551,8 @@ function createRunner(deps) {
       step: 0, state: 'running', pid: null, exitCode: null,
       startedAt: clock(), endedAt: null,
       ring: createRing(maxOutputBytes),
-      inputLog: [], forced: null, watchdog: null, pty: null,
+      inputLog: [], inputLogBytes: 0, inputLogTruncated: false,
+      forced: null, watchdog: null, pty: null,
       // Код возврата, полученный от pty, но ещё не объявленный: между событием выхода и
       // концом окна досбора вывода сессия формально 'running' (см. onExit).
       exitPending: null, drainTimer: null,
@@ -558,7 +587,7 @@ function createRunner(deps) {
     const t = typeof text === 'string' ? text : '';
     if (!t) return;
     try { s.pty.write(t); } catch { /* процесс завершается — ввод игнорируется */ }
-    s.inputLog.push(t);
+    logInput(s, t);
     armWatchdog(s);
   }
 
@@ -596,7 +625,7 @@ function createRunner(deps) {
       file: s.file, command: s.commandLine, projectDir: s.projectDir,
       exitCode: running ? undefined : code,
       running,
-      inputLog: s.inputLog, output: s.ring.text(),
+      inputLog: s.inputLog, inputTruncated: !!s.inputLogTruncated, output: s.ring.text(),
       truncated: s.ring.truncated, reason: s.lastReason || null,
     });
     return { ok: true, text };
@@ -605,4 +634,4 @@ function createRunner(deps) {
   return { start, stop, stopAll, input, resize, report, activeInfo: () => active };
 }
 
-module.exports = { createRunner, OUTPUT_LIMIT, INPUT_LIMIT };
+module.exports = { createRunner, OUTPUT_LIMIT, INPUT_LIMIT, INPUT_LOG_LIMIT };

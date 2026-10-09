@@ -739,18 +739,7 @@
     const onDown = (e) => { if (!el.contains || !el.contains(e.target)) closeCtxMenu(); };
     const onKey = (e) => { if (e.key === 'Escape') closeCtxMenu(); };
     const onScroll = () => closeCtxMenu();
-    // Слушатели ставим на следующем тике: событие правого клика, открывшее меню,
-    // не должно тут же его закрыть.
-    const arm = () => {
-      if (!ctxMenu) return; // меню уже закрыли
-      if (typeof window !== 'undefined' && window.addEventListener) {
-        window.addEventListener('pointerdown', onDown, true);
-        window.addEventListener('keydown', onKey, true);
-      }
-      if (els.tree && els.tree.addEventListener) els.tree.addEventListener('scroll', onScroll);
-    };
-    setTimeout(arm, 0);
-    ctxMenu = {
+    const menu = {
       el,
       close: () => {
         if (typeof window !== 'undefined' && window.removeEventListener) {
@@ -762,6 +751,21 @@
         else if (host.replaceChildren && host === els.tree) renderTree();
       },
     };
+    // Слушатели ставим на следующем тике: событие правого клика, открывшее меню,
+    // не должно тут же его закрыть. Проверка именно СВОЕГО меню обязательна: за этот
+    // тик меню могли закрыть и открыть новое (быстрый повторный правый клик), и тогда
+    // слушатели старого меню встали бы навсегда — close() у него уже отработал, снять
+    // их некому, а закрытое меню закрывало бы текущее на любой клик мимо.
+    const arm = () => {
+      if (ctxMenu !== menu) return;
+      if (typeof window !== 'undefined' && window.addEventListener) {
+        window.addEventListener('pointerdown', onDown, true);
+        window.addEventListener('keydown', onKey, true);
+      }
+      if (els.tree && els.tree.addEventListener) els.tree.addEventListener('scroll', onScroll);
+    };
+    ctxMenu = menu;
+    setTimeout(arm, 0);
   }
 
   /** Пункты меню: item = null — пустое место дерева (операции в корне проекта). */

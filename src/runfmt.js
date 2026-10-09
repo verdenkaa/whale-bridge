@@ -72,6 +72,9 @@ function buildReport(s) {
   const inputText = cleanInput(Array.isArray(src.inputLog) ? src.inputLog.join('') : String(src.inputLog || ''));
   if (inputText.trim()) {
     lines.push('', 'Ввод:', inputText.replace(/\n+$/, ''));
+    // Журнал ввода ограничен (см. src/runner.js, INPUT_LOG_LIMIT): отчёт обязан
+    // оговаривать обрезание, иначе модель и пользователь будут верить, что видят весь ввод
+    if (src.inputTruncated) lines.push('[ввод показан не полностью: журнал ввода ограничен]');
   }
 
   // pty отдаёт CRLF — в отчёте для чата переводы строк нормализуются к LF
