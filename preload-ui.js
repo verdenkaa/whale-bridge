@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer, webFrame } = require('electron');
 const INVOKE = new Set([
   'state:get', 'project:add', 'project:remove', 'project:bind', 'project:pending',
   'fs:list', 'file:open',
+  // операции с файлами из дерева (этап D): создать, переименовать, удалить (в корзину)
+  'fs:create', 'fs:rename', 'fs:delete',
   'file:read', 'file:write', 'file:hashes',
   'proposals:list', 'proposal:dismiss', 'proposals:dismissAll', 'proposal:get', 'proposal:retarget', 'proposal:apply', 'proposal:reject', 'proposal:fromClipboard',
   // пометка «выполнено» для предложений запуска и команд (&RUN:/&CMD:)

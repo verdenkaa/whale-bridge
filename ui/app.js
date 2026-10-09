@@ -50,8 +50,9 @@
     }
   }
 
-  const COPY_TITLE = 'Скопировать в буфер то, что изменилось в этих файлах с тех пор, как модель видела их последней: '
-    + 'unified diff, а если точная версия не сохранилась или файл крошечный — файл целиком. '
+  const COPY_TITLE = 'Скопировать в буфер всё, чем модель отстала от проекта: для файлов с расхождением — '
+    + 'unified diff от версии, которую модель видела последней; для файлов, которых она не видела вовсе '
+    + '(созданы или изменены без её участия), — текущее содержимое целиком. '
     + 'Отметки при этом НЕ снимаются: скопировать в буфер не значит отправить в чат.';
   const COPY_REMINDER_TITLE = 'Скопировать короткую памятку о маркерах, Diff и формате кода — чтобы вставить её в чат';
 
@@ -99,7 +100,7 @@
     hunks: null, hunkBase: null, hunkSel: null,
     history: [], showFull: false, allowIncomplete: false,
     backup: { files: 0, bytes: 0 },
-    context: { items: [], checked: 0, truncated: false }, // расхождения с тем, что знает модель
+    context: { items: [], checked: 0, truncated: false, unseen: [], unseenTruncated: false }, // расхождения + файлы, которых модель не видела
     // Раскладка (ТЗ §5): ширины панелей, открытая вкладка левой панели и режим редактора.
     // Состояние UI, main его только хранит (layout:save) — геометрию чата задаёт #chat-slot (§4).
     layout: { ...L.DEFAULTS },
@@ -1156,17 +1157,24 @@
   /** Что знает модель в текущем чате против того, что сейчас на диске. */
   async function loadContext() {
     S.context = S.project && S.chatId
-      ? ((await call('context:list', { projectId: S.project.id })) || { items: [], checked: 0, truncated: false })
-      : { items: [], checked: 0, truncated: false };
+      ? ((await call('context:list', { projectId: S.project.id })) || { items: [], checked: 0, truncated: false, unseen: [], unseenTruncated: false })
+      : { items: [], checked: 0, truncated: false, unseen: [], unseenTruncated: false };
+    // Защита от старого ответа main: поля unseen могут отсутствовать
+    if (!Array.isArray(S.context.unseen)) S.context.unseen = [];
   }
 
   async function copyManualVersions() {
     if (!S.project) return;
     const r = await call('manual:copy', { projectId: S.project.id });
     // Копирование НЕ снимает отметки: скопировать в буфер — не значит отправить в чат
-    toast(r?.ok
-      ? `Актуальные версии скопированы (${r.files} файлов). Вставьте их в чат, затем нажмите «✓ Модель проинформирована».`
-      : r?.error, r?.ok ? 'ok' : 'err');
+    if (!r) return;
+    if (!r.ok) { toast(r.error, 'err'); return; }
+    const bits = [];
+    if (r.asDiff) bits.push(`${r.asDiff} дифф`);
+    if (r.asFull) bits.push(`${r.asFull} целиком`);
+    if (r.asNew) bits.push(`${r.asNew} новых`);
+    toast(`Скопировано файлов: ${r.files}${bits.length ? ' (' + bits.join(', ') + ')' : ''}. `
+      + 'Вставьте их в чат, затем нажмите «✓ Модель знает все».', 'ok');
   }
 
   /**
@@ -1186,8 +1194,8 @@
   }
 
   async function ackAllManual() {
-    if (!S.project || !S.context.items.length) return;
-    const n = S.context.items.length;
+    const n = S.context.items.length + S.context.unseen.length;
+    if (!S.project || !n) return;
     if (!confirm(`Отметить ${n} файл(ов) как известные модели?\n\nОтметка снимется автоматически, если файл снова изменится.`)) return;
     const r = await call('context:ack-all', { projectId: S.project.id });
     if (!r) return;
@@ -1263,6 +1271,11 @@
     return S.context.items.map((x) => x.relPath);
   }
 
+  /** Файлы, которых модель не видела вовсе (этап D): созданы или изменены вне чата. */
+  function unseenItems() {
+    return S.context.unseen || [];
+  }
+
   function undoByPath() {
     // последняя применённая операция по каждому файлу (история уже отсортирована от новых к старым)
     const undo = new Map();
@@ -1288,12 +1301,14 @@
     const head = $('#files-head');
     if (!head) return;
     const manual = divergedPaths();
+    const unseen = unseenItems();
+    const total = manual.length + unseen.length;
     head.replaceChildren(
       h('span', { class: 'files-title' }, 'ФАЙЛЫ'),
       h('span', { class: 'path grow', title: S.project ? S.project.path : '' }, S.project ? S.project.name : 'Проект не выбран'),
-      manual.length > 0 && h('button', { class: 'btn tiny', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать для модели'),
-      manual.length > 0 && h('button', {
-        class: 'btn tiny', title: `Отметить все ${manual.length} файл(ов) как известные модели`,
+      total > 0 && h('button', { class: 'btn tiny', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать для модели'),
+      total > 0 && h('button', {
+        class: 'btn tiny', title: `Отметить все ${total} файл(ов) как известные модели`,
         onclick: ackAllManual,
       }, '✓ Модель знает все'),
       h('button', {
@@ -1311,6 +1326,22 @@
         `Модель не знает текущую версию: ${manual.length} файл(ов). Она может предлагать правки от устаревшего кода.`,
         h('div', { class: 'path' }, manual.slice(0, 8).join(', ') + (manual.length > 8 ? ` … ещё ${manual.length - 8}` : ''))));
     }
+    if (unseen.length > 0) {
+      // Вторая половина учёта контекста (этап D): эти файлы модель не видела ВОВСЕ —
+      // ни текущую версию, ни какую-либо ещё. Разработка руками не должна оставаться
+      // невидимой для чата.
+      const created = unseen.filter((x) => x.isNew).length;
+      banner.append(h('div', { class: 'notice unseen' },
+        `Модель не видела: ${unseen.length} файл(ов)`
+        + (created ? ` (${created} новых)` : '')
+        + '. Созданы или изменены без её участия — передайте их, прежде чем просить правки.',
+        h('div', { class: 'path' }, unseen.slice(0, 8).map((x) => x.relPath).join(', ')
+          + (unseen.length > 8 ? ` … ещё ${unseen.length - 8}` : ''))));
+    }
+    if (S.context.unseenTruncated) {
+      banner.append(h('div', { class: 'notice' },
+        'Проект слишком большой: слежение за новыми файлами выключено (лимит отпечатков). Расхождения с известными модели версиями по-прежнему отслеживаются.'));
+    }
     if (S.context.truncated) {
       banner.append(h('div', { class: 'notice' },
         `Проверено ${S.context.checked} файлов из журнала — остальные не поместились в лимит одного запроса.`));
@@ -1323,6 +1354,7 @@
     if (!ed || !ed.setTreeExtras) return;
     ed.setTreeExtras({
       manual: new Set(divergedPaths()),
+      unseen: new Set(unseenItems().map((x) => x.relPath)),
       undo: undoByPath(),
       proposals: proposalsByPath(),
       callbacks: {
@@ -1402,20 +1434,24 @@
         h('div', { class: 'actions', style: 'margin:0' },
           h('button', { class: 'btn ghost', onclick: closeView }, '← Закрыть'),
           diffCapable('manual', d) && h('button', { class: 'btn ghost', title: 'Monaco DiffEditor', onclick: backToDiff }, '◧ Diff')),
-        h('div', { class: 'view-title' }, 'Мои правки'),
+        h('div', { class: 'view-title' }, d.unseen ? (d.isNew ? 'Новый файл' : 'Файл, которого модель не видела') : 'Мои правки'),
         h('div', { class: 'path' }, d.relPath)),
-      h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
+      d.unseen
+        ? h('div', { class: 'notice unseen' },
+          'Модель в чате не видела этот файл: он создан или изменён без её участия.',
+          h('div', {}, 'Скопируйте содержимое в чат и отметьте файл — или подтвердите, что уже это сделали.'))
+        : h('div', { class: 'notice warn' }, 'Сравнение последней версии после операции Whale Bridge с текущим файлом на диске.'),
       d.diverged
         ? h('div', { class: 'notice warn' },
           'Модель в чате не знает об этом изменении и может предлагать правки от устаревшей версии.',
           d.knownVersion ? h('div', { class: 'path' }, `Известная модели версия: ${fmtTime(d.knownVersion.ts)} · ${d.knownVersion.label}`) : null,
           d.notice ? h('div', { class: 'path' }, d.notice) : null,
           h('div', {}, 'Передайте ей актуальный файл и отметьте его — или подтвердите, что уже это сделали.'))
-        : h('div', { class: 'notice' }, d.note || 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
+        : !d.unseen && h('div', { class: 'notice' }, d.note || 'Модель знает текущую версию файла. Если файл снова изменится, отметка снимется сама.'),
       d.rows && d.rows.length ? diffTable(d.rows, d.truncated) : null,
       h('div', { class: 'actions' },
         h('button', { class: 'btn', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать изменения для модели'),
-        d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
+        (d.diverged || d.unseen) && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
         h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл')));
   }
 
@@ -1832,7 +1868,10 @@
       if (typeof d.newText !== 'string') return false;          // patch-failed/open — сравнивать нечего
       return d.op === 'create' || typeof d.baseText === 'string';
     }
-    if (kind === 'manual') return d.diverged === true && typeof d.baseText === 'string' && typeof d.currentText === 'string';
+    if (kind === 'manual') {
+      return (d.diverged === true || d.unseen === true)
+        && typeof d.baseText === 'string' && typeof d.currentText === 'string';
+    }
     if (kind === 'history') return !d.missingBackup && typeof d.beforeText === 'string' && typeof d.afterText === 'string';
     return false; // merge — разметка конфликтов, всегда текстовый отчёт
   }
@@ -2040,7 +2079,8 @@
       if (typeof d.baseText !== 'string' || typeof d.currentText !== 'string') return null;
       return {
         original: d.baseText, modified: d.currentText, language: lang(d.relPath),
-        leftLabel: d.base === 'backup' ? 'Версия после последней операции (приближение)' : 'Версия, которую знает модель',
+        leftLabel: d.base === 'empty' ? 'Модель не видела этот файл'
+          : d.base === 'backup' ? 'Версия после последней операции (приближение)' : 'Версия, которую знает модель',
         rightLabel: 'Текущий файл на диске',
       };
     }
@@ -2058,10 +2098,10 @@
   function renderDiffBar(kind, d, pair) {
     const bar = $('#diff-bar');
     if (!bar) return;
-    const icon = kind === 'proposal' ? (d.op === 'create' ? '➕' : d.op === 'delete' ? '🗑' : '🔍') : kind === 'manual' ? '✎' : '🕘';
+    const icon = kind === 'proposal' ? (d.op === 'create' ? '➕' : d.op === 'delete' ? '🗑' : '🔍') : kind === 'manual' ? (d.unseen ? '✚' : '✎') : '🕘';
     const title = kind === 'proposal'
       ? (d.op === 'create' ? 'Создание файла' : d.op === 'delete' ? 'Удаление файла' : 'Предложение модели')
-      : kind === 'manual' ? 'Мои правки' : 'Операция истории';
+      : kind === 'manual' ? (d.unseen ? (d.isNew ? 'Новый файл' : 'Файл, которого модель не видела') : 'Мои правки') : 'Операция истории';
 
     const head = h('div', { class: 'diff-bar-row' },
       h('div', { class: 'diff-title' }, `${icon} ${title}`, h('span', { class: 'path', title: d.relPath || '' }, d.relPath || '')),
@@ -2138,7 +2178,7 @@
     } else if (kind === 'manual') {
       actions.append(
         h('button', { class: 'btn', title: COPY_TITLE, onclick: copyManualVersions }, 'Скопировать изменения для модели'),
-        d.diverged && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
+        (d.diverged || d.unseen) && h('button', { class: 'btn primary', onclick: () => ackManual(d.relPath) }, '✓ Модель проинформирована'),
         S.project && h('button', { class: 'btn', onclick: () => openFile(S.project.id, d.relPath) }, 'Открыть файл'));
     } else if (kind === 'history') {
       if (d.status === 'applied' && d.revertible !== false && !(d.pruned && d.op !== 'create')) {
@@ -2494,7 +2534,7 @@
     ed.setTabsExtras([
       h('button', {
         class: 'btn tiny ed-run-btn', type: 'button',
-        title: 'Запустить активный файл (F5). Поддерживаются: Python, JavaScript/TypeScript, C++, C, Java',
+        title: 'Запустить активный файл (F5). Поддерживаются: Python, JavaScript/TypeScript, C++, C, Java, C#',
         onclick: () => runActiveFile(),
       }, '▶ Запустить'),
     ]);

@@ -270,6 +270,28 @@
     return get(state, path);
   }
 
+  /**
+   * Переименование открытого файла (этап D): запись переезжает на новый ключ, порядок
+   * вкладок и активная вкладка сохраняются. Буфер и точка сохранения не трогаются —
+   * содержимое файла при переименовании не меняется, поэтому dirty-состояние остаётся
+   * честным (сохранение пойдёт уже по новому пути).
+   *
+   * @returns {object|null} запись файла; null — файл не открыт или новый путь уже занят
+   */
+  function renamePath(state, oldPath, newPath) {
+    const f = state.files.get(oldPath);
+    if (!f || oldPath === newPath) return null;
+    if (state.files.has(newPath)) return null;
+    state.files.delete(oldPath);
+    f.path = newPath;
+    f.name = baseName(newPath);
+    state.files.set(newPath, f);
+    const i = state.order.indexOf(oldPath);
+    if (i >= 0) state.order[i] = newPath;
+    if (state.active === oldPath) state.active = newPath;
+    return f;
+  }
+
   /** Ctrl+Tab: следующая вкладка по кругу. dir = 1 | -1 */
   function activateRelative(state, dir = 1) {
     if (!state.order.length) return null;
@@ -296,9 +318,9 @@
    *
    * @param state  состояние редактора
    * @param rel    относительный путь строки
-   * @param extras {manual:Set|Map, undo:Map, proposals:Map} — external-данные app.js
+   * @param extras {manual:Set|Map, unseen:Set, undo:Map, proposals:Map} — external-данные app.js
    * @returns {{dirty:boolean, drift:boolean, missing:boolean, diverged:boolean,
-   *            hasManual:boolean, undo:object|null, proposal:object|null}}
+   *            unseen:boolean, hasManual:boolean, undo:object|null, proposal:object|null}}
    */
   function treeRowMarks(state, rel, extras) {
     const f = get(state, rel);
@@ -314,6 +336,9 @@
       // Расхождение с версией модели видно и по открытому буферу (knownHash из журнала),
       // и по context:list для всех файлов проекта — достаточно любого источника.
       diverged: (d ? d.modelDiverged : false) || manual,
+      // Этап D: файл создан/изменён вне чата и у модели нет о нём НИКАКИХ сведений.
+      // Взаимоисключающе с diverged: туда попадают файлы с записью в журнале, сюда — без.
+      unseen: has(ex.unseen),
       hasManual: manual,
       undo: take(ex.undo),
       proposal: take(ex.proposals),
@@ -327,7 +352,7 @@
     setKnown, setKnownMap,
     setPendingAi, getPendingAi, clearPendingAi,
     isDirty, isDrifted, isMissing, needsReload, modelDiverged, describe,
-    close, activate, activateRelative,
+    close, activate, activateRelative, renamePath,
     hasUnsaved, dirtyPaths, driftedPaths, baseName,
     treeRowMarks,
   };

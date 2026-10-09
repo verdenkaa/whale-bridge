@@ -323,6 +323,88 @@ test('runner: java — второй инструмент не найден, ош
   assert.match(r.message, /Не найден java в PATH/);
 });
 
+// ---------- C# (этап D) ----------
+
+const DOTNET = { found: true, exe: '/bin/fakedotnet', version: { major: 9, minor: 0, patch: 101, text: '9.0.101' } };
+const csTools = (over) => Object.assign({ dotnet: DOTNET }, over);
+
+test('runner: csharp — нет своего csproj: служебный проект создаётся в .ide_build', async (t) => {
+  const s = await setup(t, { tools: csTools(), runConfig: { args: { csharp: '--fast' } } });
+  fs.writeFileSync(path.join(s.root, 'Program.cs'), 'System.Console.WriteLine("Светит");\n');
+
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'Program.cs' } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+
+  // служебный проект создан: TFM по мажорной версии найденного SDK
+  const proj = path.join(s.root, '.ide_build', 'app.csproj');
+  assert.ok(fs.existsSync(proj), '.ide_build/app.csproj создан');
+  const xml = fs.readFileSync(proj, 'utf8');
+  assert.match(xml, /<TargetFramework>net9\.0<\/TargetFramework>/);
+  assert.match(xml, /<AssemblyName>app<\/AssemblyName>/);
+  assert.match(xml, /<Compile Include="\.\.\/\*\*\/\*\.cs"/);
+
+  // шаг 1: dotnet build служебного проекта в .ide_build/bin
+  assert.equal(s.ptys[0].opts.exe, '/bin/fakedotnet');
+  assert.deepEqual(s.ptys[0].opts.args,
+    ['build', '.ide_build/app.csproj', '--configuration', 'Release', '-o', '.ide_build/bin']);
+  assert.ok(fs.existsSync(path.join(s.root, '.ide_build', 'bin')), 'папка артефактов создана до сборки');
+  s.ptys[0].exit(0);
+
+  // шаг 2: dotnet <сборка>.dll + аргументы программы из настроек
+  assert.equal(s.ptys.length, 2);
+  assert.deepEqual(s.ptys[1].opts.args, ['.ide_build/bin/app.dll', '--fast']);
+  s.ptys[1].exit(0);
+  assert.equal(s.exitsOf(r.sessionId).filter((e) => !e.nextStep)[0].code, 0);
+});
+
+test('runner: csharp — пользовательский csproj побеждает, служебный не создаётся', async (t) => {
+  const s = await setup(t, { tools: csTools() });
+  fs.writeFileSync(path.join(s.root, 'Program.cs'), 'class P { static void Main() {} }\n');
+  fs.mkdirSync(path.join(s.root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(s.root, 'src', 'MyApp.csproj'), '<Project />\n');
+
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'Program.cs' } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(s.ptys[0].opts.args[1], 'src/MyApp.csproj', 'собирается найденный проект');
+  s.ptys[0].exit(0);
+  assert.deepEqual(s.ptys[1].opts.args, ['.ide_build/bin/MyApp.dll'], 'имя сборки — имя csproj');
+  assert.equal(fs.existsSync(path.join(s.root, '.ide_build', 'app.csproj')), false,
+    'служебный проект не создаётся рядом с пользовательским');
+});
+
+test('runner: csharp — существующий служебный csproj не перезаписывается', async (t) => {
+  const s = await setup(t, { tools: csTools() });
+  fs.writeFileSync(path.join(s.root, 'Program.cs'), 'class P { static void Main() {} }\n');
+  fs.mkdirSync(path.join(s.root, '.ide_build'), { recursive: true });
+  const custom = '<Project><!-- поправлен пользователем --></Project>\n';
+  fs.writeFileSync(path.join(s.root, '.ide_build', 'app.csproj'), custom);
+
+  const r = await s.runner.start({ project: s.project, target: { kind: 'file', rel: 'Program.cs' } });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(fs.readFileSync(path.join(s.root, '.ide_build', 'app.csproj'), 'utf8'), custom,
+    'пользовательская правка служебного проекта цела');
+});
+
+test('runner: csharp — нет версии SDK: TFM падает на net8.0; нет dotnet — понятная ошибка', async (t) => {
+  // версия не определилась — запасной net8.0 (шаблон пользователя)
+  const noVer = await setup(t, { tools: csTools({ dotnet: { found: true, exe: '/bin/fakedotnet', version: null } }) });
+  fs.writeFileSync(path.join(noVer.root, 'Program.cs'), 'class P { static void Main() {} }\n');
+  const r1 = await noVer.runner.start({ project: noVer.project, target: { kind: 'file', rel: 'Program.cs' } });
+  assert.equal(r1.ok, true, JSON.stringify(r1));
+  assert.match(fs.readFileSync(path.join(noVer.root, '.ide_build', 'app.csproj'), 'utf8'),
+    /<TargetFramework>net8\.0<\/TargetFramework>/);
+
+  // dotnet не найден — tool-missing с подсказкой про .NET SDK
+  const noDotnet = await setup(t, { tools: { dotnet: { found: false, exe: null } } });
+  fs.writeFileSync(path.join(noDotnet.root, 'Program.cs'), 'class P { static void Main() {} }\n');
+  const r2 = await noDotnet.runner.start({ project: noDotnet.project, target: { kind: 'file', rel: 'Program.cs' } });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.reason, 'tool-missing');
+  assert.equal(r2.tool, 'dotnet');
+  assert.match(r2.message, /Не найден dotnet в PATH/);
+  assert.match(r2.message, /\.NET SDK/);
+});
+
 // ---------- остановка и kill дерева ----------
 
 test('runner: stop — killTree вызван с pid, сессия закрыта немедленно', async (t) => {

@@ -37,11 +37,17 @@
   let els = null;
   let state = ES.createState();
   const models = new Map();          // path -> ITextModel
-  const tree = { dirs: new Map(), expanded: new Set() };
+  const tree = {
+    dirs: new Map(), expanded: new Set(),
+    // Поле ввода имени в дереве (этап D): {mode:'create-file'|'create-dir'|'rename',
+    // parentRel, rel, name}. Рисуется вместо строки (rename) или в конце папки (create).
+    pending: null,
+  };
   // «Внешние» данные дерева (этап B): их передаёт app.js из журналов — расхождения
-  // контекста, последние откатимые операции, предложения модели + колбэки кнопок.
+  // контекста, файлы, которых модель не видела (этап D), последние откатимые операции,
+  // предложения модели + колбэки кнопок.
   // Правила соединения с состоянием редактора — чистая ES.treeRowMarks (тестируется в Node).
-  let extras = { manual: new Set(), undo: new Map(), proposals: new Map(), callbacks: {} };
+  let extras = { manual: new Set(), unseen: new Set(), undo: new Map(), proposals: new Map(), callbacks: {} };
   // Доп. узлы строки вкладок (этап C3): кнопку «▶ Запустить» рисует app.js —
   // у редактора нет доступа к run-каналам, а вкладкам нужен единый ряд.
   let tabsExtras = [];
@@ -553,16 +559,30 @@
   function nodes(rel, depth, out) {
     const dir = tree.dirs.get(rel);
     if (!dir) return;
-    if (dir.error) { out.push(h('div', { class: 'ed-tree-err', style: `padding-left:${depth * 14 + 4}px` }, dir.error)); return; }
+    const pend = tree.pending;
+    const pendingHere = pend && pend.mode !== 'rename' && pend.parentRel === rel;
+    if (dir.error) {
+      out.push(h('div', { class: 'ed-tree-err', style: `padding-left:${depth * 14 + 4}px` }, dir.error));
+      // Поле ввода имени не теряем даже при ошибке чтения: операция дойдёт до main
+      // и вернёт содержательную ошибку, а исчезнувшее поле выглядело бы как игнорирование клика.
+      if (pendingHere) out.push(nameInputRow(depth));
+      return;
+    }
     for (const it of dir.items || []) {
       const open = tree.expanded.has(it.rel);
       const cb = extras.callbacks || {};
       // Отметки файла считаем одной чистой функцией: состояние буфера + журналы app.js
       const m = it.isDir ? null : ES.treeRowMarks(state, it.rel, extras);
+      // Переименовываемая строка заменяется полем ввода имени (как в VS Code)
+      if (pend && pend.mode === 'rename' && pend.rel === it.rel) {
+        out.push(nameInputRow(depth));
+        continue;
+      }
       out.push(h('div', {
         class: 'ed-node' + (state.active === it.rel ? ' on' : '')
           + (m && m.dirty ? ' dirty' : '') + (m && m.drift ? ' drift' : '')
-          + (m && m.diverged ? ' diverged' : '') + (m && m.proposal ? ' has-proposal' : ''),
+          + (m && m.diverged ? ' diverged' : '') + (m && m.unseen ? ' unseen' : '')
+          + (m && m.proposal ? ' has-proposal' : ''),
         style: `padding-left:${depth * 14 + 4}px`,
         title: it.isDir ? it.rel : (m && m.drift ? 'Файл изменён вне редактора' : it.rel),
         onclick: async () => {
@@ -573,6 +593,11 @@
           } else {
             await openPath(it.rel);
           }
+        },
+        // Правый клик — операции с файлами и папками (этап D)
+        oncontextmenu: (e) => {
+          if (e.preventDefault) e.preventDefault();
+          openCtxMenu(e.clientX || 0, e.clientY || 0, it);
         },
       },
       h('span', { class: 'ed-twisty' }, it.isDir ? (open ? '▾' : '▸') : ''),
@@ -586,6 +611,13 @@
         title: 'Модель в чате не знает текущую версию файла — показать отличия',
         onclick: (e) => { e.stopPropagation(); if (cb.onManual) cb.onManual(it.rel); },
       }, '◆'),
+      // ✚ — модель не видела файл вовсе: создан или изменён вне чата (этап D).
+      // Клик ведёт в тот же просмотр: содержимое целиком + «✓ Модель проинформирована».
+      m && m.unseen && h('button', {
+        class: 'ed-mark unseen', type: 'button',
+        title: 'Модель не видела этот файл: он создан или изменён без её участия — показать и передать модели',
+        onclick: (e) => { e.stopPropagation(); if (cb.onManual) cb.onManual(it.rel); },
+      }, '✚'),
       // синяя точка — есть предложение модели по этому файлу: клик открывает предложение
       m && m.proposal && h('button', {
         class: 'ed-mark prop', type: 'button',
@@ -606,6 +638,8 @@
         }, '↗'))));
       if (it.isDir && open) nodes(it.rel, depth + 1, out);
     }
+    // Поле «нового» имени — в конце той папки, где создаём (для корня parentRel === '')
+    if (pendingHere) out.push(nameInputRow(depth));
   }
 
   function renderTree() {
@@ -647,11 +681,298 @@
   function setTreeExtras(next) {
     extras = {
       manual: (next && next.manual) || new Set(),
+      unseen: (next && next.unseen) || new Set(),
       undo: (next && next.undo) || new Map(),
       proposals: (next && next.proposals) || new Map(),
       callbacks: (next && next.callbacks) || {},
     };
     renderTree();
+  }
+
+  // ---------- операции с файлами из дерева (этап D) ----------
+  //
+  // Как в обычном редакторе кода: правый клик на строке или на пустом месте дерева —
+  // контекстное меню; имя вводится в поле прямо в дереве (Enter — подтвердить,
+  // Esc или потеря фокуса — отмена). Сами операции выполняет main (fs:create /
+  // fs:rename / fs:delete): диск пишет тот же fileops.applyChange, что и всегда,
+  // поэтому файлы попадают в историю и откатываются, а удаление идёт через корзину.
+
+  const parentOf = (rel) => {
+    const i = String(rel || '').lastIndexOf('/');
+    return i > 0 ? String(rel).slice(0, i) : '';
+  };
+
+  let ctxMenu = null;
+  let nameInputBusy = false; // защита двойного Enter: подтверждение асинхронное
+
+  function closeCtxMenu() {
+    if (!ctxMenu) return;
+    const m = ctxMenu;
+    ctxMenu = null;
+    m.close();
+  }
+
+  function openCtxMenu(x, y, item) {
+    closeCtxMenu();
+    const entries = menuEntriesFor(item);
+    const el = h('div', {
+      class: 'ed-ctxmenu', role: 'menu',
+      style: `left:${Math.max(2, x)}px;top:${Math.max(2, y)}px`,
+    }, entries.map((it) => (it.sep
+      ? h('div', { class: 'ed-ctxmenu-sep' })
+      : h('button', {
+        type: 'button', role: 'menuitem', class: it.danger ? 'danger' : '',
+        onclick: () => { closeCtxMenu(); it.onclick(); },
+      }, it.label))));
+    // Меню живёт в body: дерево (#ed-tree) прокручивается и обрезало бы его.
+    // В тестовом стенде body может не быть — тогда вешаем в само дерево.
+    const host = (typeof document !== 'undefined' && document.body) || els.tree;
+    if (!host || typeof host.append !== 'function') return;
+    host.append(el);
+    // Не вылезать за окно: корректируем позицию, когда меню заняло место
+    if (typeof window !== 'undefined' && window.innerWidth) {
+      const w = el.offsetWidth || 210;
+      const hh = el.offsetHeight || entries.length * 26;
+      if (x + w > window.innerWidth - 4) el.style.left = Math.max(4, window.innerWidth - w - 4) + 'px';
+      if (y + hh > window.innerHeight - 4) el.style.top = Math.max(4, window.innerHeight - hh - 4) + 'px';
+    }
+    const onDown = (e) => { if (!el.contains || !el.contains(e.target)) closeCtxMenu(); };
+    const onKey = (e) => { if (e.key === 'Escape') closeCtxMenu(); };
+    const onScroll = () => closeCtxMenu();
+    // Слушатели ставим на следующем тике: событие правого клика, открывшее меню,
+    // не должно тут же его закрыть.
+    const arm = () => {
+      if (!ctxMenu) return; // меню уже закрыли
+      if (typeof window !== 'undefined' && window.addEventListener) {
+        window.addEventListener('pointerdown', onDown, true);
+        window.addEventListener('keydown', onKey, true);
+      }
+      if (els.tree && els.tree.addEventListener) els.tree.addEventListener('scroll', onScroll);
+    };
+    setTimeout(arm, 0);
+    ctxMenu = {
+      el,
+      close: () => {
+        if (typeof window !== 'undefined' && window.removeEventListener) {
+          window.removeEventListener('pointerdown', onDown, true);
+          window.removeEventListener('keydown', onKey, true);
+        }
+        if (els.tree && els.tree.removeEventListener) els.tree.removeEventListener('scroll', onScroll);
+        if (el.remove) el.remove();
+        else if (host.replaceChildren && host === els.tree) renderTree();
+      },
+    };
+  }
+
+  /** Пункты меню: item = null — пустое место дерева (операции в корне проекта). */
+  function menuEntriesFor(item) {
+    const parentRel = item ? (item.isDir ? item.rel : parentOf(item.rel)) : '';
+    const entries = [
+      { label: 'Новый файл', onclick: () => beginNameInput('create-file', parentRel) },
+      { label: 'Новая папка', onclick: () => beginNameInput('create-dir', parentRel) },
+    ];
+    if (item) {
+      entries.push({ sep: true });
+      entries.push({ label: 'Переименовать…', onclick: () => beginNameInput('rename', parentOf(item.rel), item.rel) });
+      entries.push({
+        label: item.isDir ? 'Удалить папку' : 'Удалить файл', danger: true,
+        onclick: () => deleteTreeItem(item),
+      });
+      entries.push({ sep: true });
+      entries.push({
+        label: 'Показать в проводнике',
+        onclick: () => { const cb = extras.callbacks || {}; if (cb.onReveal) cb.onReveal(item.rel); },
+      });
+    }
+    return entries;
+  }
+
+  /** Показать поле ввода имени в дереве (создание или переименование). */
+  async function beginNameInput(mode, parentRel, rel) {
+    if (!projectId) { toast('Сначала выберите проект', 'err'); return; }
+    closeCtxMenu();
+    if (parentRel) {
+      tree.expanded.add(parentRel);
+      await loadDir(parentRel);
+    } else {
+      await loadDir('');
+    }
+    tree.pending = {
+      mode,
+      parentRel: parentRel || '',
+      rel: rel || null,
+      name: rel ? String(rel).split('/').pop() : '',
+    };
+    renderTree();
+    // Фокус — после перерисовки: поле уже в дереве
+    setTimeout(() => {
+      const inp = els.tree && els.tree.querySelector ? els.tree.querySelector('.ed-tree-input') : null;
+      if (!inp || !inp.focus) return;
+      inp.focus();
+      // При переименовании выделяем имя без расширения — как в VS Code
+      const dot = tree.pending && tree.pending.name ? tree.pending.name.lastIndexOf('.') : -1;
+      if (dot > 0 && inp.setSelectionRange) { try { inp.setSelectionRange(0, dot); } catch { /* не критично */ } }
+      else if (inp.select) inp.select();
+    }, 0);
+  }
+
+  function nameInputRow(depth) {
+    const pend = tree.pending;
+    if (!pend) return h('span');
+    const placeholder = pend.mode === 'create-dir' ? 'имя папки'
+      : pend.mode === 'create-file' ? 'имя файла (можно с папкой: src/файл.txt)'
+        : 'новое имя';
+    const inp = h('input', {
+      class: 'ed-tree-input', type: 'text', value: pend.name || '', placeholder,
+      'aria-label': placeholder, spellcheck: 'false',
+      onclick: (e) => e.stopPropagation(),
+      onkeydown: (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commitNameInput(inp.value); }
+        else if (e.key === 'Escape') { e.preventDefault(); cancelNameInput(); }
+      },
+      onblur: () => { if (tree.pending) cancelNameInput(); },
+    });
+    return h('div', { class: 'ed-node editing', style: `padding-left:${depth * 14 + 4}px` },
+      h('span', { class: 'ed-twisty' }, ''), inp);
+  }
+
+  function cancelNameInput() {
+    if (!tree.pending) return;
+    tree.pending = null;
+    renderTree();
+  }
+
+  /**
+   * Подтверждение имени. Валидация пути полная — в main (resolveInProject), здесь
+   * только очевидное: пустое имя, «..», ведущие/хвостовые косые. Для создания '/'
+   * разрешён (создание сразу в подпапке), для переименования — нет (имя на месте).
+   */
+  async function commitNameInput(raw) {
+    if (nameInputBusy || !tree.pending) return;
+    const pend = tree.pending;
+    const name = String(raw || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    tree.pending = null; // до await: потеря фокуса во время операции уже не «отмена»
+    if (!name || name.split('/').some((s) => !s || s === '.' || s === '..')) {
+      renderTree();
+      if (name) toast('Недопустимое имя: пустые сегменты и «..» запрещены', 'err');
+      return;
+    }
+    nameInputBusy = true;
+    try {
+      if (pend.mode === 'rename') {
+        if (name.includes('/')) { toast('Новое имя не может содержать путь — переименование происходит на месте', 'err'); renderTree(); return; }
+        const parent = parentOf(pend.rel);
+        const newRel = parent ? parent + '/' + name : name;
+        if (newRel === pend.rel) { renderTree(); return; }
+        const r = await call('fs:rename', { projectId, rel: pend.rel, newRel });
+        if (r && r.ok) {
+          await afterTreeRename(pend.rel, newRel, r.isDir === true);
+          toast(`Переименовано: ${newRel}`, 'ok');
+        } else if (r) {
+          toast(r.error || 'Не удалось переименовать', 'err');
+        }
+      } else {
+        const relNew = pend.parentRel ? pend.parentRel + '/' + name : name;
+        const r = await call('fs:create', { projectId, rel: relNew, kind: pend.mode === 'create-dir' ? 'dir' : 'file' });
+        if (r && r.ok) {
+          if (r.isDir) {
+            tree.expanded.add(relNew);
+            toast(`Папка создана: ${relNew}`, 'ok');
+          } else {
+            // Новый файл сразу открываем: как в VS Code, курсор готов к набору кода
+            await openPath(relNew);
+            toast(`Файл создан: ${relNew}`, 'ok');
+          }
+        } else if (r) {
+          toast(r.error || 'Не удалось создать', 'err');
+        }
+      }
+    } finally {
+      nameInputBusy = false;
+      await refreshTree();
+    }
+  }
+
+  /**
+   * После переименования: открытые вкладки и раскрытые папки переезжают на новый путь.
+   * Буферы сохраняются — содержимое файла не изменилось, dirty-состояние остаётся честным
+   * (ES.renamePath), а модель Monaco пересоздаётся под новым URI.
+   */
+  async function afterTreeRename(oldRel, newRel, isDir) {
+    if (!isDir) {
+      await retargetOpenFile(oldRel, newRel);
+      return;
+    }
+    const prefix = oldRel + '/';
+    const newPrefix = newRel + '/';
+    for (const f of ES.list(state)) {
+      if (f.path.startsWith(prefix)) {
+        // eslint-disable-next-line no-await-in-loop — вкладок единицы, порядок не важен
+        await retargetOpenFile(f.path, newPrefix + f.path.slice(prefix.length));
+      }
+    }
+    for (const rel of [...tree.expanded]) {
+      if (rel === oldRel) { tree.expanded.delete(rel); tree.expanded.add(newRel); }
+      else if (rel.startsWith(prefix)) { tree.expanded.delete(rel); tree.expanded.add(newPrefix + rel.slice(prefix.length)); }
+    }
+  }
+
+  async function retargetOpenFile(oldRel, newRel) {
+    const f = ES.get(state, oldRel);
+    if (!f) return;
+    const text = f.text;
+    const language = f.language;
+    const vs = f.viewState;
+    const wasActive = state.active === oldRel;
+    const oldModel = models.get(oldRel);
+    const attached = !!(editor && oldModel && editor.getModel() === oldModel);
+    if (!ES.renamePath(state, oldRel, newRel)) { renderAll(); return; }
+    if (oldModel) {
+      models.delete(oldRel);
+      const nf = ES.get(state, newRel);
+      const nm = monaco.editor.createModel(text, language, uriFor(nf));
+      models.set(newRel, nm);
+      if (attached) {
+        editor.setModel(nm);
+        if (vs) { try { editor.restoreViewState(vs); } catch { /* не критично */ } }
+      }
+      oldModel.dispose();
+    } else if (wasActive) {
+      await showInEditor(newRel);
+    }
+    renderTabs();
+    renderStatus();
+  }
+
+  /** Удаление: подтверждение → main (корзина + история) → закрытие вкладок. */
+  async function deleteTreeItem(item) {
+    if (!projectId) return;
+    closeCtxMenu();
+    const what = item.isDir
+      ? `папку «${item.name}» со всем содержимым`
+      : `файл «${item.name}»`;
+    const note = item.isDir
+      ? 'Папка будет перемещена в системную корзину целиком.'
+      : 'Файл будет перемещён в системную корзину; операцию можно откатить из «Истории».';
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(`Удалить ${what}?\n\n${note}`)) return;
+    const r = await call('fs:delete', { projectId, rel: item.rel });
+    if (!r) return;
+    if (!r.ok) { toast(r.error || 'Не удалось удалить', 'err'); return; }
+    // Файла больше нет — вкладки закрываем без вопроса: сохранять некуда
+    if (!item.isDir) {
+      await closePath(item.rel, { force: true });
+    } else {
+      const prefix = item.rel + '/';
+      for (const f of ES.list(state).filter((x) => x.path.startsWith(prefix))) {
+        // eslint-disable-next-line no-await-in-loop — порядок не важен, вкладок единицы
+        await closePath(f.path, { force: true });
+      }
+      for (const rel of [...tree.expanded]) {
+        if (rel === item.rel || rel.startsWith(prefix)) tree.expanded.delete(rel);
+      }
+    }
+    toast(`Удалено: ${item.rel}`, 'ok');
+    await refreshTree();
   }
 
   // ---------- diff-host: постоянный экземпляр DiffEditor (этап C, §19) ----------
@@ -930,6 +1251,8 @@
     projectId = project ? project.id : null;
     tree.dirs.clear();
     tree.expanded.clear();
+    tree.pending = null; // поле ввода имени от прошлого проекта не переносится
+    closeCtxMenu();
     if (projectId) loadDir('').then(renderTree, renderTree);
     else renderTree();
     renderAll();
@@ -1019,6 +1342,19 @@
     toast = (hooks && hooks.toast) || (() => {});
     onDirtyChange = (hooks && hooks.onDirtyChange) || (() => {});
     onWantEditorMode = (hooks && hooks.onWantEditorMode) || (() => {});
+    // Правый клик на пустом месте дерева — операции в корне проекта (этап D).
+    // Строки дерева обрабатывают правый клик сами; сюда событие приходит всплытием,
+    // поэтому проверяем, что цель — само дерево или его пустая заглушка.
+    if (els.tree && els.tree.addEventListener) {
+      els.tree.addEventListener('contextmenu', (e) => {
+        const t = e.target;
+        const blank = t === els.tree
+          || (t && t.classList && (t.classList.contains('ed-tree-empty') || t.classList.contains('ed-tree-err')));
+        if (!blank) return;
+        if (e.preventDefault) e.preventDefault();
+        openCtxMenu(e.clientX || 0, e.clientY || 0, null);
+      });
+    }
     installKeys();
     renderAll();
     showEmpty();
@@ -1032,7 +1368,9 @@
     hasUnsaved: () => ES.hasUnsaved(state),
     dirtyPaths: () => ES.dirtyPaths(state),
     isVisible: () => visible,
-    // для отладки и тестов: доступ к чистому состоянию
+    // для отладки и тестов: доступ к чистому состоянию и операциям дерева (этап D)
     _state: () => state,
+    _tree: tree,
+    _treeOps: { beginNameInput, commitNameInput, cancelNameInput, deleteTreeItem, openCtxMenu, closeCtxMenu, menuEntriesFor },
   };
 })();

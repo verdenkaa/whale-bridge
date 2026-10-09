@@ -128,10 +128,32 @@
         env: null,
       }),
     }),
+    Object.freeze({
+      id: 'csharp', label: 'C#',
+      exts: Object.freeze(['.cs']),
+      tools: Object.freeze([Object.freeze({
+        key: 'dotnet', names: Object.freeze(['dotnet']),
+        label: '.NET SDK (dotnet)', install: '.NET SDK 8 или новее и добавьте его в PATH',
+      })]),
+      // Сборка через dotnet build, запуск — dotnet <сборка>.dll (решение пользователя).
+      // Проект (.csproj) ищет раннер по всему дереву проекта; если своего нет, он
+      // создаёт служебный .ide_build/app.csproj (шаблон — csharpProjectXml), поэтому
+      // одинокий Program.cs запускается без ручного создания проекта. Артефакты —
+      // в .ide_build/bin, как у остальных компилируемых языков.
+      // args из настроек — аргументы ПРОГРАММЫ (в конец запуска), а не компилятора:
+      // у dotnet build дополнительные аргументы MSBuild почти не нужны учебному коду.
+      plan: ({ args, csharp }) => ({
+        steps: [
+          { kind: 'build', tool: 'dotnet', args: ['build', csharp.proj, '--configuration', 'Release', '-o', BUILD_DIR + '/bin'] },
+          { kind: 'run', tool: 'dotnet', args: [BUILD_DIR + '/bin/' + csharp.assembly + '.dll', ...args] },
+        ],
+        env: null,
+      }),
+    }),
   ]);
 
-  const TOOL_KEYS = Object.freeze(['python', 'node', 'cpp', 'c', 'javac', 'java']);
-  const ARGS_KEYS = Object.freeze(['python', 'cpp', 'c', 'java']);
+  const TOOL_KEYS = Object.freeze(['python', 'node', 'cpp', 'c', 'javac', 'java', 'dotnet']);
+  const ARGS_KEYS = Object.freeze(['python', 'cpp', 'c', 'java', 'csharp']);
   /** Оболочка Windows для &CMD: — только cmd.exe (решение пользователя, PowerShell не внедряем). */
   const SHELLS_WIN = Object.freeze(['cmd']);
 
@@ -179,6 +201,43 @@
       ? sourceText.match(/^[ \t]*package[ \t]+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)[ \t]*;/m)
       : null;
     return m ? m[1] + '.' + base : base;
+  }
+
+  /**
+   * Служебный C#-проект (этап D). Создаётся раннером в .ide_build/app.csproj, только
+   * если в проекте не нашлось ни одного пользовательского .csproj: одинокий Program.cs
+   * обязан запускаться без ручного создания проекта.
+   *
+   * Почему в .ide_build, а не в корень: корень принадлежит пользователю и журналу
+   * контекста — служебный файл в нём подсветился бы как «новый файл, которого модель
+   * не видела» и ушёл бы в промпт. В .ide_build (папка артефактов из IGNORE_DIRS) его
+   * не видно ни дереву, ни промпт-генератору, ни слежению за новыми файлами.
+   *
+   * TargetFramework — по мажорной версии найденного SDK (net9.0 для SDK 9): собирать
+   * net8.0 девятый SDK может, но это лишний restore целевого пакета, а совпадающая
+   * версия собирается без сети. Аргументы из настроек на этот файл не влияют.
+   *
+   * Исходники берутся явным glob'ом из корня проекта (EnableDefaultItems отключён:
+   * стандартный glob смотрел бы на папку самого проекта, то есть на .ide_build).
+   */
+  const CSHARP_DEFAULT_TFM = 'net8.0';
+  function csharpProjectXml(targetFramework) {
+    const tfm = /^net\d+\.0$/.test(String(targetFramework || '')) ? String(targetFramework) : CSHARP_DEFAULT_TFM;
+    return `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Служебный проект Whale Bridge: консольное приложение поверх .cs из корня проекта -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>${tfm}</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>app</AssemblyName>
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../**/*.cs" Exclude="../bin/**;../obj/**;../.ide_build/**;../.git/**;../node_modules/**" />
+  </ItemGroup>
+</Project>
+`;
   }
 
   /** Первая версия x.y[.z] из вывода «--version» (python, gcc, node…). */
@@ -232,7 +291,10 @@
    *
    * @param {string} langId идентификатор языка (LANGS)
    * @param {string} rel путь файла относительно корня проекта
-   * @param {{platform?:string, args?:string[], fqcn?:string, nodeMajor?:number|null}} opts
+   * @param {{platform?:string, args?:string[], fqcn?:string, nodeMajor?:number|null,
+   *          csharp?:{proj:string, assembly:string}|null}} opts
+   *   csharp — проект C# (путь к .csproj от корня и имя сборки): его находит или
+   *   создаёт раннер (src/runner.js), план — чистая функция и диск не смотрит
    * @returns {{ok:true, steps:Array, env:object|null, outDir:string|null}|{ok:false, error:string}}
    */
   function planRun(langId, rel, opts) {
@@ -254,7 +316,15 @@
       platform,
       fqcn: typeof o.fqcn === 'string' && o.fqcn ? o.fqcn : base,
       nodeMajor,
+      csharp: isObj(o.csharp) && typeof o.csharp.proj === 'string' && o.csharp.proj.trim()
+        && typeof o.csharp.assembly === 'string' && o.csharp.assembly.trim()
+        ? { proj: o.csharp.proj, assembly: o.csharp.assembly }
+        : null,
     };
+    // План C# нечем собрать без проекта: лучше понятная ошибка, чем TypeError внутри plan
+    if (lang.id === 'csharp' && !ctx.csharp) {
+      return { ok: false, error: 'Проект C# (.csproj) не определён — запуск невозможен' };
+    }
     const p = lang.plan(ctx);
     let steps = (p.steps || []).map((s) => ({
       kind: s.kind === 'build' ? 'build' : 'run',
@@ -279,11 +349,12 @@
       };
     }
     const needsOutDir = steps.some((s) => s.kind === 'build');
+    const outSub = lang.id === 'java' ? '/classes' : lang.id === 'csharp' ? '/bin' : '';
     return {
       ok: true,
       steps,
       env: p.env || null,
-      outDir: needsOutDir ? BUILD_DIR + (lang.id === 'java' ? '/classes' : '') : null,
+      outDir: needsOutDir ? BUILD_DIR + outSub : null,
     };
   }
 
@@ -458,9 +529,12 @@
     if (name === 'net' && sub === 'user') bump('danger', 'net user — правка учётных записей');
     // закодированная команда — признак обфускации (powershell -enc, -encodedcommand)
     if (rest.some((t) => /^-enc(odedcommand)?$/i.test(t))) bump('danger', 'закодированная команда (-enc)');
-    // установка пакетов — «осторожно», но pip/npm без изменяющей подкоманды безопасны
+    // установка пакетов — «осторожно», но pip/npm/dotnet без изменяющей подкоманды безопасны
     if ((name === 'pip' || name === 'pip3' || name === 'npm') && PACKAGE_SUBS.has(sub)) {
       bump('caution', `${name} ${sub} — установка пакетов`);
+    } else if (name === 'dotnet' && (sub === 'restore' || PACKAGE_SUBS.has(sub))) {
+      // dotnet add/remove package и restore тянут пакеты из сети; build/run/test — чтение и сборка
+      bump('caution', `dotnet ${sub} — установка пакетов`);
     } else if (CAUTION_CMDS.has(name)) bump('caution', `установка, сеть или управление процессами: ${name}`);
 
     for (const t of tokens) {
@@ -491,8 +565,8 @@
 
   return {
     BUILD_DIR, LANGS, TOOL_KEYS, ARGS_KEYS, SHELLS_WIN, UTF8_CONSOLE_PREFIX,
-    DANGER_CMDS, DANGER_FLAGS, CAUTION_CMDS,
-    langById, langByExt, tokenizeArgs, javaClassFqn, parseVersion,
+    DANGER_CMDS, DANGER_FLAGS, CAUTION_CMDS, CSHARP_DEFAULT_TFM,
+    langById, langByExt, tokenizeArgs, javaClassFqn, csharpProjectXml, parseVersion,
     sanitizeRunConfig, defaultRunConfig, planRun, planShell, ptySpawnArgs, classifyCommand,
   };
 });

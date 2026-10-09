@@ -31,6 +31,18 @@ const COPY_PREAMBLE = `ЭТИ ФАЙЛЫ ИЗМЕНИЛИСЬ С ТЕХ ПОР, 
 с ТЕКУЩИМ содержимым файла, а не с тем, которое ты видела раньше.
 
 Если точная версия файла не сохранилась, он приведён целиком — это оговорено в его заголовке.`;
+// Вторая половина того же сигнала (этап D): файлы, которых модель не видела ВОВСЕ —
+// созданные или изменённые пользователем вне чата. Diff для них невозможен в принципе:
+// сравнивать не с чем, известной версии нет. Поэтому они уходят целиком, и преамбула
+// говорит об этом прямо — иначе модель искала бы «изменения», которых не существует.
+const UNSEEN_PREAMBLE = `ЭТИХ ФАЙЛОВ ТЫ ЕЩЁ НЕ ВИДЕЛА: я создал или изменил их сам, без твоего участия
+
+Diff для них привести нельзя — известной тебе версии не существует, поэтому каждый файл
+дан целиком, это его текущее содержимое на диске. Считай эти файлы частью проекта и
+ориентируйся на них: фрагменты в твоих блоках SEARCH должны совпадать с этим текстом.
+
+Файл, помеченный как новый, раньше не существовал. Файл, помеченный как изменённый
+без твоего участия, существовал, но его прежнее содержимое тебе неизвестно.`;
 // Сколько файлов журнала проверяем за один запрос: проверка требует чтения каждого.
 // Совпадает с внутренним лимитом editorfs.hashesForEditor.
 const MAX_DIVERGENCE_CHECK = 200;
@@ -786,6 +798,73 @@ class ProposalManager {
   }
 
   /**
+   * Файлы, которых модель НЕ ВИДЕЛА вовсе (этап D): созданные или изменённые вне чата,
+   * без записи в журнале контекста. Вторая половина учёта контекста: расхождения
+   * (listDivergences) отвечают на «модель знает устаревшее», этот список — на «модель
+   * не знает ничего». Вместе они покрывают и разработку руками с консультациями модели.
+   *
+   * Точка отсчёта — базовый снимок пары чат+проект (отпечатки «размер:mtime» всех
+   * файлов). Снимок создаётся лениво, при первом запросе: чат, который только привязали,
+   * начинает с чистого листа (не подсвечивается весь проект), а дальше светится только
+   * то, что появилось или изменилось. Файлы с записью в журнале сюда не попадают:
+   * устаревшее знание — работа списка расхождений.
+   *
+   * Проект больше лимита отпечатков (fileops.FP_LIMIT) — честно возвращаем truncated
+   * и пустой список: показывать часть новых файлов и молчать об остальных хуже,
+   * чем прямо сказать, что слежение для такого проекта выключено.
+   */
+  async listUnseen(chatId, projectId) {
+    const empty = { items: [], truncated: false };
+    if (!chatId || !projectId) return empty;
+    const project = this.store.getProject(projectId);
+    if (!project) return empty;
+    const base = await this.store.getBaseline(chatId, projectId);
+    if (!base) {
+      // Первый взгляд на пару чат+проект: снимаем состояние диска ЦЕЛИКОМ (отпечаток +
+      // хэш содержимого на файл). Дорого, но один раз; позже здесь и не появятся —
+      // файл, созданный до первого запроса, новым для этого чата уже не станет.
+      const snap = await fileops.getProjectSnapshot(project.path);
+      await this.store.saveBaseline(chatId, projectId, {
+        capturedAt: Date.now(), truncated: snap.truncated, files: snap.files,
+      }).catch((e) => console.error('[baseline]', e));
+      return { ...empty, justCaptured: true };
+    }
+    const cur = await fileops.getFingerprints(project.path);
+    if (base.truncated || cur.truncated) return { items: [], truncated: true };
+    const knownRels = new Set(Context.entries(this.store.contextKnown(), chatId, projectId).map((e) => e.relPath));
+    const r = Context.listUnseen(base.files, cur.files, knownRels);
+
+    // Точная проверка «изменённых»: отпечаток (размер+mtime) мог смениться без изменения
+    // содержимого — сборка или git «тронули» файл. Хэш из базового снимка сравнивается
+    // с текущим; при совпадении файл не светится, а отпечаток в снимке обновляется,
+    // чтобы следующая проверка не перечитывала его. Новые файлы проверки не требуют.
+    const items = [];
+    let refreshed = false;
+    for (const it of r.items) {
+      if (it.isNew || !it.baseHash) {
+        items.push({ relPath: it.relPath, isNew: it.isNew });
+        continue;
+      }
+      const rp = await resolveInProject(project.path, it.relPath);
+      let hash = null;
+      if (rp.ok && rp.exists && rp.isFile) {
+        const curFile = await fileops.readRawFile(rp.abs);
+        hash = curFile.error ? null : curFile.hash;
+      }
+      if (hash && hash === it.baseHash) {
+        base.files[it.relPath] = it.curFp + ':' + it.baseHash;
+        refreshed = true;
+        continue; // содержимое то же, что на момент снимка, — модели тут нечего догонять
+      }
+      items.push({ relPath: it.relPath, isNew: false });
+    }
+    if (refreshed) {
+      await this.store.saveBaseline(chatId, projectId, base).catch((e) => console.error('[baseline]', e));
+    }
+    return { items, truncated: r.truncated };
+  }
+
+  /**
    * Сравнение «что знала модель → что сейчас на диске».
    *
    * База сравнения — снимок версии из журнала контекста, а НЕ резервная копия последней
@@ -814,6 +893,28 @@ class ProposalManager {
     if (current.error) return { relPath, diverged: div.diverged, knownVersion, error: current.error };
 
     if (!div.diverged) {
+      // Записи в журнале нет — модель файл никогда не видела. Если он новый или изменён
+      // вне чата (список unseen), показываем содержимое как additions: база сравнения —
+      // пустота, известной версии не существует.
+      if (!div.known) {
+        const un = await this.listUnseen(chatId, projectId);
+        const hit = un.items.find((x) => x.relPath === relPath);
+        if (hit) {
+          const ops = diffLines('', current.text);
+          const rows = toRows(ops, 3);
+          return {
+            relPath, diverged: false, unseen: true, isNew: hit.isNew, knownVersion: null,
+            base: 'empty', baseText: '', currentHash: current.hash, currentText: current.text,
+            stats: diffStats(ops), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS,
+          };
+        }
+        return {
+          relPath, diverged: false, unseen: false, knownVersion: null,
+          currentHash: current.hash, currentText: current.text,
+          rows: [], stats: { added: 0, removed: 0 },
+          note: 'Модель не видела этот файл, но он не менялся с начала учёта в этом чате — отправлять нечего.',
+        };
+      }
       return {
         relPath, diverged: false, knownVersion, currentHash: current.hash, currentText: current.text,
         rows: [], stats: { added: 0, removed: 0 },
@@ -920,6 +1021,75 @@ class ProposalManager {
       // payloadChars — объём самих файлов без преамбулы: по нему видно выигрыш от diff'а
       payloadChars: chars,
       asDiff, asFull, skipped: skipped.length, truncated: skipped.length > 0,
+    };
+  }
+
+  /**
+   * Копирует файлы, которых модель не видела (этап D), — целиком: известной версии
+   * нет, и diff физически невозможен. Как и copyDivergentVersions, копирование НЕ
+   * ставит отметок: буфер обмена — не чат, отметку ставит «✓ Модель проинформирована».
+   */
+  async copyUnseenFiles(chatId, projectId) {
+    const { items, truncated } = await this.listUnseen(chatId, projectId);
+    if (!items.length) {
+      return {
+        ok: false,
+        error: truncated
+          ? 'Проект слишком большой для слежения за новыми файлами — список недоступен'
+          : 'Новых файлов нет: модель видела всё, что появлялось или менялось в проекте',
+      };
+    }
+    const project = this.store.getProject(projectId);
+    if (!project) return { ok: false, error: 'Проект не найден' };
+
+    const parts = [UNSEEN_PREAMBLE];
+    const skipped = [];
+    let chars = 0;
+    let files = 0;
+    for (const item of items) {
+      const r = await resolveInProject(project.path, item.relPath);
+      if (!r.ok || !r.exists || !r.isFile) { skipped.push(item.relPath + ' (недоступен)'); continue; }
+      const cur = await fileops.readTextFile(r.abs);
+      if (cur.error) { skipped.push(`${item.relPath} (${cur.error})`); continue; }
+      const why = item.isNew ? 'новый файл' : 'изменён без твоего участия';
+      const block = `--- ${item.relPath} --- (${why}: приведён целиком)\n${cur.text}`;
+      if (chars + block.length > MAX_COPY_CHARS) { skipped.push(item.relPath + ' (лимит общего объёма)'); continue; }
+      chars += block.length;
+      files++;
+      parts.push(block);
+    }
+    if (!files) {
+      return { ok: false, error: 'Ни один из новых файлов не удалось подготовить: ' + (skipped.join('; ') || 'неизвестная причина') };
+    }
+    if (skipped.length) parts.push('--- Не подготовлено ---\n' + skipped.map((x) => '- ' + x).join('\n'));
+    const text = parts.join('\n\n');
+    return { ok: true, length: text.length, files, text, skipped: skipped.length, truncated: skipped.length > 0 };
+  }
+
+  /**
+   * Одна кнопка — всё, чем модель отстала от проекта (этап D):
+   * расхождения (diff от известной версии) + файлы, которых она не видела (целиком).
+   * Пустые половины опускаются: если расхождений нет, в буфере только новые файлы,
+   * и наоборот. Ошибка — только когда пусты обе половины.
+   */
+  async copyMissingContext(chatId, projectId) {
+    const div = await this.copyDivergentVersions(chatId, projectId);
+    const un = await this.copyUnseenFiles(chatId, projectId);
+    if (!div.ok && !un.ok) {
+      return { ok: false, error: 'Копировать нечего: расхождений с известными модели версиями нет, и новых файлов тоже' };
+    }
+    const parts = [];
+    if (div.ok) parts.push(div.text);
+    if (un.ok) parts.push(un.text);
+    const text = parts.join('\n\n');
+    return {
+      ok: true, text, length: text.length,
+      files: (div.ok ? div.files : 0) + (un.ok ? un.files : 0),
+      asDiff: div.ok ? div.asDiff : 0,
+      asFull: div.ok ? div.asFull : 0,
+      asNew: un.ok ? un.files : 0,
+      skipped: (div.ok ? div.skipped : 0) + (un.ok ? un.skipped : 0),
+      truncated: (div.ok && div.truncated) || (un.ok && un.truncated),
     };
   }
 
@@ -1078,6 +1248,19 @@ class ProposalManager {
   /** Подтвердить сразу все файлы с расхождением — чтобы не кликать по каждому. */
   async ackAllDivergent(chatId, projectId) {
     const { items } = await this.listDivergences(chatId, projectId);
+    let ok = 0;
+    const failed = [];
+    for (const item of items) {
+      const r = await this.ackContext(chatId, projectId, item.relPath);
+      if (r.ok) ok++;
+      else failed.push(`${item.relPath}: ${r.error}`);
+    }
+    return { ok: failed.length === 0, acked: ok, total: items.length, failed };
+  }
+
+  /** Подтвердить сразу все файлы, которых модель не видела (этап D). */
+  async ackAllUnseen(chatId, projectId) {
+    const { items } = await this.listUnseen(chatId, projectId);
     let ok = 0;
     const failed = [];
     for (const item of items) {

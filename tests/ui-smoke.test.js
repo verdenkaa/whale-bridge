@@ -98,6 +98,7 @@ test('UI: левая панель, режимы редактора, геомет
     c: { found: false, exe: null, source: null, version: null, brokenManual: false, candidates: [] },
     javac: { found: true, exe: 'C:\\jdk\\bin\\javac.exe', source: 'manual', version: { text: '17.0.2', major: 17 }, brokenManual: false, candidates: [] },
     java: { found: false, exe: null, source: null, version: null, brokenManual: true, candidates: [] },
+    dotnet: { found: true, exe: 'C:\\Program Files\\dotnet\\dotnet.exe', source: 'path', version: { text: '8.0.404', major: 8 }, brokenManual: false, candidates: [] },
   };
   const detectCalls = [];
   const pickCalls = [];
@@ -136,10 +137,13 @@ test('UI: левая панель, режимы редактора, геомет
         historyId: 'h9', diskHash: 'c', missing: false,
       }],
       checked: 1, truncated: false,
+      // этап D: файлы, которых модель не видела вовсе (созданы/изменены вне чата)
+      unseen: [{ relPath: 'n.gd', isNew: true }], unseenTruncated: false,
     },
     'context:known': { 'a.gd': 'a' },
     'context:ack': { ok: true, relPath: 'a.gd', hash: 'c' },
-    'context:ack-all': { ok: true, acked: 1, total: 1, failed: [] },
+    'context:ack-all': { ok: true, acked: 2, total: 2, failed: [] },
+    'manual:copy': { ok: true, files: 2, length: 100, asDiff: 1, asFull: 0, asNew: 1, skipped: 0, truncated: false },
     'manual:view': {
       relPath: 'a.gd', historyId: 'h9', diverged: true, currentHash: 'c', afterHash: 'a',
       knownVersion: { hash: 'a', source: 'applied', ts: Date.now(), label: 'модель сама предложила это содержимое' },
@@ -280,14 +284,26 @@ test('UI: левая панель, режимы редактора, геомет
   assert.ok(btn(roots['files-head'], '✓ Модель знает все'), 'кнопка массовой отметки');
   assert.match(text(roots['files-banner']), /Модель не знает текущую версию: 1 файл/);
   assert.match(text(roots['files-banner']), /a\.gd/); // имена перечислены явно (свёрнутые папки)
+  // этап D: файлы, которых модель не видела вовсе, — отдельная плашка и отметки дерева
+  assert.match(text(roots['files-banner']), /Модель не видела: 1 файл/);
+  assert.match(text(roots['files-banner']), /n\.gd/);
 
-  // отметки дерева: расхождения контекста, последняя откатимая операция, предложения
+  // отметки дерева: расхождения контекста, невиденные файлы, последняя откатимая операция, предложения
   assert.ok(ed.extras, 'данные дерева переданы в редактор');
   assert.deepEqual([...ed.extras.manual], ['a.gd']);
+  assert.deepEqual([...ed.extras.unseen], ['n.gd']);
   assert.equal(ed.extras.undo.get('a.gd').id, 'h2'); // h1 — pruned, h3 — неоткатимый откат
   assert.equal(ed.extras.undo.has('n.gd'), false);
   assert.equal(ed.extras.proposals.get('big.gd').firstId, 'a');
   assert.equal(ed.extras.proposals.get('n.gd').count, 1);
+
+  // «Скопировать для модели» — одна кнопка на всё, чем модель отстала (manual:copy):
+  // расхождения (diff) и новые файлы (целиком) уходят в буфер вместе
+  await click(btn(roots['files-head'], 'Скопировать для модели'));
+  await tick(40);
+  assert.ok(log.some(([ch]) => ch === 'manual:copy'), 'копирование уходит через manual:copy');
+  assert.match(text(roots.toast), /Скопировано файлов: 2/);
+  assert.match(text(roots.toast), /1 новых/);
 
   // клик по ◆ в дереве открывает «мои правки» в Monaco DiffEditor ВМЕСТО редактора
   await ed.extras.callbacks.onManual('a.gd');
@@ -863,9 +879,9 @@ test('UI: левая панель, режимы редактора, геомет
 
   // таблица: строка на каждый инструмент (у Java их две — javac и java)
   const rowsOf = () => findAll(roots['settings-body'], (e) => e.className === 'set-row');
-  assert.equal(rowsOf().length, 6, 'шесть инструментов в таблице');
+  assert.equal(rowsOf().length, 7, 'семь инструментов в таблице (этап D: добавлен dotnet)');
   const bodyText = text(roots['settings-body']);
-  for (const s of ['Python', 'Node.js', 'g++ / clang++', 'gcc / clang', 'javac', 'java',
+  for (const s of ['Python', 'Node.js', 'g++ / clang++', 'gcc / clang', 'javac', 'java', '.NET SDK (dotnet)',
     'Дополнительные аргументы', 'Таймаут бездействия', 'Оболочка для команд модели']) {
     assert.ok(bodyText.includes(s), 'в панели есть «' + s + '»');
   }
@@ -879,7 +895,7 @@ test('UI: левая панель, режимы редактора, геомет
     (e) => typeof e.className === 'string' && e.className.split(' ').includes(cls));
   assert.equal(withClass('st-none').length, 1, 'красным — только «не найден»');
   assert.equal(withClass('st-broken').length, 2, 'жёлтым — оба битых ручных пути');
-  assert.equal(withClass('st-ok').length, 2, 'зелёным — python и node из PATH');
+  assert.equal(withClass('st-ok').length, 3, 'зелёным — python, node и dotnet из PATH');
   assert.equal(withClass('st-manual').length, 1, 'отдельный цвет у пути из настроек (javac)');
   assert.equal(withClass('st-unknown').length, 0, 'без результата обнаружения «не проверялось» не показывается');
   // подсказка «что установить» — только там, где не найдено (§9)
@@ -915,10 +931,10 @@ test('UI: левая панель, режимы редактора, геомет
   const pyRow = rowsOf().find((r) => text(r).includes('Python'));
   assert.equal(btn(pyRow, 'Авто').getAttribute('disabled'), '', 'без ручного пути «Авто» неактивна');
 
-  // дополнительные аргументы: четыре поля (Node без аргументов), сохранение по change
+  // дополнительные аргументы: пять полей (Node без аргументов), сохранение по change
   const argInputs = findAll(roots['settings-body'],
     (e) => e.tag === 'input' && String(e.getAttribute('aria-label') || '').startsWith('Дополнительные аргументы'));
-  assert.equal(argInputs.length, 4, 'аргументы у Python, C++, C и javac');
+  assert.equal(argInputs.length, 5, 'аргументы у Python, C++, C, javac и C#');
   const cppArgs = argInputs.find((i) => String(i.getAttribute('aria-label')).includes('C++'));
   cppArgs.value = '-Wall -O2';
   for (const f of cppArgs.listeners.change) await f({ target: cppArgs });

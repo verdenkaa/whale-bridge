@@ -6,25 +6,31 @@ const assert = require('node:assert/strict');
 
 const RL = require('../src/runlangs');
 
-test('runlangs: таблица языков — 5 языков, расширения и инструменты как в ТЗ', () => {
-  assert.equal(RL.LANGS.length, 5);
-  assert.deepEqual(RL.LANGS.map((l) => l.id), ['python', 'node', 'cpp', 'c', 'java']);
+test('runlangs: таблица языков — 6 языков, расширения и инструменты как в ТЗ', () => {
+  assert.equal(RL.LANGS.length, 6);
+  assert.deepEqual(RL.LANGS.map((l) => l.id), ['python', 'node', 'cpp', 'c', 'java', 'csharp']);
   const byId = Object.fromEntries(RL.LANGS.map((l) => [l.id, l]));
   assert.deepEqual([...byId.python.exts], ['.py']);
   assert.deepEqual([...byId.node.exts], ['.js', '.mjs', '.cjs', '.ts', '.mts']);
   assert.deepEqual([...byId.cpp.exts], ['.cpp', '.cc', '.cxx']);
   assert.deepEqual([...byId.c.exts], ['.c']);
   assert.deepEqual([...byId.java.exts], ['.java']);
+  assert.deepEqual([...byId.csharp.exts], ['.cs']);
   // кандидаты PATH в порядке дескриптора
   assert.deepEqual([...byId.python.tools[0].names], ['python', 'python3', 'py']);
   assert.deepEqual([...byId.cpp.tools[0].names], ['g++', 'clang++']);
   assert.deepEqual([...byId.c.tools[0].names], ['gcc', 'clang']);
   // Java — пара инструментов: компилятор и рантайм
   assert.deepEqual(byId.java.tools.map((t) => t.key), ['javac', 'java']);
+  // C# — один инструмент: SDK (dotnet build и dotnet <dll> — одна программа)
+  assert.deepEqual(byId.csharp.tools.map((t) => t.key), ['dotnet']);
+  assert.deepEqual([...byId.csharp.tools[0].names], ['dotnet']);
   // ключи ручных путей настроек совпадают с дефолтом config.run
-  assert.deepEqual([...RL.TOOL_KEYS], ['python', 'node', 'cpp', 'c', 'javac', 'java']);
+  assert.deepEqual([...RL.TOOL_KEYS], ['python', 'node', 'cpp', 'c', 'javac', 'java', 'dotnet']);
+  assert.deepEqual([...RL.ARGS_KEYS], ['python', 'cpp', 'c', 'java', 'csharp']);
   const def = RL.defaultRunConfig();
   assert.deepEqual(Object.keys(def.tools), [...RL.TOOL_KEYS]);
+  assert.deepEqual(Object.keys(def.args), [...RL.ARGS_KEYS]);
 });
 
 test('runlangs: langByExt — с точкой и без, регистр не важен, чужое расширение — null', () => {
@@ -115,6 +121,71 @@ test('runlangs: planRun java — javac -d .ide_build/classes, запуск FQCN 
   // без fqcn — имя файла (класс без package)
   const noFq = RL.planRun('java', 'Main.java', {});
   assert.deepEqual(noFq.steps[1].args, ['-cp', '.ide_build/classes', 'Main']);
+});
+
+test('runlangs: planRun csharp — dotnet build в .ide_build/bin, запуск dotnet <сборка>.dll (этап D)', () => {
+  const cs = { proj: 'MyApp.csproj', assembly: 'MyApp' };
+  const p = RL.planRun('csharp', 'src/Program.cs', { platform: 'win32', csharp: cs, args: ['--fast'] });
+  assert.equal(p.ok, true);
+  assert.equal(p.steps.length, 2, 'два шага: сборка и запуск');
+  assert.deepEqual(p.steps[0], {
+    kind: 'build', tool: 'dotnet', exe: null,
+    args: ['build', 'MyApp.csproj', '--configuration', 'Release', '-o', '.ide_build/bin'],
+  });
+  assert.deepEqual(p.steps[1], {
+    kind: 'run', tool: 'dotnet', exe: null,
+    args: ['.ide_build/bin/MyApp.dll', '--fast'],
+  });
+  assert.equal(p.env, null);
+  assert.equal(p.outDir, '.ide_build/bin', 'папка артефактов создаётся до сборки');
+  // аргументы из настроек — аргументы ПРОГРАММЫ, идут в конец запуска
+  assert.deepEqual(RL.planRun('csharp', 'a.cs', { csharp: cs }).steps[1].args, ['.ide_build/bin/MyApp.dll']);
+  // служебный проект из .ide_build работает так же
+  const svc = RL.planRun('csharp', 'Program.cs', { csharp: { proj: '.ide_build/app.csproj', assembly: 'app' } });
+  assert.deepEqual(svc.steps[0].args[1], '.ide_build/app.csproj');
+  assert.deepEqual(svc.steps[1].args, ['.ide_build/bin/app.dll']);
+});
+
+test('runlangs: planRun csharp без проекта — понятная ошибка, а не падение', () => {
+  for (const opts of [{}, { csharp: null }, { csharp: {} }, { csharp: { proj: 'x.csproj' } },
+    { csharp: { assembly: 'x' } }, { csharp: { proj: '  ', assembly: 'x' } }, 'мусор']) {
+    const r = RL.planRun('csharp', 'Program.cs', opts);
+    assert.equal(r.ok, false, JSON.stringify(opts));
+    assert.match(r.error, /csproj/, 'ошибка называет .csproj');
+  }
+});
+
+test('runlangs: csharpProjectXml — служебный проект (этап D)', () => {
+  const xml = RL.csharpProjectXml('net9.0');
+  assert.match(xml, /<Project Sdk="Microsoft\.NET\.Sdk">/);
+  assert.match(xml, /<OutputType>Exe<\/OutputType>/, 'консольное приложение, а не библиотека');
+  assert.match(xml, /<TargetFramework>net9\.0<\/TargetFramework>/, 'версия платформы из аргумента');
+  assert.match(xml, /<ImplicitUsings>enable<\/ImplicitUsings>/);
+  assert.match(xml, /<Nullable>enable<\/Nullable>/);
+  assert.match(xml, /<AssemblyName>app<\/AssemblyName>/, 'имя сборки фиксировано — план знает его заранее');
+  assert.match(xml, /<EnableDefaultItems>false<\/EnableDefaultItems>/, 'стандартные glob отключены');
+  assert.match(xml, /<Compile Include="\.\.\/\*\*\/\*\.cs"/, 'исходники берутся из корня проекта');
+  assert.match(xml, /Exclude="\.\.\/bin\/\*\*;\.\.\/obj\/\*\*/, 'чужие артефакты сборки исключены');
+  assert.match(xml, /\.\.\/\.ide_build\/\*\*/, 'своя папка артефактов исключена');
+  // мусор и неподдерживаемый TFM — запасной net8.0
+  for (const bad of [null, undefined, '', 'net472', 'net9.0; Drop', '<evil>', 42, {}]) {
+    assert.match(RL.csharpProjectXml(bad), /<TargetFramework>net8\.0<\/TargetFramework>/, String(bad));
+  }
+  assert.ok(xml.endsWith('</Project>\n'), 'XML закрыт');
+});
+
+test('runlangs: classifyCommand — dotnet build/run безопасны, пакеты и сеть под вопросом', () => {
+  assert.equal(RL.classifyCommand('dotnet build app.csproj').level, 'safe');
+  assert.equal(RL.classifyCommand('dotnet run --project app.csproj').level, 'safe');
+  assert.equal(RL.classifyCommand('dotnet .ide_build/bin/app.dll').level, 'safe');
+  assert.equal(RL.classifyCommand('dotnet --version').level, 'safe');
+  for (const cmd of ['dotnet restore', 'dotnet add package Newtonsoft.Json', 'dotnet remove package X']) {
+    const r = RL.classifyCommand(cmd);
+    assert.equal(r.level, 'caution', cmd);
+    assert.match(r.reasons.join(' '), /установка пакетов/, cmd);
+  }
+  // опасные флаги работают и внутри dotnet-команды
+  assert.equal(RL.classifyCommand('dotnet clean --force').level, 'danger');
 });
 
 test('runlangs: planRun — мусор на входе не роняет, а отвечает ошибкой', () => {
@@ -245,8 +316,8 @@ test('runlangs: parseVersion — первая версия из вывода --v
 test('runlangs: sanitizeRunConfig — мусор, чужие значения, старый конфиг', () => {
   const def = RL.sanitizeRunConfig(null);
   assert.deepEqual(def, {
-    tools: { python: null, node: null, cpp: null, c: null, javac: null, java: null },
-    args: { python: '', cpp: '', c: '', java: '' },
+    tools: { python: null, node: null, cpp: null, c: null, javac: null, java: null, dotnet: null },
+    args: { python: '', cpp: '', c: '', java: '', csharp: '' },
     timeoutSec: 600,
     shellWin: 'cmd',
   });

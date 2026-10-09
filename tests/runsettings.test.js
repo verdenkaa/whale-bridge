@@ -14,12 +14,16 @@ const ver = (text, major) => ({ text, major, minor: 0, patch: null });
 
 test('runsettings: строки таблицы — по одной на инструмент, у Java их две', () => {
   const rows = RS.toolRows(sanitizeRunConfig(null), null);
-  assert.deepEqual(rows.map((r) => r.toolKey), ['python', 'node', 'cpp', 'c', 'javac', 'java']);
+  assert.deepEqual(rows.map((r) => r.toolKey), ['python', 'node', 'cpp', 'c', 'javac', 'java', 'dotnet']);
   // подпись языка стоит только на первой строке группы: визуально Java — один язык, два инструмента
   assert.deepEqual(rows.filter((r) => r.langId === 'java').map((r) => [r.firstOfLang, r.langLabel, r.toolLabel]),
     [[true, 'Java', 'javac'], [false, 'Java', 'java']]);
   assert.deepEqual(rows.find((r) => r.toolKey === 'cpp').candidates, ['g++', 'clang++']);
   assert.equal(rows.find((r) => r.toolKey === 'python').langLabel, 'Python');
+  // этап D: C# — один инструмент (dotnet), подпись языка и подсказка установки на месте
+  assert.deepEqual(rows.filter((r) => r.langId === 'csharp').map((r) => [r.firstOfLang, r.langLabel, r.toolLabel]),
+    [[true, 'C#', '.NET SDK (dotnet)']]);
+  assert.match(rows.find((r) => r.toolKey === 'dotnet').install, /\.NET SDK/);
   // без результата обнаружения статус честный: «не проверялось», а не «не найден»
   assert.equal(rows[0].status.kind, 'unknown');
   assert.equal(rows[0].manual, null);
@@ -66,11 +70,14 @@ test('runsettings: статусы обнаружения — найден, из 
 
 test('runsettings: дополнительные аргументы — только языки из ARGS_KEYS, у Java подписан javac', () => {
   const rows = RS.argRows(sanitizeRunConfig({ args: { cpp: '-Wall -O2' } }));
-  assert.deepEqual(rows.map((r) => r.key), ['python', 'cpp', 'c', 'java']);
+  assert.deepEqual(rows.map((r) => r.key), ['python', 'cpp', 'c', 'java', 'csharp']);
   assert.equal(rows.find((r) => r.key === 'cpp').value, '-Wall -O2');
   assert.equal(rows.find((r) => r.key === 'python').value, '');
   assert.match(rows.find((r) => r.key === 'java').hint, /javac/);
   assert.equal(rows.find((r) => r.key === 'cpp').label, 'C++');
+  // C#: аргументы — программы, а не компилятора; подпись языка берётся из LANGS
+  assert.equal(rows.find((r) => r.key === 'csharp').label, 'C#');
+  assert.match(rows.find((r) => r.key === 'csharp').hint, /аргументы программы/);
   // у каждого поля есть подсказка-пример
   for (const r of rows) assert.ok(r.hint.length > 3, 'подсказка для ' + r.key);
 });
@@ -111,7 +118,7 @@ test('runsettings: nextConfig — правка одного поля, всегд
 
   // неизвестные ключи игнорируются: конфиг нельзя расширить через renderer
   const junk = RS.nextConfig(base, { tool: { key: 'godot', value: 'x' }, args: { key: 'node', value: 'y' } });
-  assert.deepEqual(Object.keys(junk.tools).sort(), ['c', 'cpp', 'java', 'javac', 'node', 'python']);
+  assert.deepEqual(Object.keys(junk.tools).sort(), ['c', 'cpp', 'dotnet', 'java', 'javac', 'node', 'python']);
   assert.deepEqual(junk, base);
 
   // оболочка не настраивается: любое значение сводится к cmd (решение пользователя, §5.3)

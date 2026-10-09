@@ -57,6 +57,12 @@ class Store {
     // Снимки версий, которые видела модель. Адресуются по содержимому (имя файла = sha256),
     // поэтому одинаковый текст двух файлов хранится один раз.
     this.contextDir = path.join(dir, 'context');
+    // Базовые снимки диска для слежения за новыми файлами (этап D):
+    // «chatId::projectId» -> {capturedAt, truncated, files: {relPath: "размер:mtime"}}.
+    // Отдельный файл, а не config.json: снимок большого проекта — это мегабайты
+    // отпечатков, конфигурации такой объём не нужен.
+    this.baselinesPath = path.join(dir, 'baselines.json');
+    this.baselines = null; // ленивая загрузка
     this.config = DEFAULTS();
     this.history = [];
     this._q = Promise.resolve();
@@ -212,6 +218,66 @@ class Store {
     return drop.length;
   }
 
+  // ---- базовые снимки диска (этап D: слежение за новыми файлами) ----
+  //
+  // Снимок отвечает на вопрос «что уже лежало в проекте, когда мы начали следить за
+  // этим чатом»: файл, которого в снимке нет (или чей отпечаток изменился), и при этом
+  // не известный модели по журналу, — кандидат «модель его не видела».
+
+  async _baselines() {
+    if (this.baselines === null) {
+      const raw = await readJson(this.baselinesPath, {});
+      this.baselines = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    }
+    return this.baselines;
+  }
+
+  _baselineKey(chatId, projectId) { return chatId + '::' + projectId; }
+
+  /** @returns {Promise<{capturedAt:number, truncated:boolean, files:object}|null>} */
+  async getBaseline(chatId, projectId) {
+    if (!chatId || !projectId) return null;
+    const all = await this._baselines();
+    const b = all[this._baselineKey(chatId, projectId)];
+    return b && typeof b === 'object' && b.files && typeof b.files === 'object' ? b : null;
+  }
+
+  async saveBaseline(chatId, projectId, data) {
+    if (!chatId || !projectId || !data || typeof data !== 'object') return false;
+    const all = await this._baselines();
+    all[this._baselineKey(chatId, projectId)] = data;
+    await this._write(this.baselinesPath, all);
+    return true;
+  }
+
+  /**
+   * Переименование/перемещение: отпечатки переезжают вместе с файлами (во всех чатах
+   * проекта), иначе новое имя выглядело бы «новым файлом», которого модель не видела.
+   * @returns {Promise<number>} сколько отпечатков перенесено
+   */
+  async renameBaselinePaths(projectId, fromRel, toRel) {
+    if (!projectId || !fromRel || !toRel || fromRel === toRel) return 0;
+    const all = await this._baselines();
+    const suffix = '::' + projectId;
+    const prefix = fromRel + '/';
+    const newPrefix = toRel + '/';
+    let n = 0;
+    for (const [k, b] of Object.entries(all)) {
+      if (!k.endsWith(suffix) || !b || !b.files || typeof b.files !== 'object') continue;
+      for (const rel of Object.keys(b.files)) {
+        let newRel = null;
+        if (rel === fromRel) newRel = toRel;
+        else if (rel.startsWith(prefix)) newRel = newPrefix + rel.slice(prefix.length);
+        if (!newRel) continue;
+        b.files[newRel] = b.files[rel];
+        delete b.files[rel];
+        n++;
+      }
+    }
+    if (n) await this._write(this.baselinesPath, all);
+    return n;
+  }
+
   // ---- проекты ----
   _key(p) { return process.platform === 'win32' ? p.toLowerCase() : p; }
 
@@ -235,6 +301,14 @@ class Store {
     }
     if (this.config.lastProjectId === id) this.config.lastProjectId = null;
     if (this.config.modelSynced) delete this.config.modelSynced[id];
+    // Базовые снимки удалённого проекта больше некому читать — убираем следом
+    const all = await this._baselines();
+    const suffix = '::' + id;
+    let dropped = false;
+    for (const k of Object.keys(all)) {
+      if (k.endsWith(suffix)) { delete all[k]; dropped = true; }
+    }
+    if (dropped) await this._write(this.baselinesPath, all);
     await this.saveConfig();
   }
 

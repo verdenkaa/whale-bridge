@@ -561,7 +561,8 @@ test('промпт: правила 13–14 учат модель маркера�
   assert.match(r, /13\. Чтобы предложить мне запустить файл проекта/);
   assert.match(r, /# &RUN:путь\/к\/файлу \[аргументы\]/);
   assert.match(r, /Тело блока — ввод для программы/);
-  assert.match(r, /Python, JavaScript\/TypeScript, C\+\+, C и Java/);
+  // этап D: C# добавлен в языки запуска — правило 13 перечисляет его явно
+  assert.match(r, /Python, JavaScript\/TypeScript, C\+\+, C, Java и C#/);
   // команда: оболочка, подтверждение, назначение «для чтения, а не для правки»
   assert.match(r, /14\. Чтобы предложить команду терминала/);
   assert.match(r, /# &CMD:команда/);
@@ -608,17 +609,23 @@ test('промпт: правило 15 — кириллица в командах
 
 test('промпт: устаревшие правила — нетронутые обновляются молча, правленые предлагаются кнопкой', () => {
   // Каждый прежний текст по умолчанию лежит в LEGACY_RULES: пользователь его не правил,
-  // поэтому замена автоматическая. Последний — правила с пунктами 1–14 (без пункта про
-  // кодировки Windows), предпоследний — правила до этапа C3c (без &RUN:/&CMD:).
+  // поэтому замена автоматическая. Три последних выпуска в списке:
+  //   prev    — правила 1–15 с прежним списком языков (0022; этап D добавил C#),
+  //   prev14  — правила 1–14 (без пункта про кодировки Windows),
+  //   older   — правила до этапа C3c (без &RUN:/&CMD:).
   const prev = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 1];
-  const older = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 2];
-  assert.ok(prev.includes('&RUN:') && !prev.includes('powershell'), 'в списке устаревших — правила до пункта 15');
+  const prev14 = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 2];
+  const older = pg.LEGACY_RULES[pg.LEGACY_RULES.length - 3];
+  assert.equal(prev, pg.DEFAULT_RULES_PREV, 'дефолт прошлого выпуска сохранён ссылкой на части');
+  assert.ok(prev.includes('&RUN:') && prev.includes('powershell') && !prev.includes('Java и C#'),
+    'в списке устаревших — правила 1–15 без C#');
+  assert.ok(prev14.includes('&RUN:') && !prev14.includes('powershell'), 'и правила до пункта 15');
   assert.ok(older.includes('&DELETE:') && !older.includes('&RUN:'), 'и правила до этапа C3c');
-  const upgraded = pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: prev }]);
-  assert.equal(upgraded[0].text, pg.DEFAULT_RULES, 'нетронутые прежние правила заменены молча');
-  assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: older }])[0].text,
-    pg.DEFAULT_RULES, 'правила на два выпуска старше — тоже');
-  assert.equal(pg.rulesNeedUpgrade(prev), false, 'для них кнопка не предлагается — они уже обновлены');
+  for (const legacy of [prev, prev14, older]) {
+    const upgraded = pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'ПРАВИЛА РАБОТЫ', text: legacy }]);
+    assert.equal(upgraded[0].text, pg.DEFAULT_RULES, 'нетронутые прежние правила заменены молча');
+    assert.equal(pg.rulesNeedUpgrade(legacy), false, 'для них кнопка не предлагается — они уже обновлены');
+  }
 
   // актуальный текст не считается устаревшим
   assert.equal(pg.rulesNeedUpgrade(pg.DEFAULT_RULES), false);
@@ -637,7 +644,7 @@ test('промпт: устаревшие правила — нетронутые
   // Правленые правила с пунктами 1–14: маркеры &RUN:/&CMD: на месте, поэтому текст
   // считается авторским и кнопкой не дёргается. Осознанный компромисс: обновление
   // перезаписало бы чужой текст, а пункт 15 такой пользователь допишет сам.
-  const editedV14 = prev.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
+  const editedV14 = prev14.replace('10. Перед кодом коротко объясни', '10. Перед кодом подробно объясни');
   assert.equal(pg.rulesNeedUpgrade(editedV14), false);
   assert.equal(pg.upgradeLegacy([{ id: 'r', key: 'rules', type: 'text', title: 'x', text: editedV14 }])[0].text, editedV14);
 
@@ -647,4 +654,16 @@ test('промпт: устаревшие правила — нетронутые
   assert.equal(pg.rulesNeedUpgrade(null), false);
   // другие секции не проверяются вовсе
   assert.equal(pg.upgradeLegacy([{ id: 't', key: 'task', type: 'text', title: 'ЗАДАЧА', text: 'SEARCH/REPLACE' }])[0].text, 'SEARCH/REPLACE');
+});
+
+test('промпт: C# в правиле 13 — языки добавлены, прежний список не остался', () => {
+  // Список языков в правиле 13 собирается заменой строки, а не вторым текстом правил:
+  // если фраза в RULES_V14 когда-нибудь изменится, replace молча не сработает —
+  // эти проверки обязаны такое поймать.
+  assert.ok(pg.DEFAULT_RULES.includes('Поддерживаются Python, JavaScript/TypeScript, C++, C, Java и C#'),
+    'C# перечислен среди языков запуска');
+  assert.ok(!pg.DEFAULT_RULES.includes('C++, C и Java'), 'прежнего списка языков в правилах не осталось');
+  assert.equal(pg.DEFAULT_RULES, pg.RULES_V15 + '\n' + pg.RULE_CMD_ENCODING,
+    'правила собраны из частей: V15 + пункт 15');
+  assert.equal(pg.DEFAULT_RULES_PREV.includes('C и Java'), true, 'прежний дефолт остался прежним');
 });

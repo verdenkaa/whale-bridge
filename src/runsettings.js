@@ -36,6 +36,7 @@
     cpp: 'например: -Wall -O2 -std=c++17',
     c: 'например: -Wall -O2 -std=c11',
     java: 'аргументы javac, например: -Xlint:all',
+    csharp: 'аргументы программы, например: --fast',
   });
 
   /**
@@ -132,13 +133,17 @@
 
   /**
    * Строки дополнительных аргументов. Только языки из ARGS_KEYS: у Node аргументов нет
-   * (план фиксирован), а аргументы Java идут в javac — это честно подписано.
+   * (план фиксирован), аргументы Java идут в javac, а аргументы C# — в запуск программы
+   * (dotnet <сборка>.dll <аргументы>) — это честно подписано подсказками.
    * @returns {Array<{key, label, hint, value}>}
    */
   function argRows(cfg) {
     const conf = sanitizeRunConfig(cfg);
     return ARGS_KEYS.map((key) => {
-      const hit = toolByKey(key === 'java' ? 'javac' : key) || langOfTool(key);
+      // Ключ аргументов не всегда равен ключу инструмента: у Java их два (javac/java),
+      // у C# инструмент называется dotnet
+      const toolKey = key === 'java' ? 'javac' : key === 'csharp' ? 'dotnet' : key;
+      const hit = toolByKey(toolKey);
       const lang = hit && hit.lang ? hit.lang : null;
       return {
         key,

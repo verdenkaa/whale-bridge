@@ -160,6 +160,7 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
 .notice { border: 1px solid #303030; border-radius: 8px; padding: 9px 11px; background: #222; display: grid; gap: 6px; }
 .notice.warn { border-color: var(--warn); }
 .notice.bad { border-color: var(--del); }
+.notice.unseen { border-color: var(--add); background: var(--add-bg); }
 .notice ul { margin: 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .sugg { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -265,12 +266,14 @@ select:focus, input[type="text"]:focus { border-color: #4d8dff; outline: none; }
      ● оранжевый (--warn)   — несохранённые изменения в редакторе
      ⚠ красный   (--del)    — файл изменён вне редактора (сохранение потребует решения)
      ◆ янтарный  (#d9a400)  — модель в чате не знает текущую версию (клик: сравнение)
+     ✚ зелёный   (--add)    — модель не видела файл вовсе: создан/изменён вне чата (этап D)
      ● синий     (--accent) — есть предложение модели (клик: открыть предложение)
      ↩ кнопка               — откат последней операции файла (видна при наведении)
      ↗ кнопка               — показать файл в проводнике (видна при наведении) */
 .ed-node.dirty .ed-name { color: var(--warn); }
 .ed-node.drift .ed-name { color: var(--del); }
 .ed-node.diverged .ed-name { box-shadow: inset 0 -1px 0 rgba(217, 164, 0, .55); }
+.ed-node.unseen .ed-name { color: var(--add); }
 .ed-node.has-proposal .ed-name { color: var(--accent); }
 .ed-mark { flex: none; font-size: 11px; line-height: 1; }
 .ed-mark.dirty { color: var(--warn); }
@@ -286,6 +289,30 @@ button.ed-mark.ctx:hover { background: rgba(217, 164, 0, .18); }
 .ed-act { background: none; border: 0; color: var(--dim); cursor: pointer; padding: 0 3px; border-radius: 3px; font-size: 11px; line-height: 1.4; }
 .ed-act:hover { background: var(--raised); color: var(--text); }
 .ed-act.undo:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ✚ — файл, которого модель не видела (этап D): та же кнопка, что ◆, но зелёная */
+.ed-mark.unseen { color: var(--add); }
+button.ed-mark.unseen { background: none; border: 0; cursor: pointer; padding: 0 1px; font-size: 11px; line-height: 1; }
+button.ed-mark.unseen:hover { background: var(--add-bg); }
+
+/* Контекстное меню дерева (этап D): создаётся в body, позиция fixed по курсору */
+.ed-ctxmenu { position: fixed; z-index: 80; min-width: 190px; padding: 4px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
+.ed-ctxmenu button { display: block; width: 100%; text-align: left; padding: 5px 9px;
+  background: none; border: 0; border-radius: 5px; color: var(--text);
+  font-size: 12.5px; line-height: 1.4; cursor: pointer; white-space: nowrap; }
+.ed-ctxmenu button:hover { background: var(--line); }
+.ed-ctxmenu button.danger { color: var(--del); }
+.ed-ctxmenu button.danger:hover { background: var(--del-bg); }
+.ed-ctxmenu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* Поле ввода имени прямо в дереве (создание/переименование) */
+.ed-tree-input { flex: 1; min-width: 0; padding: 1px 5px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--bg); border: 1px solid var(--accent);
+  border-radius: 3px; outline: none; }
+.ed-node.editing { cursor: default; }
+.ed-node.editing:hover { background: none; }
 
 /* ---------- редактор ---------- */
 .hidden { display: none !important; }

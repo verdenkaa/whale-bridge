@@ -192,17 +192,20 @@ test('toolchain: detect — кеш до смены настроек, clearCache 
   assert.equal(r4.cpp.source, 'manual');
 });
 
-test('toolchain: detect — все пять языков в одном результате (ключи как в config.run.tools)', async () => {
+test('toolchain: detect — все шесть языков в одном результате (ключи как в config.run.tools)', async () => {
   const { tc } = harness([
-    '/bin/python3', '/bin/node', '/bin/g++', '/bin/gcc', '/bin/javac', '/bin/java',
+    '/bin/python3', '/bin/node', '/bin/g++', '/bin/gcc', '/bin/javac', '/bin/java', '/bin/dotnet',
   ], {
     '/bin/node': 'v22.9.0', '/bin/javac': 'javac 17.0.2', '/bin/java': 'openjdk 17.0.2',
     '/bin/g++': 'g++ (GCC) 13.2.0', '/bin/gcc': 'gcc (GCC) 13.2.0', '/bin/python3': 'Python 3.12.4',
+    '/bin/dotnet': '8.0.404',
   });
   const r = await tc.detect({}, { PATH: '/bin' });
-  assert.deepEqual(Object.keys(r).sort(), ['c', 'cpp', 'java', 'javac', 'node', 'python']);
+  assert.deepEqual(Object.keys(r).sort(), ['c', 'cpp', 'dotnet', 'java', 'javac', 'node', 'python']);
   assert.equal(r.node.version.major, 22);
   assert.equal(r.javac.version.major, 17);
+  // версия dotnet — первая x.y.z из «dotnet --version»: по мажорной раннер выбирает TFM
+  assert.equal(r.dotnet.version.major, 8);
   for (const key of Object.keys(r)) assert.equal(r[key].found, true);
 });
 

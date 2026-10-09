@@ -14,6 +14,7 @@ const path = require('node:path');
 const { Store } = require('../src/store');
 const { ProposalManager } = require('../src/proposals');
 const editorfs = require('../src/editorfs');
+const treefs = require('../src/treefs');
 const fileops = require('../src/fileops');
 const Context = require('../src/context');
 const pg = require('../src/promptgen');
@@ -121,6 +122,7 @@ test('обвязка: main не вызывает несуществующих м
     { obj: 'proposals', api: classMembers(ProposalManager.prototype, 'src/proposals.js'), what: 'ProposalManager' },
     { obj: 'store', api: classMembers(Store.prototype, 'src/store.js'), what: 'Store' },
     { obj: 'editorfs', api: new Set(Object.keys(editorfs)), what: 'src/editorfs' },
+    { obj: 'treefs', api: new Set(Object.keys(treefs)), what: 'src/treefs' },
     { obj: 'fileops', api: new Set(Object.keys(fileops)), what: 'src/fileops' },
     { obj: 'pg', api: new Set(Object.keys(pg)), what: 'src/promptgen' },
     // ui/layout.js общий для двух процессов (UMD): main вызывает sanitize/normalizeRect
@@ -425,4 +427,52 @@ test('wiring: команда оболочки доходит до cmd.exe дос
   // запуск файла остаётся argv-ом: экранирование MSVCRT там корректно и нужно
   const file = runlangs.ptySpawnArgs(['-u', 'main.py'], 'win32', false);
   assert.ok(Array.isArray(file), 'у файла аргументы массивом');
+});
+
+test('wiring: операции дерева (этап D) связаны на всех сторонах', () => {
+  const editorSrc = read('ui/editor.js');
+  const appSrc = read('ui/app.js');
+
+  // каналы зарегистрированы в main и разрешены преалодом (детальную трёхстороннюю
+  // сверку делает ipc-channels.test.js — здесь проверяем содержательные связи)
+  for (const c of ['fs:create', 'fs:rename', 'fs:delete']) {
+    assert.match(mainSrc, new RegExp(`handle\\('${c}'`), `в main.js нет handle('${c}')`);
+    assert.ok(preloadUi.includes(`'${c}'`), `${c} не разрешён преалодом`);
+    assert.match(editorSrc, new RegExp(`call\\('${c}'`), `renderer не вызывает ${c}`);
+  }
+
+  // main проводит операции через treefs, а не пишет диск сам: единственный путь записи
+  assert.match(mainSrc, /treefs\.createFile\(/, 'создание файла идёт через treefs');
+  assert.match(mainSrc, /treefs\.renamePath\(/, 'переименование идёт через treefs');
+  assert.match(mainSrc, /treefs\.deletePath\(/, 'удаление идёт через treefs');
+  assert.match(mainSrc, /shell\.trashItem/, 'удаление — в системную корзину');
+  const treefsSrc = read('src/treefs.js');
+  assert.match(treefsSrc, /fileops\.applyChange\(/, 'treefs пишет содержимое через fileops.applyChange');
+  assert.match(treefsSrc, /store\.addHistory\(/, 'операции пользователя попадают в историю');
+
+  // после операции renderer узнаёт об изменении тем же событием, что и о внешнем
+  assert.match(mainSrc, /afterTreeOp[\s\S]{0,200}send\('files:changed'\)/, 'успешная операция уведомляет renderer');
+
+  // учёт контекста: context:list несёт оба списка, копирование — общее
+  assert.match(mainSrc, /proposals\.listUnseen\(/, 'main спрашивает список невиденных файлов');
+  assert.match(mainSrc, /proposals\.copyMissingContext\(/, 'копирование модели объединяет расхождения и новые файлы');
+  assert.match(mainSrc, /proposals\.ackAllUnseen\(/, 'массовая отметка покрывает и новые файлы');
+  assert.match(appSrc, /unseen/, 'renderer рисует отметки новых файлов');
+  assert.match(editorSrc, /ed-mark unseen/, 'в дереве есть значок «модель не видела файл»');
+});
+
+test('wiring: C# (этап D) связан — язык, инструмент, служебный csproj', () => {
+  const runlangs = require('../src/runlangs');
+  const runnerSrc = read('src/runner.js');
+
+  assert.equal(runlangs.langByExt('.cs').id, 'csharp', '.cs распознаётся как C#');
+  assert.ok(runlangs.TOOL_KEYS.includes('dotnet'), 'dotnet — ключ настроек инструмента');
+  assert.match(runnerSrc, /prepareCsharpProject\(/, 'раннер готовит проект C# до сборки');
+  assert.match(runnerSrc, /findCsproj\(/, 'пользовательский .csproj ищется, а не предполагается');
+  assert.match(runnerSrc, /csharpProjectXml\(/, 'служебный проект создаётся общим шаблоном');
+  assert.match(runnerSrc, /app\.csproj/, 'служебный проект живёт в .ide_build');
+  // служебный csproj не должен светиться в дереве и промпте: .ide_build игнорируется
+  assert.ok(fileops.IGNORE_DIRS.has('.ide_build'), '.ide_build в списке игнорируемых папок');
+  // правило 13 знает про C# — модель будет предлагать &RUN: для .cs
+  assert.match(pg.DEFAULT_RULES, /Java и C#/);
 });

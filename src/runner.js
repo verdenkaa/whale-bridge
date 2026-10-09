@@ -1,8 +1,9 @@
 'use strict';
 // Оркестратор сессий запуска (ТЗ C3 §3.3). CommonJS для main; все внешние зависимости
 // внедрены через DI: в Node-тестах spawnPty — фейк, в main — node-pty. Раннер НЕ пишет
-// файлы проекта (кроме создания папки .ide_build перед компиляцией), НЕ трогает журнал
-// контекста и историю операций: запуск — чтение мира, а не изменение проекта.
+// файлы проекта (кроме подготовки папки .ide_build и служебного app.csproj внутри неё),
+// НЕ трогает журнал контекста и историю операций: запуск — чтение мира, а не изменение
+// проекта.
 
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +11,9 @@ const runlangs = require('./runlangs');
 // Подписи инструментов и подсказки «что установить» — общие с разделом настроек
 // (renderer рисует ими таблицу, раннер — сообщение об ошибке в терминал).
 const runsettings = require('./runsettings');
+// IGNORE_DIRS: обход проекта в поисках .csproj обязан пропускать те же папки,
+// что и дерево файлов (node_modules, .git, артефакты сборки).
+const { IGNORE_DIRS } = require('./fileops');
 const { buildReport, createRing, shortToolName } = require('./runfmt');
 
 const OUTPUT_LIMIT = 4 * 1024 * 1024; // кольцевой буфер вывода на сессию, 4 МБ
@@ -273,6 +277,69 @@ function createRunner(deps) {
   }
 
   /**
+   * Поиск пользовательского .csproj (этап D): в ширину от корня проекта, не глубже
+   * 4 уровней, папки артефактов и зависимостей пропускаем (IGNORE_DIRS). Если проектов
+   * несколько — берём самый мелкий, затем первый по алфавиту: выбор детерминированный,
+   * а учебный проект почти всегда один и лежит в корне.
+   * @returns {{rel:string, assembly:string}|null}
+   */
+  function findCsproj(projectPath) {
+    const hits = [];
+    const queue = [{ abs: projectPath, rel: '', depth: 0 }];
+    while (queue.length) {
+      const { abs, rel, depth } = queue.shift();
+      let entries;
+      try {
+        entries = fsx.readdirSync(abs, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const childRel = rel ? rel + '/' + e.name : e.name;
+        if (e.isDirectory()) {
+          if (!IGNORE_DIRS.has(e.name) && depth < 4) queue.push({ abs: path.join(abs, e.name), rel: childRel, depth: depth + 1 });
+        } else if (e.isFile() && e.name.toLowerCase().endsWith('.csproj')) {
+          hits.push({ rel: childRel, depth, assembly: e.name.slice(0, -'.csproj'.length) });
+        }
+      }
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => a.depth - b.depth || a.rel.localeCompare(b.rel));
+    return hits[0];
+  }
+
+  /**
+   * Проект C# для плана запуска: пользовательский .csproj, а если его нет — служебный
+   * .ide_build/app.csproj (создаётся один раз; существующий не перезаписывается — его
+   * мог поправить пользователь, например добавить пакет или сменить TargetFramework).
+   * Имя сборки служебного проекта фиксированное — 'app' (csharpProjectXml задаёт
+   * AssemblyName), у пользовательского — имя файла .csproj.
+   * @returns {{proj:string, assembly:string}|{error:string, message:string}}
+   */
+  function prepareCsharpProject(projectPath, dotnetEntry) {
+    const found = findCsproj(projectPath);
+    if (found) return { proj: found.rel, assembly: found.assembly };
+    try {
+      const buildDir = path.join(projectPath, runlangs.BUILD_DIR);
+      fsx.mkdirSync(buildDir, { recursive: true });
+      const projFile = path.join(buildDir, 'app.csproj');
+      if (!fsx.existsSync(projFile)) {
+        // TargetFramework — по мажорной версии SDK: net8.0 на девятом SDK собрался бы,
+        // но потребовал бы restore целевого пакета; совпадающая версия собирается офлайн.
+        const major = dotnetEntry && dotnetEntry.version && dotnetEntry.version.major;
+        const tfm = Number.isInteger(major) && major >= 5 ? 'net' + major + '.0' : null;
+        fsx.writeFileSync(projFile, runlangs.csharpProjectXml(tfm), 'utf8');
+      }
+      return { proj: runlangs.BUILD_DIR + '/app.csproj', assembly: 'app' };
+    } catch (e) {
+      return {
+        error: 'csproj-failed',
+        message: 'Не удалось подготовить проект C# (.csproj): ' + (e && e.message ? e.message : String(e)),
+      };
+    }
+  }
+
+  /**
    * Подготовка плана file-запуска: язык, инструменты, папка артефактов.
    * Все проверки — до создания сессии, чтобы старая сессия не убивалась зря.
    */
@@ -303,11 +370,20 @@ function createRunner(deps) {
     if (lang.id === 'node' && tools.node && tools.node.found && tools.node.version) {
       nodeMajor = tools.node.version.major;
     }
+    // C#: сначала проект (.csproj) — пользовательский или служебный в .ide_build,
+    // затем план из него соберёт шаги build/run с именем сборки
+    let csharp = null;
+    if (lang.id === 'csharp') {
+      const preparedCs = prepareCsharpProject(projectPath, tools.dotnet);
+      if (preparedCs.error) return { error: preparedCs.error, message: preparedCs.message, lang: lang.id };
+      csharp = preparedCs;
+    }
     const plan = runlangs.planRun(lang.id, rel, {
       platform,
       args: runlangs.tokenizeArgs(runCfg.args && runCfg.args[lang.id] ? runCfg.args[lang.id] : ''),
       fqcn: lang.id === 'java' ? runlangs.javaClassFqn(sourceText, base) : undefined,
       nodeMajor,
+      csharp,
     });
     if (!plan.ok) return { error: 'plan-failed', message: plan.error };
     // Разрешение инструментов: exe для каждого шага с tool. manualDirs — папки

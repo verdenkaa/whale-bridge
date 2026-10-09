@@ -368,6 +368,159 @@ async function getTree(rootAbs) {
   return value;
 }
 
-const invalidateIndex = () => { indexCache.clear(); treeCache.clear(); };
+const invalidateIndex = () => { indexCache.clear(); treeCache.clear(); fpCache.clear(); };
 
-module.exports = { readTextFile, readRawFile, listDir, suggestPaths, applyChange, restore, sha256, invalidateIndex, IGNORE_DIRS, getTree, encodeLike, hashTextLike };
+// ---- Отпечатки файлов для слежения за новыми файлами (этап D) ----
+//
+// «размер:mtime» на каждый файл: собрать их на порядок дешевле, чем хэшировать весь
+// проект, а для сигнала «файл появился или изменился вне чата» этой точности хватает.
+// Точный учёт (SHA-256) живёт в журнале контекста; отпечатки лишь отбирают кандидатов,
+// а содержимое при показе и копировании модели всё равно читается целиком.
+
+const fpCache = new Map();
+const FP_LIMIT = 30000;
+
+async function getFingerprints(rootAbs) {
+  const root = path.resolve(rootAbs);
+  const hit = fpCache.get(root);
+  if (hit && Date.now() - hit.ts < 10000) return hit.value;
+  const files = {};
+  let count = 0;
+  let truncated = false;
+  const queue = [{ abs: root, rel: '', depth: 0 }];
+  while (queue.length && !truncated) {
+    const { abs, rel, depth } = queue.shift();
+    let entries;
+    try {
+      entries = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (e.name.includes('.aiws-')) continue; // временные файлы атомарной записи
+      const childRel = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) {
+        if (!IGNORE_DIRS.has(e.name) && depth < 14) queue.push({ abs: path.join(abs, e.name), rel: childRel, depth: depth + 1 });
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (count >= FP_LIMIT) { truncated = true; break; }
+      count++;
+      try {
+        const st = await fs.stat(path.join(abs, e.name));
+        // mtimeMs НЕ округляем: две записи файла подряд укладываются в миллисекунду,
+        // и округлённый отпечаток пропустил бы изменение (поймано тестом)
+        files[childRel] = st.size + ':' + st.mtimeMs;
+      } catch { /* файл пропал во время обхода — в список не попадёт */ }
+    }
+  }
+  const value = { files, truncated };
+  fpCache.set(root, { ts: Date.now(), value });
+  return value;
+}
+
+/**
+ * Базовый снимок проекта (этап D): «размер:mtime:хэш» на каждый файл. Хэш делает
+ * слежение точным: файл, которого сборка или git «коснулись» без изменения содержимого,
+ * не должен светиться как невиденный моделью и уезжать ей в промпт. Файлы больше
+ * MAX_READ_BYTES получают вместо хэша 'x' — для них остаётся сравнение по отпечатку.
+ *
+ * Обход дорогой (читается весь проект), поэтому снимок создаётся ОДИН раз на пару
+ * чат+проект (store.saveBaseline), а текущие проверки идут дешёвыми getFingerprints.
+ */
+async function getProjectSnapshot(rootAbs) {
+  const root = path.resolve(rootAbs);
+  const files = {};
+  let count = 0;
+  let truncated = false;
+  const queue = [{ abs: root, rel: '', depth: 0 }];
+  while (queue.length && !truncated) {
+    const { abs, rel, depth } = queue.shift();
+    let entries;
+    try {
+      entries = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (e.name.includes('.aiws-')) continue;
+      const childRel = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) {
+        if (!IGNORE_DIRS.has(e.name) && depth < 14) queue.push({ abs: path.join(abs, e.name), rel: childRel, depth: depth + 1 });
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (count >= FP_LIMIT) { truncated = true; break; }
+      count++;
+      const absFile = path.join(abs, e.name);
+      try {
+        const st = await fs.stat(absFile);
+        let hash = 'x';
+        if (st.size <= MAX_READ_BYTES) {
+          const buf = await fs.readFile(absFile);
+          hash = sha256(buf);
+        }
+        files[childRel] = st.size + ':' + st.mtimeMs + ':' + hash;
+      } catch { /* файл пропал во время обхода */ }
+    }
+  }
+  return { files, truncated };
+}
+
+// ---- Операции пользователя над папками (этап D) ----
+//
+// Содержимое файлов по-прежнему пишет только applyChange; у папок содержимого нет,
+// но и эти операции не идут в обход fileops: путь записи на диск проекта остаётся
+// единственным модулем. Удаление — только в системную корзину (функция trash из main,
+// как у applyChange op:'delete').
+
+async function createDir(rootAbs, rel) {
+  const r = await resolveInProject(rootAbs, rel);
+  if (!r.ok) return err('path', r.error);
+  if (r.exists) return err('exists', 'Файл или папка с таким путём уже существует');
+  try {
+    await fs.mkdir(r.abs, { recursive: true });
+  } catch (e) {
+    return err('io', 'Не удалось создать папку: ' + e.message);
+  }
+  return { ok: true, rel: r.rel, isDir: true };
+}
+
+async function renameDir(rootAbs, rel, newRel) {
+  const r = await resolveInProject(rootAbs, rel);
+  if (!r.ok) return err('path', r.error);
+  if (!r.exists) return err('missing', 'Папка не найдена');
+  if (r.isFile) return err('path', 'Это файл, а не папка');
+  const dest = await resolveInProject(rootAbs, newRel);
+  if (!dest.ok) return err('path', dest.error);
+  if (dest.exists) return err('exists', 'Файл или папка назначения уже существует — перезапись запрещена');
+  try {
+    if (!dest.parentExists) await fs.mkdir(path.dirname(dest.abs), { recursive: true });
+    await fs.rename(r.abs, dest.abs);
+  } catch (e) {
+    return err('io', 'Не удалось переименовать папку: ' + e.message);
+  }
+  return { ok: true, rel: r.rel, newRel: dest.rel, isDir: true };
+}
+
+async function deleteDir(rootAbs, rel, trash) {
+  const r = await resolveInProject(rootAbs, rel);
+  if (!r.ok) return err('path', r.error);
+  if (!r.exists) return err('missing', 'Папка не найдена');
+  if (r.isFile) return err('path', 'Это файл, а не папка');
+  if (typeof trash !== 'function') return err('io', 'Операция удаления требует системной корзины');
+  try {
+    await trash(r.abs);
+  } catch (e) {
+    return err('io', 'Не удалось отправить папку в корзину: ' + e.message);
+  }
+  return { ok: true, rel: r.rel, isDir: true };
+}
+
+module.exports = {
+  readTextFile, readRawFile, listDir, suggestPaths, applyChange, restore, sha256,
+  invalidateIndex, IGNORE_DIRS, getTree, encodeLike, hashTextLike,
+  getFingerprints, getProjectSnapshot, FP_LIMIT, createDir, renameDir, deleteDir,
+};

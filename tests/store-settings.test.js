@@ -22,8 +22,8 @@ async function setup(t, configJson) {
 }
 
 const DEFAULT_RUN = {
-  tools: { python: null, node: null, cpp: null, c: null, javac: null, java: null },
-  args: { python: '', cpp: '', c: '', java: '' },
+  tools: { python: null, node: null, cpp: null, c: null, javac: null, java: null, dotnet: null },
+  args: { python: '', cpp: '', c: '', java: '', csharp: '' },
   timeoutSec: 600,
   shellWin: 'cmd',
 };
@@ -55,8 +55,8 @@ test('store: мусор в config.run не роняет загрузку', async
 
 test('store: валидный config.run сохраняется как есть', async (t) => {
   const run = {
-    tools: { python: '/opt/py/bin/python3', node: null, cpp: null, c: null, javac: null, java: null },
-    args: { python: '', cpp: '-Wall -O2', c: '', java: '' },
+    tools: { python: '/opt/py/bin/python3', node: null, cpp: null, c: null, javac: null, java: null, dotnet: null },
+    args: { python: '', cpp: '-Wall -O2', c: '', java: '', csharp: '' },
     timeoutSec: 120,
     shellWin: 'cmd',
   };

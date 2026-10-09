@@ -8,6 +8,8 @@ const { Store } = require('./src/store');
 const { ProposalManager } = require('./src/proposals');
 const fileops = require('./src/fileops');
 const editorfs = require('./src/editorfs');
+// Операции пользователя над файлами из дерева (этап D): создать, переименовать, удалить
+const treefs = require('./src/treefs');
 const { resolveInProject } = require('./src/paths');
 const { extractFencedBlocks } = require('./src/parser');
 const pg = require('./src/promptgen');
@@ -468,6 +470,43 @@ function registerIpc() {
 
   handle('fs:list', ({ projectId, rel }) => fileops.listDir(projectOr(projectId).path, rel ? String(rel) : ''));
 
+  // ---- операции с файлами из дерева (этап D) ----
+  // Создать/переименовать/удалить файл или папку, не выходя из IDE. Диск пишет тот же
+  // fileops.applyChange, что и везде: операции файлов попадают в историю и откатываются,
+  // удаление — через системную корзину. После успеха кэши сбрасываются и renderer
+  // получает files:changed — дерево, журналы и список новых файлов обновятся сами.
+  const afterTreeOp = () => {
+    fileops.invalidateIndex();
+    send('files:changed');
+    proposals.onChange();
+  };
+  handle('fs:create', async ({ projectId, rel, kind }) => {
+    const project = projectOr(projectId);
+    const relStr = String(rel || '');
+    const res = kind === 'dir'
+      ? await treefs.createDir({ project, rel: relStr })
+      : await treefs.createFile({ project, rel: relStr, store, chatId: currentChatId });
+    if (res.ok) afterTreeOp();
+    return res;
+  });
+  handle('fs:rename', async ({ projectId, rel, newRel }) => {
+    const project = projectOr(projectId);
+    const res = await treefs.renamePath({
+      project, rel: String(rel || ''), newRel: String(newRel || ''), store, chatId: currentChatId,
+    });
+    if (res.ok) afterTreeOp();
+    return res;
+  });
+  handle('fs:delete', async ({ projectId, rel }) => {
+    const project = projectOr(projectId);
+    const res = await treefs.deletePath({
+      project, rel: String(rel || ''), store, chatId: currentChatId,
+      trash: (abs) => shell.trashItem(abs),
+    });
+    if (res.ok) afterTreeOp();
+    return res;
+  });
+
   // ---- редактор (Stage A) ----
   // projectId может быть неизвестен (проект удалён из списка) — тогда editorfs вернёт
   // внятную ошибку вместо исключения, чтобы renderer показал её в диалоге, а не в тосте.
@@ -592,13 +631,32 @@ function registerIpc() {
   handle('history:view', ({ id }) => proposals.historyView(String(id)));
   handle('history:revert', ({ id, force }) => proposals.historyRevert(String(id), force === true));
   // ---- учёт контекста: какую версию файла знает модель в текущем чате ----
-  handle('context:list', ({ projectId }) => proposals.listDivergences(currentChatId, String(projectId)));
+  // Два списка одним ответом (этап D): items — модель знает УСТАРЕВШЕЕ (расхождения),
+  // unseen — модель НЕ ВИДЕЛА вовсе (созданные или изменённые вне чата без записи
+  // в журнале). Вместе они покрывают всю картину «чем модель отстала от диска».
+  handle('context:list', async ({ projectId }) => {
+    const pid = String(projectId);
+    const div = await proposals.listDivergences(currentChatId, pid);
+    const un = await proposals.listUnseen(currentChatId, pid);
+    return { ...div, unseen: un.items, unseenTruncated: !!un.truncated };
+  });
   handle('context:ack', ({ projectId, relPath }) => proposals.ackContext(currentChatId, String(projectId), String(relPath)));
-  handle('context:ack-all', ({ projectId }) => proposals.ackAllDivergent(currentChatId, String(projectId)));
+  // «✓ Модель знает все» подтверждает оба списка: кликать по каждому файлу — наказание,
+  // а деление на «устаревшее» и «невиденное» пользователю в этот момент не важно.
+  handle('context:ack-all', async ({ projectId }) => {
+    const pid = String(projectId);
+    const a = await proposals.ackAllDivergent(currentChatId, pid);
+    const b = await proposals.ackAllUnseen(currentChatId, pid);
+    return {
+      ok: a.ok && b.ok, acked: a.acked + b.acked, total: a.total + b.total,
+      failed: [...a.failed, ...b.failed],
+    };
+  });
   handle('context:known', ({ projectId, paths }) => proposals.contextKnownHashes(currentChatId, String(projectId), paths));
   handle('manual:view', ({ projectId, relPath }) => proposals.manualView(currentChatId, String(projectId), String(relPath)));
   handle('manual:copy', async ({ projectId }) => {
-    const r = await proposals.copyDivergentVersions(currentChatId, String(projectId));
+    // Одна кнопка — всё, чем модель отстала: расхождения (diff) + новые файлы (целиком)
+    const r = await proposals.copyMissingContext(currentChatId, String(projectId));
     if (r.ok) clipboard.writeText(r.text);
     return r;
   });

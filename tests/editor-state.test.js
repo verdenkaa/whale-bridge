@@ -416,6 +416,7 @@ test('editor-state: treeRowMarks соединяет буфер с журнала
   const undoEntry = { id: 'h2', op: 'update', ts: 1, relPath: 'a.gd' };
   const extras = {
     manual: new Set(['a.gd', 'closed.gd']),
+    unseen: new Set(['fresh.gd']),
     undo: new Map([['a.gd', undoEntry]]),
     proposals: new Map([['p.gd', { count: 2, added: 5, removed: 1, firstId: 'x' }]]),
   };
@@ -425,6 +426,7 @@ test('editor-state: treeRowMarks соединяет буфер с журнала
   assert.equal(m.dirty, true);
   assert.equal(m.drift, true);
   assert.equal(m.diverged, true);
+  assert.equal(m.unseen, false, 'у файла с расхождением нет отметки «модель не видела»');
   assert.equal(m.hasManual, true);
   assert.equal(m.undo, undoEntry);
   assert.equal(m.proposal, null);
@@ -436,18 +438,26 @@ test('editor-state: treeRowMarks соединяет буфер с журнала
   assert.equal(mc.diverged, true, 'расхождение видно и без открытого буфера');
   assert.equal(mc.hasManual, true);
 
+  // этап D: файл, которого модель не видела вовсе, — отметка из extras.unseen,
+  // состояние редактора на неё не влияет (файл может быть и не открыт)
+  const mu = ES.treeRowMarks(s, 'fresh.gd', extras);
+  assert.equal(mu.unseen, true);
+  assert.equal(mu.diverged, false, 'unseen и diverged взаимоисключающи');
+
   // файл с предложением, но без расхождений
   const mp = ES.treeRowMarks(s, 'p.gd', extras);
   assert.equal(mp.diverged, false);
+  assert.equal(mp.unseen, false);
   assert.deepEqual(mp.proposal, { count: 2, added: 5, removed: 1, firstId: 'x' });
 
   // совсем обычный файл
   const mn = ES.treeRowMarks(s, 'clean.gd', extras);
-  assert.deepEqual(mn, { dirty: false, drift: false, missing: false, diverged: false, hasManual: false, undo: null, proposal: null });
+  assert.deepEqual(mn, { dirty: false, drift: false, missing: false, diverged: false, unseen: false, hasManual: false, undo: null, proposal: null });
 
   // extras может не быть вовсе (данные журналов ещё не загрузились)
   const me = ES.treeRowMarks(s, 'a.gd');
   assert.equal(me.diverged, true, 'расхождение из knownHash видно и без журнала');
+  assert.equal(me.unseen, false);
   assert.equal(me.hasManual, false);
   assert.equal(me.undo, null);
 });
@@ -483,4 +493,36 @@ test('editor-state: pendingAi — принятые в буфер ханки мо
   ES.clearPendingAi(s, 'a.gd');
   assert.deepEqual(ES.getPendingAi(s, 'a.gd'), []);
   assert.equal(ES.getPendingAi(s, 'нет-такого.gd').length, 0);
+});
+
+test('editor-state: renamePath переносит вкладку, буфер и dirty не теряет (этап D)', () => {
+  const s = ES.createState();
+  ES.open(s, opened('old.gd', 'v0\n', A));
+  ES.open(s, opened('other.gd', 'x\n', B));
+  ES.activate(s, 'old.gd');
+  ES.setText(s, 'old.gd', 'v1\n');          // несохранённая правка
+  ES.setDiskHash(s, 'old.gd', A);
+  ES.setKnown(s, 'old.gd', C, 'applied');
+  ES.setViewState(s, 'old.gd', { scrollTop: 40 });
+
+  const f = ES.renamePath(s, 'old.gd', 'sub/new.gd');
+  assert.ok(f, 'запись переехала');
+  assert.equal(ES.get(s, 'old.gd'), null, 'старого ключа больше нет');
+  assert.equal(f.path, 'sub/new.gd');
+  assert.equal(f.name, 'new.gd', 'имя вкладки пересчитано');
+  assert.equal(f.text, 'v1\n', 'буфер цел');
+  assert.equal(f.savedText, 'v0\n', 'точка сохранения не сдвинулась');
+  assert.equal(ES.isDirty(f), true, 'dirty пережил переименование');
+  assert.equal(f.diskHash, A, 'хэш диска тот же: содержимое не менялось');
+  assert.equal(f.knownHash, C, 'журнал модели переносит main, состояние редактора — своё');
+  assert.deepEqual(f.viewState, { scrollTop: 40 }, 'курсор и прокрутка сохранены');
+  assert.equal(ES.active(s).path, 'sub/new.gd', 'активная вкладка следует за файлом');
+  assert.deepEqual(ES.list(s).map((x) => x.path), ['sub/new.gd', 'other.gd'], 'порядок вкладок на месте');
+
+  // повторное переименование того же файла работает, а занятый путь отклоняется
+  assert.ok(ES.renamePath(s, 'sub/new.gd', 'final.gd'));
+  assert.equal(ES.renamePath(s, 'final.gd', 'other.gd'), null, 'путь уже занят другой вкладкой');
+  assert.equal(ES.renamePath(s, 'нет-такого.gd', 'x.gd'), null, 'неоткрытый файл переименовывать нечего');
+  assert.equal(ES.renamePath(s, 'final.gd', 'final.gd'), null, 'переименование в себя — не операция');
+  assert.equal(ES.active(s).path, 'final.gd', 'отклонённое переименование состояние не тронуло');
 });

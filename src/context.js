@@ -157,6 +157,104 @@
     return false;
   }
 
+  // ---------- файлы, которых модель не видела (этап D) ----------
+  //
+  // Журнал хранит ИЗВЕСТНЫЕ версии; файл без записи модель не видела никогда. Пометить
+  // так весь проект нельзя — расхождение обесценится (см. isDiverged). Поэтому «требует
+  // внимания» только то, что СОЗДАНО или ИЗМЕНЕНО после базового снимка пары чат-проект
+  // (состояние диска на момент, когда учёт для этого чата начался) и не имеет записи
+  // в журнале.
+  //
+  // Сравнение — по отпечатку «размер:mtime», а не по хэшу: отпечатки дёшево собрать со
+  // всего проекта на каждое обновление, а точный учёт (SHA-256) живёт в записях журнала.
+  // Отпечаток решает только «показывать ли файл пользователю», поэтому его точности
+  // достаточно; содержимое при копировании модели всё равно читается целиком.
+
+  const MAX_UNSEEN = 500;
+
+  /**
+   * Запись базового снимка: «размер:mtime:хэш». Хэш — sha256 содержимого либо 'x'
+   * (файл больше лимита чтения): с ним проверка «изменился ли файл» точная, а не
+   * по времени modification. Формат разбирается терпимо: записи без хэша (старые
+   * снимки, чужие данные) дают hash=null — сравнение только по отпечатку.
+   */
+  function splitBaselineEntry(v) {
+    const s = typeof v === 'string' ? v : '';
+    const i = s.lastIndexOf(':');
+    if (i < 0) return { fp: s, hash: null };
+    const hash = s.slice(i + 1);
+    return { fp: s.slice(0, i), hash: /^[0-9a-f]{64}$/.test(hash) ? hash : null };
+  }
+
+  /**
+   * Список файлов, которых модель не видела.
+   * @param baseline {{[relPath]:string}} записи базового снимка («размер:mtime:хэш»)
+   * @param current  {{[relPath]:string}} отпечатки сейчас («размер:mtime»)
+   * @param knownRels Set<string>|string[] пути, у которых ЕСТЬ запись в журнале —
+   *   они относятся к списку расхождений (divergences), а не к этому
+   * @returns {{items:Array<{relPath:string,isNew:boolean,baseHash:string|null,curFp:string}>,
+   *            truncated:boolean}}
+   *   isNew — файла не было в базовом снимке (создан); иначе — изменён после него.
+   *   baseHash/curFp — данные для точной проверки вызывающим (proposals.listUnseen):
+   *   отпечаток мог смениться без изменения содержимого («файл тронули»).
+   */
+  function listUnseen(baseline, current, knownRels) {
+    const items = [];
+    if (!baseline || typeof baseline !== 'object' || !current || typeof current !== 'object') {
+      return { items, truncated: false };
+    }
+    const known = knownRels instanceof Set ? knownRels : new Set(Array.isArray(knownRels) ? knownRels : []);
+    for (const rel of Object.keys(current)) {
+      if (known.has(rel)) continue;
+      const curFp = typeof current[rel] === 'string' ? current[rel] : '';
+      if (!Object.prototype.hasOwnProperty.call(baseline, rel)) {
+        items.push({ relPath: rel, isNew: true, baseHash: null, curFp });
+        continue;
+      }
+      const b = splitBaselineEntry(baseline[rel]);
+      if (b.fp === curFp) continue; // лежал изначально и его не трогали
+      items.push({ relPath: rel, isNew: false, baseHash: b.hash, curFp });
+    }
+    items.sort((a, b) => a.relPath.localeCompare(b.relPath));
+    const truncated = items.length > MAX_UNSEEN;
+    return { items: truncated ? items.slice(0, MAX_UNSEEN) : items, truncated };
+  }
+
+  /**
+   * Переименование/перемещение пути в журнале знания (этап D).
+   *
+   * Знание привязано к СОДЕРЖИМОМУ, а пользовательское переименование содержимое не
+   * меняет — поэтому запись переезжает вместе с файлом. Без этого каждое переименование
+   * давало бы два ложных сигнала: «модель знает версию файла, которого больше нет» по
+   * старому пути и «новый файл, которого модель не видела» по новому. Работает и для
+   * файла, и для папки (замена префикса у всех вложенных путей), во всех чатах проекта.
+   *
+   * @returns {number} сколько записей перенесено
+   */
+  function renamePaths(known, projectId, fromRel, toRel) {
+    if (!known || typeof known !== 'object') return 0;
+    if (typeof fromRel !== 'string' || !fromRel || typeof toRel !== 'string' || !toRel) return 0;
+    if (fromRel === toRel) return 0;
+    const prefix = fromRel + '/';
+    const newPrefix = toRel + '/';
+    let n = 0;
+    for (const bucket of Object.values(known)) {
+      if (!bucket || typeof bucket !== 'object') continue;
+      for (const [k, v] of Object.entries(bucket)) {
+        const p = splitKey(k);
+        if (!p || p.projectId !== projectId) continue;
+        let newRel = null;
+        if (p.relPath === fromRel) newRel = toRel;
+        else if (p.relPath.startsWith(prefix)) newRel = newPrefix + p.relPath.slice(prefix.length);
+        if (!newRel) continue;
+        delete bucket[k];
+        bucket[key(projectId, newRel)] = v;
+        n++;
+      }
+    }
+    return n;
+  }
+
   // ---------- какие блоки ответа модели уже видели ----------
   //
   // Отдельная задача, но тот же принцип учёта. preload-chat.js считает «историей» только то,
@@ -183,9 +281,10 @@
   }
 
   return {
-    SOURCES, SOURCE_LABEL, KEY_SEP, MAX_KNOWN_PER_CHAT, MAX_SEEN_PER_CHAT,
+    SOURCES, SOURCE_LABEL, KEY_SEP, MAX_KNOWN_PER_CHAT, MAX_SEEN_PER_CHAT, MAX_UNSEEN,
     key, splitKey, isDiverged,
     record, knownVersion, entries, divergences, knownHashes, prune, dropChat,
+    listUnseen, renamePaths, splitBaselineEntry,
     markSeen, wasSeen, dropChatSeen,
   };
 });
